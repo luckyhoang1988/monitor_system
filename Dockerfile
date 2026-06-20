@@ -6,14 +6,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# System dependencies for easysnmp (libsnmp), psycopg2, cryptography
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        gcc \
-        libsnmp-dev \
-        snmp-mibs-downloader \
-        libpq-dev \
-    && rm -rf /var/lib/apt/lists/*
-
+# Dependencies đều là wheel (psycopg2-binary, cryptography) và pysnmp pure-Python,
+# nên không cần compiler hay system lib để build.
 COPY requirements/prod.txt requirements/prod.txt
 COPY requirements/base.txt requirements/base.txt
 RUN pip install --upgrade pip \
@@ -29,12 +23,6 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# Runtime-only system libs
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        libsnmp40 \
-        libpq5 \
-    && rm -rf /var/lib/apt/lists/*
-
 # Copy installed packages from builder
 COPY --from=builder /install /usr/local
 
@@ -44,11 +32,11 @@ RUN addgroup --system appgroup && adduser --system --ingroup appgroup appuser
 COPY --chown=appuser:appgroup . .
 
 RUN mkdir -p staticfiles backups \
-    && chown -R appuser:appgroup staticfiles backups
+    && chown -R appuser:appgroup staticfiles backups \
+    && chmod +x /app/entrypoint.sh
 
 USER appuser
 
 EXPOSE 8000
 
-COPY entrypoint.sh /entrypoint.sh
-ENTRYPOINT ["/entrypoint.sh"]
+ENTRYPOINT ["bash", "/app/entrypoint.sh"]

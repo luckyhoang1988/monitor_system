@@ -12,6 +12,7 @@ build/
 .env
 .env.local
 *.env
+.env.production
 
 # Django
 db.sqlite3
@@ -31,3 +32,6 @@ htmlcov/
 # OS
 .DS_Store
 Thumbs.db
+
+# Debug logs
+debug-*.log

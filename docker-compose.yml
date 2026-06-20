@@ -33,6 +33,7 @@ services:
     env_file: .env.production
     environment:
       DJANGO_SETTINGS_MODULE: config.settings.production
+      HOME: /tmp
     volumes:
       - static_volume:/app/staticfiles
       - backup_volume:/app/backups
@@ -42,7 +43,8 @@ services:
       redis:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "curl -fs http://localhost:8000/health/ || exit 1"]
+      # python urllib thay cho curl (image slim khong co curl)
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health/', timeout=5).status==200 else 1)\""]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -54,7 +56,8 @@ services:
     env_file: .env.production
     environment:
       DJANGO_SETTINGS_MODULE: config.settings.production
-    command: celery -A config worker -l info --concurrency=4
+      HOME: /tmp
+    command: celery -A config worker -l info --concurrency=2
     volumes:
       - backup_volume:/app/backups
     depends_on:
@@ -69,6 +72,7 @@ services:
     env_file: .env.production
     environment:
       DJANGO_SETTINGS_MODULE: config.settings.production
+      HOME: /tmp
     command: celery -A config beat -l info --scheduler django_celery_beat.schedulers:DatabaseScheduler
     depends_on:
       db:
