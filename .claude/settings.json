@@ -1,0 +1,40 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python*)",
+      "Bash(pip*)",
+      "Bash(uv*)",
+      "Bash(pytest*)",
+      "Bash(ruff*)",
+      "Bash(mypy*)",
+      "Bash(git*)",
+      "Bash(snmpwalk*)",
+      "Bash(snmpget*)",
+      "Bash(ping*)",
+      "Bash(nmap*)",
+      "Bash(curl*)",
+      "Bash(ls*)",
+      "Bash(mkdir*)",
+      "Bash(cp*)",
+      "Bash(mv*)",
+      "Bash(cat*)",
+      "Bash(grep*)",
+      "Bash(find*)",
+      "Bash(docker*)",
+      "Bash(docker-compose*)",
+      "Bash(netstat*)",
+      "Bash(pwsh*)",
+      "Bash(powershell*)"
+    ],
+    "deny": [
+      "Bash(rm -rf /)",
+      "Bash(format*)",
+      "Bash(del /f /s /q C:\\*)"
+    ]
+  },
+  "env": {
+    "PYTHONPATH": ".",
+    "LOG_LEVEL": "DEBUG",
+    "ENV": "development"
+  }
+}

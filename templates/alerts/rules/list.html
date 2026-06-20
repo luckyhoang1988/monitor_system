@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block title %}Alert Rules{% endblock %}
+{% block breadcrumb %}Alert Rules{% endblock %}
+
+{% block content %}
+<div class="d-flex align-items-center justify-content-between mb-4">
+  <h5 class="mb-0 fw-bold"><i class="bi bi-sliders me-2 text-primary"></i>Alert Rules</h5>
+  <a href="{% url 'alerts:rule_create' %}" class="btn btn-primary btn-sm">
+    <i class="bi bi-plus-lg me-1"></i>Thêm rule
+  </a>
+</div>
+
+<div class="card">
+  <div class="card-body p-0">
+    {% if rules %}
+    <table class="table table-hover mb-0">
+      <thead class="table-light">
+        <tr>
+          <th class="ps-3">Tên</th>
+          <th>Loại thiết bị</th>
+          <th>Metric</th>
+          <th>Điều kiện</th>
+          <th class="text-end">Ngưỡng</th>
+          <th>Mức độ</th>
+          <th>Kênh</th>
+          <th class="text-center">Kích hoạt</th>
+          <th class="text-end pe-3">Hành động</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for rule in rules %}
+        <tr>
+          <td class="ps-3 fw-medium">{{ rule.name }}</td>
+          <td class="text-muted">{{ rule.device_type }}</td>
+          <td class="small">{{ rule.metric_label }}</td>
+          <td class="font-monospace">{{ rule.get_condition_display }}</td>
+          <td class="text-end font-monospace">{{ rule.threshold_label }}</td>
+          <td>
+            <span class="badge {% if rule.severity == 'CRITICAL' %}badge-critical{% else %}badge-warning{% endif %} rounded-pill px-2">
+              {{ rule.severity }}
+            </span>
+          </td>
+          <td class="small text-muted">{{ rule.channels|join:", " }}</td>
+          <td class="text-center">
+            {% if rule.enabled %}
+              <i class="bi bi-check-circle-fill text-success"></i>
+            {% else %}
+              <i class="bi bi-x-circle text-secondary"></i>
+            {% endif %}
+          </td>
+          <td class="text-end pe-3">
+            <a href="{% url 'alerts:rule_edit' rule.pk %}" class="btn btn-sm btn-outline-secondary py-0 px-2 me-1" title="Sửa">
+              <i class="bi bi-pencil"></i>
+            </a>
+            <a href="{% url 'alerts:rule_delete' rule.pk %}" class="btn btn-sm btn-outline-danger py-0 px-2" title="Xóa">
+              <i class="bi bi-trash"></i>
+            </a>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <div class="text-center text-muted py-5">
+      <i class="bi bi-sliders fs-2 d-block mb-2"></i>
+      Chưa có alert rule nào.
+      <a href="{% url 'alerts:rule_create' %}">Thêm rule đầu tiên</a>
+    </div>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}

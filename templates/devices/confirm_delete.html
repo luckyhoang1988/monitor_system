@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block title %}Xóa {{ device.name }}{% endblock %}
+{% block breadcrumb %}
+  <a href="{% url 'devices:list' %}" class="text-decoration-none text-muted">Thiết bị</a>
+  <span class="mx-2 text-muted">/</span> Xóa
+{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+  <div class="col-md-5">
+    <div class="card border-danger">
+      <div class="card-header bg-danger text-white py-3">
+        <h5 class="mb-0 fw-bold"><i class="bi bi-trash me-2"></i>Xác nhận xóa thiết bị</h5>
+      </div>
+      <div class="card-body p-4 text-center">
+        <div class="text-danger mb-3" style="font-size: 3rem;"><i class="bi bi-exclamation-triangle-fill"></i></div>
+        <h5 class="fw-bold">{{ device.name }}</h5>
+        <p class="text-muted mb-1">{{ device.ip_address }} — {{ device.get_device_type_display }}</p>
+        <p class="text-danger small mt-3">
+          Xóa thiết bị sẽ xóa <strong>tất cả metrics, alerts</strong> liên quan. Hành động này <strong>không thể hoàn tác</strong>.
+        </p>
+        <div class="d-flex gap-2 justify-content-center mt-4">
+          <form method="post">
+            {% csrf_token %}
+            <button type="submit" class="btn btn-danger px-4">
+              <i class="bi bi-trash me-1"></i> Xóa vĩnh viễn
+            </button>
+          </form>
+          <a href="{% url 'devices:list' %}" class="btn btn-outline-secondary px-4">Hủy</a>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

@@ -1,0 +1,32 @@
+# Standard MIB-II (RFC 1213 + RFC 2863) — áp dụng MỌI vendor/model
+# Không cần biết vendor để dùng các OID này
+
+sys:
+  sysDescr:    "1.3.6.1.2.1.1.1.0"   # mô tả hệ thống — dùng detect os_family
+  sysObjectID: "1.3.6.1.2.1.1.2.0"   # OID vendor — dùng detect vendor
+  sysUpTime:   "1.3.6.1.2.1.1.3.0"   # uptime (TimeTicks, 1/100 giây)
+  sysName:     "1.3.6.1.2.1.1.5.0"   # hostname
+
+interfaces:
+  # SNMP table walk — dùng prefix này để walk toàn bộ interface table
+  table:        "1.3.6.1.2.1.2.2"
+  ifIndex:      "1.3.6.1.2.1.2.2.1.1"
+  ifDescr:      "1.3.6.1.2.1.2.2.1.2"   # tên interface (Gi0/1, GE0/0/1...)
+  ifType:       "1.3.6.1.2.1.2.2.1.3"   # 6=ethernetCsmacd
+  ifMtu:        "1.3.6.1.2.1.2.2.1.4"
+  ifSpeed:      "1.3.6.1.2.1.2.2.1.5"   # bps (32-bit, dùng ifHighSpeed cho GE+)
+  ifOperStatus: "1.3.6.1.2.1.2.2.1.8"   # 1=up, 2=down, 3=testing, 7=lowerLayerDown
+  ifAdminStatus:"1.3.6.1.2.1.2.2.1.7"   # 1=up, 2=down (config)
+  ifInOctets:   "1.3.6.1.2.1.2.2.1.10"  # counter bytes vào (32-bit, wrap ở ~4GB)
+  ifOutOctets:  "1.3.6.1.2.1.2.2.1.16"  # counter bytes ra
+  ifInErrors:   "1.3.6.1.2.1.2.2.1.14"  # lỗi frame vào
+  ifOutErrors:  "1.3.6.1.2.1.2.2.1.20"  # lỗi frame ra
+  ifInDiscards: "1.3.6.1.2.1.2.2.1.13"  # gói bị drop vào
+  ifOutDiscards:"1.3.6.1.2.1.2.2.1.19"  # gói bị drop ra
+
+# IF-MIB extensions (RFC 2863) — cho 64-bit counters (GigabitEthernet+)
+if_mib:
+  ifAlias:      "1.3.6.1.2.1.31.1.1.1.18"  # description/alias port — trunk/uplink label
+  ifHighSpeed:  "1.3.6.1.2.1.31.1.1.1.15"  # speed Mbps (cho GE/10GE)
+  ifHCInOctets: "1.3.6.1.2.1.31.1.1.1.6"   # 64-bit in bytes counter (không wrap)
+  ifHCOutOctets:"1.3.6.1.2.1.31.1.1.1.10"  # 64-bit out bytes counter

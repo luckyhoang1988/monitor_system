@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}Xóa Rule{% endblock %}
+{% block breadcrumb %}Xóa Alert Rule{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+  <div class="col-lg-5">
+    <div class="card border-danger">
+      <div class="card-header bg-danger text-white py-3">
+        <h6 class="mb-0"><i class="bi bi-exclamation-triangle me-2"></i>Xác nhận xóa</h6>
+      </div>
+      <div class="card-body">
+        <p class="mb-1">Bạn có chắc muốn xóa alert rule:</p>
+        <p class="fw-bold fs-5 text-danger mb-3">{{ rule.name }}</p>
+        <p class="text-muted small mb-4">
+          Tất cả alerts đã trigger từ rule này sẽ vẫn còn trong lịch sử,
+          nhưng rule sẽ không còn đánh giá nữa.
+        </p>
+        <form method="post" class="d-flex gap-2">
+          {% csrf_token %}
+          <button type="submit" class="btn btn-danger px-4">
+            <i class="bi bi-trash me-1"></i>Xóa
+          </button>
+          <a href="{% url 'alerts:rule_list' %}" class="btn btn-outline-secondary px-4">Hủy</a>
+        </form>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

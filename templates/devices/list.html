@@ -1,0 +1,157 @@
+{% extends "base.html" %}
+{% block title %}Thiết bị{% endblock %}
+{% block breadcrumb %}Danh sách thiết bị{% endblock %}
+
+{% block content %}
+<div class="d-flex align-items-center justify-content-between mb-4">
+  <h5 class="mb-0 fw-bold">Danh sách thiết bị</h5>
+  <div class="d-flex gap-2">
+    <a href="{% url 'devices:discovery' %}" class="btn btn-outline-primary btn-sm">
+      <i class="bi bi-search me-1"></i> Quét dải mạng (Auto-Discovery)
+    </a>
+    <a href="{% url 'devices:add' %}" class="btn btn-primary btn-sm">
+      <i class="bi bi-plus-circle me-1"></i> Thêm thiết bị
+    </a>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-body p-0">
+    {% if devices %}
+    <table class="table table-hover mb-0">
+      <thead class="table-light">
+        <tr>
+          <th class="ps-3">Tên</th>
+          <th>Loại</th>
+          <th>IP</th>
+          <th>Vendor</th>
+          <th>Giao thức</th>
+          <th>Trạng thái</th>
+          <th>Last Seen</th>
+          <th class="text-end pe-3">Hành động</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for d in devices %}
+        <tr>
+          <td class="ps-3 fw-medium">
+            {% if d.device_type == "switch" %}
+              <a href="{% url 'dashboard:switch_detail' d.pk %}" class="text-decoration-none">{{ d.name }}</a>
+            {% elif d.device_type == "router" %}
+              <a href="{% url 'dashboard:router_detail' d.pk %}" class="text-decoration-none">{{ d.name }}</a>
+            {% elif d.device_type == "firewall" %}
+              <a href="{% url 'dashboard:firewall_detail' d.pk %}" class="text-decoration-none">{{ d.name }}</a>
+            {% elif d.device_type == "hyperv" %}
+              <a href="{% url 'dashboard:hyperv_detail' d.pk %}" class="text-decoration-none">{{ d.name }}</a>
+            {% else %}
+              {{ d.name }}
+            {% endif %}
+          </td>
+          <td>
+            {% if d.device_type == "switch" %}
+              <span class="badge bg-primary-subtle text-primary rounded-pill px-2">Switch</span>
+            {% elif d.device_type == "router" %}
+              <span class="badge bg-warning-subtle text-warning rounded-pill px-2">Router</span>
+            {% elif d.device_type == "firewall" %}
+              <span class="badge bg-danger-subtle text-danger rounded-pill px-2">Firewall</span>
+            {% elif d.device_type == "hyperv" %}
+              <span class="badge bg-info-subtle text-info rounded-pill px-2">HyperV</span>
+            {% else %}
+              <span class="badge bg-secondary-subtle text-secondary rounded-pill px-2">{{ d.device_type }}</span>
+            {% endif %}
+          </td>
+          <td class="font-monospace text-muted">{{ d.ip_address }}</td>
+          <td>{{ d.get_vendor_display }}</td>
+          <td class="text-uppercase small text-muted">{{ d.protocol }}</td>
+          <td>
+            {% if not d.enabled %}
+              <span class="badge bg-secondary rounded-pill px-2">Disabled</span>
+            {% elif d.is_online %}
+              <span class="badge badge-online rounded-pill px-2">Online</span>
+            {% else %}
+              <span class="badge badge-offline rounded-pill px-2">Offline</span>
+            {% endif %}
+          </td>
+          <td class="text-muted small">
+            {{ d.last_seen|date:"d/m H:i"|default:"—" }}
+          </td>
+          <td class="text-end pe-3">
+            <div class="d-flex justify-content-end gap-1">
+              <button class="btn btn-sm btn-outline-secondary py-0 px-2 btn-test"
+                      data-id="{{ d.pk }}" title="Test kết nối">
+                <i class="bi bi-plug"></i>
+              </button>
+              <a href="{% url 'devices:edit' d.pk %}"
+                 class="btn btn-sm btn-outline-secondary py-0 px-2" title="Sửa">
+                <i class="bi bi-pencil"></i>
+              </a>
+              <a href="{% url 'devices:delete' d.pk %}"
+                 class="btn btn-sm btn-outline-danger py-0 px-2" title="Xóa">
+                <i class="bi bi-trash"></i>
+              </a>
+            </div>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+      <div class="text-center text-muted py-5">
+        <i class="bi bi-hdd-network fs-1 d-block mb-3"></i>
+        <p>Chưa có thiết bị nào.</p>
+        <a href="{% url 'devices:add' %}" class="btn btn-primary">
+          <i class="bi bi-plus-circle me-1"></i> Thêm thiết bị đầu tiên
+        </a>
+      </div>
+    {% endif %}
+  </div>
+</div>
+
+<!-- Toast notification -->
+<div class="position-fixed bottom-0 end-0 p-3" style="z-index:1100">
+  <div id="testToast" class="toast" role="alert">
+    <div class="toast-header">
+      <i class="bi bi-plug me-2"></i>
+      <strong class="me-auto">Test Kết Nối</strong>
+      <button type="button" class="btn-close" data-bs-dismiss="toast"></button>
+    </div>
+    <div class="toast-body" id="testToastBody"></div>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+const toast    = new bootstrap.Toast(document.getElementById("testToast"));
+const toastBody = document.getElementById("testToastBody");
+
+document.querySelectorAll(".btn-test").forEach(btn => {
+  btn.addEventListener("click", function () {
+    const id = this.dataset.id;
+    this.disabled = true;
+    this.innerHTML = '<span class="spinner-border spinner-border-sm"></span>';
+    fetch(`/devices/${id}/test/`)
+      .then(r => r.json())
+      .then(d => {
+        toastBody.textContent = d.message;
+        document.getElementById("testToast").classList.toggle("bg-success-subtle", d.success);
+        document.getElementById("testToast").classList.toggle("bg-danger-subtle", !d.success);
+        toast.show();
+        if (d.success && d.is_online) {
+          const row = document.querySelector(`[data-id="${id}"]`).closest("tr");
+          const badge = row.querySelector(".badge-offline, .badge-secondary");
+          if (badge) {
+            badge.className = "badge badge-online rounded-pill px-2";
+            badge.textContent = "Online";
+          }
+        }
+      })
+      .catch(() => { toastBody.textContent = "Lỗi kết nối."; toast.show(); })
+      .finally(() => {
+        this.disabled = false;
+        this.innerHTML = '<i class="bi bi-plug"></i>';
+      });
+  });
+});
+</script>
+{% endblock %}

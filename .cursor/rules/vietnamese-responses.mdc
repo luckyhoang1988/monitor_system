@@ -1,0 +1,10 @@
+---
+description: Vietnamese response preference
+alwaysApply: true
+---
+
+# Vietnamese Responses
+
+- Luôn trả lời người dùng bằng tiếng Việt.
+- Khi cần cài đặt package, công cụ hoặc cấu hình môi trường, hãy hướng dẫn rõ các bước cài đặt và lệnh cần chạy.
+- Nếu có nhiều cách cài đặt, ưu tiên cách phù hợp với Windows/PowerShell trong workspace này.

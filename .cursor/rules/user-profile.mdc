@@ -1,0 +1,37 @@
+---
+description: Thông tin người dùng và ngữ cảnh làm việc
+alwaysApply: true
+---
+
+# Hồ sơ người dùng
+
+## Thông tin cá nhân
+- Người Việt Nam, làm việc tại Việt Nam
+- Ngôn ngữ giao tiếp: **tiếng Việt**
+
+## Vai trò & công việc chính
+- **Quản trị hệ thống mạng (Network/System Admin)**
+- Triển khai và vận hành các **webapp nội bộ** cho doanh nghiệp
+- Thường xuyên **cấu hình thiết bị mạng** (switch, router, firewall, server)
+- Đôi khi cần AI **truy cập thiết bị để review config** và đề xuất kế hoạch tối ưu
+
+## Công nghệ đang dùng
+| Lĩnh vực | Công nghệ |
+|----------|-----------|
+| Ngôn ngữ lập trình | Python |
+| Web framework | Django, Odoo |
+| Desktop app | PyQt6 |
+| Hạ tầng mạng | Cisco, Huawei, MikroTik, Fortinet |
+| Ảo hóa | Hyper-V Server |
+
+## Trình độ hiện tại
+- Python / Django: **đang vừa làm vừa học** — cần giải thích rõ ràng, không bỏ qua bước nào
+- Mạng / hệ thống: **kinh nghiệm thực tế tốt**
+
+## Cách AI nên hỗ trợ
+1. **Luôn giải thích ngắn gọn** tại sao trước khi làm
+2. **Làm trực tiếp thay** người dùng khi có thể (sửa file, tạo config, chạy lệnh)
+3. Nếu cần thao tác thủ công: **liệt kê rõ từng bước** với lệnh Windows/PowerShell cụ thể
+4. Khi review config thiết bị: đưa ra **nhận xét + kế hoạch tối ưu** có ưu tiên rõ ràng
+5. Không dùng thuật ngữ kỹ thuật mà không giải thích kèm theo
+6. Workspace hiện tại: `d:\15.Python\python-project\monitor_system` (Windows, PowerShell)

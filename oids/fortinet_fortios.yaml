@@ -1,0 +1,30 @@
+# Fortinet FortiOS 7 — SNMP OID Profile
+# Enterprise OID prefix: 1.3.6.1.4.1.12356 (FORTINET-FORTIGATE-MIB)
+# Áp dụng cho FortiGate Firewall
+
+os_family: fortinet_fortios
+snmp_versions: [v2c, v3]
+enterprise_oid_prefix: "1.3.6.1.4.1.12356"
+
+# sysDescr thường chứa: "FortiGate-<model>" hoặc "Fortinet" + "FortiOS"
+# sysObjectID: 1.3.6.1.4.1.12356.101.1.<model_id>
+
+cpu:
+  # fgSysCpuUsage — CPU usage percentage (direct %)
+  cpu_usage: "1.3.6.1.4.1.12356.101.4.1.3.0"
+
+memory:
+  # fgSysMemUsage — Memory usage percentage (direct %)
+  mem_usage: "1.3.6.1.4.1.12356.101.4.1.4.0"
+  # Không cần tính toán — đã là %
+
+extra:
+  # fgSysSesCount — số phiên kết nối hiện tại (active sessions)
+  session_count: "1.3.6.1.4.1.12356.101.4.1.8.0"
+
+# sysUpTime từ MIB-II chuẩn (TimeTicks, 1/100 giây)
+
+ssh_commands:
+  cpu_mem:    "get system performance status"
+  interfaces: "get system interface physical"
+  version:    "get system status"

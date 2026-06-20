@@ -1,0 +1,132 @@
+{% extends "base.html" %}
+{% block title %}{{ title }}{% endblock %}
+{% block breadcrumb %}{{ title }}{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+  <div class="col-lg-7">
+    <div class="card">
+      <div class="card-header bg-white py-3">
+        <h6 class="mb-0 fw-bold"><i class="bi bi-sliders me-2 text-primary"></i>{{ title }}</h6>
+      </div>
+      <div class="card-body">
+        <form method="post" novalidate>
+          {% csrf_token %}
+
+          <div class="mb-3">
+            <label class="form-label fw-medium">Tên rule <span class="text-danger">*</span></label>
+            {{ form.name }}
+            {% if form.name.errors %}<div class="text-danger small mt-1">{{ form.name.errors.0 }}</div>{% endif %}
+          </div>
+
+          <div class="row mb-3">
+            <div class="col-md-6">
+              <label class="form-label fw-medium">Loại thiết bị</label>
+              {{ form.device_type }}
+            </div>
+            <div class="col-md-6">
+              <label class="form-label fw-medium">Metric <span class="text-danger">*</span></label>
+              {{ form.metric }}
+            </div>
+          </div>
+
+          <div class="row mb-3">
+            <div class="col-md-4">
+              <label class="form-label fw-medium">Điều kiện</label>
+              {{ form.condition }}
+            </div>
+            <div class="col-md-4">
+              <label class="form-label fw-medium">Ngưỡng <span class="text-danger">*</span>
+                <span class="text-muted small ms-1" id="thresholdUnit"></span>
+              </label>
+              {{ form.threshold }}
+              <div class="form-text" id="thresholdHint"></div>
+            </div>
+            <div class="col-md-4">
+              <label class="form-label fw-medium">Kéo dài (phút)</label>
+              {{ form.duration_min }}
+              <div class="form-text">0 = trigger ngay</div>
+            </div>
+          </div>
+
+          <div class="mb-3">
+            <label class="form-label fw-medium">Mức độ</label>
+            {{ form.severity }}
+          </div>
+
+          <div class="mb-3">
+            <label class="form-label fw-medium d-block">Kênh thông báo</label>
+            <div class="d-flex gap-4 mt-1">
+              {% for checkbox in form.channels %}
+              <div class="form-check">
+                {{ checkbox.tag }}
+                <label class="form-check-label" for="{{ checkbox.id_for_label }}">{{ checkbox.choice_label }}</label>
+              </div>
+              {% endfor %}
+            </div>
+          </div>
+
+          <div class="mb-4">
+            <div class="form-check">
+              {{ form.enabled }}
+              <label class="form-check-label" for="{{ form.enabled.id_for_label }}">Kích hoạt rule này</label>
+            </div>
+          </div>
+
+          <div class="d-flex gap-2">
+            <button type="submit" class="btn btn-primary px-4">
+              <i class="bi bi-check-lg me-1"></i>Lưu
+            </button>
+            <a href="{% url 'alerts:rule_list' %}" class="btn btn-outline-secondary px-4">Hủy</a>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+function metricMeta(metric) {
+  switch (metric) {
+    case "cpu_percent":
+    case "mem_percent":
+      return { unit: "%", step: "0.1", placeholder: "80", hint: "Ví dụ: 80 (%)" };
+    case "uplink_in_mbps_max":
+    case "uplink_out_mbps_max":
+      return { unit: "Mbps", step: "0.001", placeholder: "800", hint: "Ví dụ: 800 (Mbps)" };
+    case "fw_session_count":
+      return { unit: "sessions", step: "1", placeholder: "200000", hint: "Ví dụ: 200000 sessions" };
+    case "vm_count_running":
+      return { unit: "VM", step: "1", placeholder: "1", hint: "Ví dụ: 1 VM" };
+    case "vm_repl_unhealthy":
+      return { unit: "VM", step: "1", placeholder: "0", hint: "Ví dụ: > 0 VM replication lỗi" };
+    case "if_status":
+      return { unit: "UP/DOWN", step: "1", placeholder: "0", hint: "0 = DOWN, 1 = UP (thường dùng eq 0 để báo DOWN)" };
+    default:
+      return { unit: "", step: "0.1", placeholder: "", hint: "" };
+  }
+}
+
+function applyThresholdMeta() {
+  const metricEl = document.getElementById("id_metric");
+  const thrEl = document.getElementById("id_threshold");
+  const unitEl = document.getElementById("thresholdUnit");
+  const hintEl = document.getElementById("thresholdHint");
+  if (!metricEl || !thrEl) return;
+
+  const meta = metricMeta(metricEl.value);
+  unitEl.textContent = meta.unit ? `(${meta.unit})` : "";
+  thrEl.setAttribute("step", meta.step);
+  if (meta.placeholder) thrEl.setAttribute("placeholder", meta.placeholder);
+  hintEl.textContent = meta.hint || "";
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+  applyThresholdMeta();
+  const metricEl = document.getElementById("id_metric");
+  if (metricEl) metricEl.addEventListener("change", applyThresholdMeta);
+});
+</script>
+{% endblock %}

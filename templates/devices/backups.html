@@ -1,0 +1,185 @@
+{% extends "base.html" %}
+{% block title %}Sao lưu cấu hình - {{ device.name }}{% endblock %}
+{% block breadcrumb %}Sao lưu cấu hình{% endblock %}
+
+{% block content %}
+<div class="d-flex align-items-center justify-content-between mb-4">
+  <div>
+    <h5 class="mb-1 fw-bold">Lịch sử sao lưu cấu hình</h5>
+    <p class="text-muted small mb-0">Thiết bị: <span class="fw-bold">{{ device.name }}</span> ({{ device.ip_address }}) | Hãng: {{ device.get_vendor_display }}</p>
+  </div>
+  <div class="d-flex gap-2">
+    {% if device.device_type == "switch" %}
+      <a href="{% url 'dashboard:switch_detail' device.pk %}" class="btn btn-outline-secondary btn-sm">
+        <i class="bi bi-arrow-left me-1"></i> Trở lại chi tiết
+      </a>
+    {% elif device.device_type == "router" %}
+      <a href="{% url 'dashboard:router_detail' device.pk %}" class="btn btn-outline-secondary btn-sm">
+        <i class="bi bi-arrow-left me-1"></i> Trở lại chi tiết
+      </a>
+    {% else %}
+      <a href="{% url 'devices:list' %}" class="btn btn-outline-secondary btn-sm">
+        <i class="bi bi-arrow-left me-1"></i> Trở lại danh sách
+      </a>
+    {% endif %}
+
+    {% if device.protocol == "ssh" %}
+      <button id="btnRunBackup" class="btn btn-primary btn-sm">
+        <i class="bi bi-cloud-arrow-up-fill me-1"></i> Sao lưu ngay
+      </button>
+    {% endif %}
+  </div>
+</div>
+
+<!-- Cảnh báo cấu hình SSH -->
+{% if device.protocol != "ssh" %}
+<div class="alert alert-warning d-flex align-items-center mb-4" role="alert">
+  <i class="bi bi-exclamation-triangle-fill fs-4 me-3"></i>
+  <div>
+    <strong>Thiết bị không hỗ trợ sao lưu cấu hình tự động!</strong> Tính năng này yêu cầu thiết bị sử dụng giao thức <strong>SSH</strong> để kết nối và tải file cấu hình. Hiện tại thiết bị đang sử dụng giao thức <strong>{{ device.protocol|upper }}</strong>.
+  </div>
+</div>
+{% elif not device.ssh_username or not device.ssh_password %}
+<div class="alert alert-danger d-flex align-items-center mb-4" role="alert">
+  <i class="bi bi-shield-slash-fill fs-4 me-3"></i>
+  <div>
+    <strong>Chưa cấu hình tài khoản SSH!</strong> Vui lòng <a href="{% url 'devices:edit' device.pk %}" class="alert-link">sửa thiết bị</a> để cập nhật thông tin SSH Username và SSH Password trước khi thực hiện sao lưu.
+  </div>
+</div>
+{% endif %}
+
+<!-- Trạng thái Loading -->
+<div id="backupLoading" class="text-center py-5 d-none">
+  <div class="spinner-border text-primary mb-3" style="width: 3rem; height: 3rem;" role="status"></div>
+  <h6 class="fw-bold text-primary">Đang kết nối SSH và tải cấu hình thiết bị...</h6>
+  <p class="text-muted small">Thời gian xử lý có thể kéo dài từ 10 - 20 giây tùy thuộc vào tốc độ mạng và độ dài file cấu hình.</p>
+</div>
+
+<!-- Bảng Lịch sử Backup -->
+<div class="card" id="backupsCard">
+  <div class="card-header bg-light py-3">
+    <h6 class="mb-0 fw-bold"><i class="bi bi-file-earmark-code-fill me-2 text-primary"></i>Các bản cấu hình đã lưu</h6>
+  </div>
+  <div class="card-body p-0">
+    {% if backups %}
+    <div class="table-responsive">
+      <table class="table table-hover mb-0">
+        <thead class="table-light">
+          <tr>
+            <th class="ps-3">Tên file cấu hình</th>
+            <th>Kích thước</th>
+            <th>Thời gian sao lưu</th>
+            <th class="text-end pe-3">Hành động</th>
+          </tr>
+        </thead>
+        <tbody id="backupsBody">
+          {% for b in backups %}
+          <tr>
+            <td class="ps-3 font-monospace fw-bold text-dark">
+              <i class="bi bi-file-text text-muted me-2"></i>{{ b.filename }}
+            </td>
+            <td class="text-muted">{{ b.size_kb }} KB</td>
+            <td>{{ b.created_at }}</td>
+            <td class="text-end pe-3">
+              <a href="{% url 'devices:download_backup' device.pk b.filename %}" class="btn btn-outline-success btn-sm py-0 px-2">
+                <i class="bi bi-download me-1"></i> Tải về
+              </a>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+      <div id="noBackupsMessage" class="text-center text-muted py-5">
+        <i class="bi bi-cloud-slash fs-1 d-block mb-3 text-secondary"></i>
+        <p>Chưa có bản sao lưu nào cho thiết bị này.</p>
+      </div>
+      <div class="table-responsive d-none" id="dynamicTableContainer">
+        <table class="table table-hover mb-0">
+          <thead class="table-light">
+            <tr>
+              <th class="ps-3">Tên file cấu hình</th>
+              <th>Kích thước</th>
+              <th>Thời gian sao lưu</th>
+              <th class="text-end pe-3">Hành động</th>
+            </tr>
+          </thead>
+          <tbody id="dynamicBackupsBody"></tbody>
+        </table>
+      </div>
+    {% endif %}
+  </div>
+</div>
+
+<!-- Toast notification -->
+<div class="position-fixed bottom-0 end-0 p-3" style="z-index:1100">
+  <div id="backupToast" class="toast" role="alert">
+    <div class="toast-header">
+      <i class="bi bi-shield-fill-check me-2"></i>
+      <strong class="me-auto" id="toastTitle">Backup Cấu Hình</strong>
+      <button type="button" class="btn-close" data-bs-dismiss="toast"></button>
+    </div>
+    <div class="toast-body" id="backupToastBody"></div>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+const toast = new bootstrap.Toast(document.getElementById("backupToast"));
+const toastBody = document.getElementById("backupToastBody");
+const toastTitle = document.getElementById("toastTitle");
+
+const btnRunBackup = document.getElementById("btnRunBackup");
+if (btnRunBackup) {
+  btnRunBackup.addEventListener("click", function () {
+    const backupLoading = document.getElementById("backupLoading");
+    const backupsCard = document.getElementById("backupsCard");
+    const noBackupsMessage = document.getElementById("noBackupsMessage");
+    const dynamicTableContainer = document.getElementById("dynamicTableContainer");
+    const dynamicBackupsBody = document.getElementById("dynamicBackupsBody");
+    const backupsBody = document.getElementById("backupsBody");
+    
+    this.disabled = true;
+    backupLoading.classList.remove("d-none");
+    backupsCard.classList.add("d-none");
+    
+    fetch("{% url 'devices:run_backup' device.pk %}")
+      .then(r => r.json())
+      .then(d => {
+        if (d.success) {
+          toastTitle.textContent = "Thành công";
+          toastBody.textContent = d.message;
+          document.getElementById("backupToast").className = "toast bg-success-subtle";
+          toast.show();
+          
+          // Tự động reload để hiển thị bản ghi mới
+          setTimeout(() => {
+            window.location.reload();
+          }, 1500);
+        } else {
+          toastTitle.textContent = "Thất bại";
+          toastBody.textContent = d.message;
+          document.getElementById("backupToast").className = "toast bg-danger-subtle";
+          toast.show();
+          
+          backupLoading.classList.add("d-none");
+          backupsCard.classList.remove("d-none");
+          this.disabled = false;
+        }
+      })
+      .catch(() => {
+        toastTitle.textContent = "Lỗi";
+        toastBody.textContent = "Lỗi kết nối hoặc xử lý server.";
+        document.getElementById("backupToast").className = "toast bg-danger-subtle";
+        toast.show();
+        
+        backupLoading.classList.add("d-none");
+        backupsCard.classList.remove("d-none");
+        this.disabled = false;
+      });
+  });
+}
+</script>
+{% endblock %}

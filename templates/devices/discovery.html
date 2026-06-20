@@ -1,0 +1,227 @@
+{% extends "base.html" %}
+{% block title %}Tự động phát hiện thiết bị{% endblock %}
+{% block breadcrumb %}Auto-Discovery{% endblock %}
+
+{% block content %}
+<div class="d-flex align-items-center justify-content-between mb-4">
+  <h5 class="mb-0 fw-bold">Tự động phát hiện thiết bị (Auto-Discovery)</h5>
+  <a href="{% url 'devices:list' %}" class="btn btn-outline-secondary btn-sm">
+    <i class="bi bi-arrow-left me-1"></i> Quay lại danh sách
+  </a>
+</div>
+
+<div class="row mb-4">
+  <div class="col-md-12">
+    <div class="card">
+      <div class="card-body">
+        <h6 class="fw-bold mb-3"><i class="bi bi-search me-2 text-primary"></i>Quét Dải Mạng IP (Subnet)</h6>
+        <form id="scanForm" class="row g-3 align-items-end">
+          {% csrf_token %}
+          <div class="col-md-5">
+            <label for="subnet" class="form-label small fw-medium text-muted">Dải IP (Ví dụ: 192.168.1.0/24)</label>
+            <input type="text" class="form-control form-control-sm font-monospace" id="subnet" name="subnet" placeholder="192.168.1.0/24" required>
+          </div>
+          <div class="col-md-4">
+            <label for="community" class="form-label small fw-medium text-muted">SNMP Community String (Mặc định: public)</label>
+            <input type="text" class="form-control form-control-sm font-monospace" id="community" name="community" placeholder="public" value="public">
+          </div>
+          <div class="col-md-3">
+            <button type="submit" id="btnScan" class="btn btn-primary btn-sm w-100">
+              <i class="bi bi-radar me-1"></i> Bắt đầu Quét Mạng
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Quá trình Quét (Loading) -->
+<div id="scanLoading" class="text-center py-5 d-none">
+  <div class="spinner-grow text-primary mb-3" style="width: 3rem; height: 3rem;" role="status"></div>
+  <h6 class="fw-bold text-primary">Đang quét dải mạng...</h6>
+  <p class="text-muted small">Quá trình này có thể mất từ 5 - 10 giây tùy thuộc vào số lượng thiết bị hoạt động.</p>
+</div>
+
+<!-- Danh sách thiết bị quét được -->
+<div class="card d-none" id="resultsCard">
+  <div class="card-header bg-light py-3 d-flex justify-content-between align-items-center">
+    <h6 class="mb-0 fw-bold"><i class="bi bi-hdd-network me-2 text-success"></i>Kết quả quét dải mạng (<span id="resultsCount">0</span> thiết bị)</h6>
+  </div>
+  <div class="card-body p-0">
+    <div class="table-responsive">
+      <table class="table table-hover mb-0" id="resultsTable">
+        <thead class="table-light">
+          <tr>
+            <th class="ps-3">Địa chỉ IP</th>
+            <th>Tên Hostname</th>
+            <th>SNMP Status</th>
+            <th>Mô tả SNMP (SysDescr)</th>
+            <th class="text-end pe-3">Hành động</th>
+          </tr>
+        </thead>
+        <tbody id="resultsBody">
+          <!-- Data inserted via AJAX -->
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- Lịch sử các thiết bị phát hiện gần đây -->
+<div class="card mt-4" id="historyCard">
+  <div class="card-header bg-light py-3">
+    <h6 class="mb-0 fw-bold"><i class="bi bi-clock-history me-2 text-muted"></i>Thiết bị phát hiện gần đây</h6>
+  </div>
+  <div class="card-body p-0">
+    {% if discovered %}
+    <div class="table-responsive">
+      <table class="table table-hover mb-0">
+        <thead class="table-light">
+          <tr>
+            <th class="ps-3">Địa chỉ IP</th>
+            <th>Tên Hostname</th>
+            <th>SNMP Status</th>
+            <th>Mô tả SNMP (SysDescr)</th>
+            <th>Thời gian phát hiện</th>
+            <th class="text-end pe-3">Trạng thái</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for d in discovered %}
+          <tr>
+            <td class="ps-3 font-monospace fw-bold text-dark">{{ d.ip_address }}</td>
+            <td class="text-muted">{{ d.hostname|default:"—" }}</td>
+            <td>
+              {% if d.snmp_status %}
+                <span class="badge bg-success-subtle text-success rounded-pill px-2">SNMP OK</span>
+              {% else %}
+                <span class="badge bg-secondary-subtle text-secondary rounded-pill px-2">No SNMP</span>
+              {% endif %}
+            </td>
+            <td class="small text-muted text-truncate" style="max-width: 300px;" title="{{ d.sys_descr }}">
+              {{ d.sys_descr|default:"—" }}
+            </td>
+            <td class="text-muted small">{{ d.discovered_at|date:"H:i:s d/m/Y" }}</td>
+            <td class="text-end pe-3">
+              {% if d.is_imported %}
+                <span class="badge bg-success rounded-pill px-2"><i class="bi bi-check-circle me-1"></i>Đã Import</span>
+              {% else %}
+                <a href="{% url 'devices:add' %}?ip_address={{ d.ip_address }}&name={{ d.hostname }}&snmp_community={% if d.snmp_status %}public{% endif %}&protocol={% if d.snmp_status %}snmp{% else %}ping{% endif %}"
+                   class="btn btn-primary btn-sm py-0 px-2">
+                  Import
+                </a>
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+      <div class="text-center text-muted py-5">
+        <i class="bi bi-radar fs-1 d-block mb-3 text-secondary"></i>
+        <p>Chưa có thiết bị nào được quét trước đó.</p>
+      </div>
+    {% endif %}
+  </div>
+</div>
+
+<!-- Toast notification -->
+<div class="position-fixed bottom-0 end-0 p-3" style="z-index:1100">
+  <div id="scanToast" class="toast" role="alert">
+    <div class="toast-header">
+      <i class="bi bi-info-circle me-2"></i>
+      <strong class="me-auto" id="toastTitle">Auto-Discovery</strong>
+      <button type="button" class="btn-close" data-bs-dismiss="toast"></button>
+    </div>
+    <div class="toast-body" id="scanToastBody"></div>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+const toast = new bootstrap.Toast(document.getElementById("scanToast"));
+const toastBody = document.getElementById("scanToastBody");
+const toastTitle = document.getElementById("toastTitle");
+
+document.getElementById("scanForm").addEventListener("submit", function (e) {
+  e.preventDefault();
+  
+  const btnScan = document.getElementById("btnScan");
+  const scanLoading = document.getElementById("scanLoading");
+  const resultsCard = document.getElementById("resultsCard");
+  const historyCard = document.getElementById("historyCard");
+  const resultsBody = document.getElementById("resultsBody");
+  
+  btnScan.disabled = true;
+  scanLoading.classList.remove("d-none");
+  resultsCard.classList.add("d-none");
+  historyCard.classList.add("d-none");
+  
+  const formData = new FormData(this);
+  
+  fetch("{% url 'devices:discovery_scan' %}", {
+    method: "POST",
+    body: formData,
+    headers: {
+      "X-CSRFToken": formData.get("csrfmiddlewaretoken")
+    }
+  })
+  .then(r => r.json())
+  .then(d => {
+    if (d.success) {
+      document.getElementById("resultsCount").textContent = d.count;
+      resultsBody.innerHTML = "";
+      
+      if (d.devices.length > 0) {
+        d.devices.forEach(dev => {
+          const snmpBadge = dev.snmp_status 
+            ? '<span class="badge bg-success-subtle text-success rounded-pill px-2">SNMP OK</span>' 
+            : '<span class="badge bg-secondary-subtle text-secondary rounded-pill px-2">No SNMP</span>';
+            
+          const actionBtn = dev.is_imported
+            ? '<span class="badge bg-success rounded-pill px-2"><i class="bi bi-check-circle me-1"></i>Đã Import</span>'
+            : `<a href="{% url 'devices:add' %}?ip_address=${dev.ip_address}&name=${dev.hostname}&protocol=${dev.snmp_status ? 'snmp' : 'ping'}&snmp_community=${dev.snmp_status ? 'public' : ''}" class="btn btn-primary btn-sm py-0 px-2">Import</a>`;
+            
+          const tr = document.createElement("tr");
+          tr.innerHTML = `
+            <td class="font-monospace fw-bold text-dark">${dev.ip_address}</td>
+            <td class="text-muted">${dev.hostname || '—'}</td>
+            <td>${snmpBadge}</td>
+            <td class="small text-muted text-truncate" style="max-width: 300px;" title="${dev.sys_descr || ''}">${dev.sys_descr || '—'}</td>
+            <td class="text-end pe-3">${actionBtn}</td>
+          `;
+          resultsBody.appendChild(tr);
+        });
+      } else {
+        resultsBody.innerHTML = '<tr><td colspan="5" class="text-center text-muted py-4">Không tìm thấy thiết bị nào đang hoạt động trong dải mạng này.</td></tr>';
+      }
+      
+      resultsCard.classList.remove("d-none");
+      toastTitle.textContent = "Quét mạng thành công";
+      toastBody.textContent = `Quét hoàn tất! Tìm thấy ${d.count} thiết bị đang hoạt động.`;
+      document.getElementById("scanToast").className = "toast bg-success-subtle";
+      toast.show();
+    } else {
+      toastTitle.textContent = "Lỗi quét mạng";
+      toastBody.textContent = d.message;
+      document.getElementById("scanToast").className = "toast bg-danger-subtle";
+      toast.show();
+    }
+  })
+  .catch((exc) => {
+    toastTitle.textContent = "Lỗi";
+    toastBody.textContent = "Lỗi kết nối hoặc xử lý server.";
+    document.getElementById("scanToast").className = "toast bg-danger-subtle";
+    toast.show();
+  })
+  .finally(() => {
+    btnScan.disabled = false;
+    scanLoading.classList.add("d-none");
+    historyCard.classList.remove("d-none");
+  });
+});
+</script>
+{% endblock %}

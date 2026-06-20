@@ -1,0 +1,30 @@
+# MikroTik RouterOS 7 — SNMP OID Profile
+# Enterprise OID prefix: 1.3.6.1.4.1.14988 (MIKROTIK-MIB)
+# Áp dụng cho cả Router lẫn Switch chạy RouterOS
+
+os_family: mikrotik_routeros
+snmp_versions: [v2c, v3]
+enterprise_oid_prefix: "1.3.6.1.4.1.14988"
+
+# sysDescr thường chứa: "RouterOS <version>"
+# sysObjectID thường bắt đầu bằng: 1.3.6.1.4.1.14988.1
+
+cpu:
+  # mtxrProcessorTable: walk OID này, lấy value của entry đầu tiên (index .1)
+  # Đơn vị: % (integer 0-100)
+  processor_table: "1.3.6.1.4.1.14988.1.1.3.1.2"
+
+memory:
+  # mtxrMemoryTable — entry index .1 = main memory pool
+  # Đơn vị: bytes
+  mem_used:  "1.3.6.1.4.1.14988.1.1.2.1.4"
+  mem_total: "1.3.6.1.4.1.14988.1.1.2.1.3"
+  # mem_percent = mem_used / mem_total * 100
+
+# sysUpTime từ MIB-II chuẩn (TimeTicks, 1/100 giây)
+# Dùng chung với standard_mib2.yaml
+
+ssh_commands:
+  resource:   "/system resource print"
+  interfaces: "/interface print detail"
+  version:    "/system resource print"

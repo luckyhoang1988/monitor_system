@@ -1,0 +1,314 @@
+"""API endpoints cho metrics — tự động chọn raw/hourly/daily theo time range."""
+from collections import defaultdict
+from django.conf import settings
+from django.http import JsonResponse
+from django.contrib.auth.decorators import login_required
+from django.shortcuts import get_object_or_404
+from django.utils import timezone
+from django.db.models import OuterRef, Subquery
+from datetime import timedelta
+from .models import (
+    SystemHealth, InterfaceStats,
+    SystemHealthHourly, SystemHealthDaily,
+    InterfaceStatsHourly, InterfaceStatsDaily,
+)
+from apps.devices.models import Device, Interface
+
+
+# Mapping range string → (timedelta, data_source)
+# data_source: "raw" | "hourly" | "daily"
+RANGE_CONFIG = {
+    "1h":  (timedelta(hours=1),  "raw"),
+    "6h":  (timedelta(hours=6),  "raw"),
+    "24h": (timedelta(hours=24), "raw"),
+    "7d":  (timedelta(days=7),   "hourly"),
+    "30d": (timedelta(days=30),  "daily"),
+    "90d": (timedelta(days=90),  "daily"),
+}
+
+
+def _parse_range(range_str: str) -> tuple[timedelta, str]:
+    """Parse range string → (timedelta, data_source)."""
+    delta, source = RANGE_CONFIG.get(range_str, (timedelta(hours=1), "raw"))
+    return delta, source
+
+
+def _format_timestamp(ts, source: str) -> str:
+    """Format timestamp label tùy theo data source."""
+    if source == "daily":
+        return ts.strftime("%d/%m")
+    if source == "hourly":
+        return ts.strftime("%d %H:00")
+    return ts.strftime("%H:%M")
+
+
+def _timeline_step_seconds(source: str, device: Device) -> int:
+    if source == "daily":
+        return 86400
+    if source == "hourly":
+        return 3600
+    return max(int(getattr(device, "collect_interval", 300) or 300), 60)
+
+
+@login_required
+def device_metrics(request, device_id: int):
+    """Trả về CPU/Memory time-series cho Chart.js.
+
+    Tự động chọn nguồn dữ liệu:
+    - range ≤ 24h: raw data (SystemHealth)
+    - range 7d: hourly aggregated (SystemHealthHourly)
+    - range ≥ 30d: daily aggregated (SystemHealthDaily)
+
+    If SystemHealth.extra contains vendor-specific fields (e.g. Fortinet session_count),
+    we include them when present so UI can optionally chart them.
+    """
+    device = get_object_or_404(Device, pk=device_id)
+    range_str = request.GET.get("range", "1h")
+    delta, source = _parse_range(range_str)
+    since = timezone.now() - delta
+
+    if source == "daily":
+        return _device_metrics_daily(device, since)
+    if source == "hourly":
+        return _device_metrics_hourly(device, since)
+    return _device_metrics_raw(device, since)
+
+
+@login_required
+def device_status_timeline(request, device_id: int) -> JsonResponse:
+    """Trả về timeline Online/Offline dạng 1/0 cho biểu đồ trạng thái."""
+    device = get_object_or_404(Device, pk=device_id)
+    range_str = request.GET.get("range", "1h")
+    delta, source = _parse_range(range_str)
+    now = timezone.now()
+    since = now - delta
+    step_secs = _timeline_step_seconds(source, device)
+    grace_secs = max(
+        int(getattr(settings, "ALERT_GRACE_PERIOD_SECS", 120)),
+        int(getattr(device, "collect_interval", 300) or 300) * 3,
+    )
+
+    # Include previous sample before the window to infer initial state.
+    sample_qs = (SystemHealth.objects
+                 .filter(device=device, timestamp__lte=now, timestamp__gte=since - timedelta(seconds=grace_secs))
+                 .order_by("timestamp")
+                 .values_list("timestamp", flat=True))
+    samples = list(sample_qs)
+
+    labels: list[str] = []
+    online_series: list[int] = []
+    idx = 0
+    last_seen = None
+    cursor = since
+    while cursor <= now:
+        while idx < len(samples) and samples[idx] <= cursor:
+            last_seen = samples[idx]
+            idx += 1
+        online = int(bool(last_seen and (cursor - last_seen).total_seconds() <= grace_secs))
+        labels.append(_format_timestamp(cursor, source))
+        online_series.append(online)
+        cursor += timedelta(seconds=step_secs)
+
+    return JsonResponse({
+        "labels": labels,
+        "online": online_series,
+        "source": source,
+        "grace_secs": grace_secs,
+    })
+
+
+def _device_metrics_raw(device: Device, since) -> JsonResponse:
+    """Query raw SystemHealth data."""
+    qs = (SystemHealth.objects
+          .filter(device=device, timestamp__gte=since)
+          .order_by("timestamp")
+          .values("timestamp", "cpu_percent", "mem_percent", "extra"))
+
+    rows = list(qs)
+    data = {
+        "labels":      [r["timestamp"].strftime("%H:%M") for r in rows],
+        "cpu_percent": [r["cpu_percent"] for r in rows],
+        "mem_percent": [r["mem_percent"] for r in rows],
+        "source":      "raw",
+    }
+    # Optional vendor metric: Fortinet session count stored in JSON extra
+    _attach_session_count(data, rows)
+    return JsonResponse(data)
+
+
+def _device_metrics_hourly(device: Device, since) -> JsonResponse:
+    """Query hourly aggregated data — avg + max."""
+    qs = (SystemHealthHourly.objects
+          .filter(device=device, hour__gte=since)
+          .order_by("hour")
+          .values("hour", "cpu_avg", "cpu_max", "mem_avg", "mem_max"))
+
+    rows = list(qs)
+    data = {
+        "labels":      [r["hour"].strftime("%d %H:00") for r in rows],
+        "cpu_percent": [r["cpu_avg"] for r in rows],
+        "cpu_max":     [r["cpu_max"] for r in rows],
+        "mem_percent": [r["mem_avg"] for r in rows],
+        "mem_max":     [r["mem_max"] for r in rows],
+        "source":      "hourly",
+    }
+    return JsonResponse(data)
+
+
+def _device_metrics_daily(device: Device, since) -> JsonResponse:
+    """Query daily aggregated data — avg + max."""
+    qs = (SystemHealthDaily.objects
+          .filter(device=device, day__gte=since.date())
+          .order_by("day")
+          .values("day", "cpu_avg", "cpu_max", "mem_avg", "mem_max"))
+
+    rows = list(qs)
+    data = {
+        "labels":      [r["day"].strftime("%d/%m") for r in rows],
+        "cpu_percent": [r["cpu_avg"] for r in rows],
+        "cpu_max":     [r["cpu_max"] for r in rows],
+        "mem_percent": [r["mem_avg"] for r in rows],
+        "mem_max":     [r["mem_max"] for r in rows],
+        "source":      "daily",
+    }
+    return JsonResponse(data)
+
+
+def _attach_session_count(data: dict, rows: list[dict]) -> None:
+    """Gắn Fortinet session_count series vào data nếu có."""
+    session_series = []
+    has_any_session = False
+    for r in rows:
+        extra = r.get("extra") or {}
+        val = extra.get("session_count")
+        if val is None:
+            session_series.append(None)
+        else:
+            has_any_session = True
+            try:
+                session_series.append(float(val))
+            except (TypeError, ValueError):
+                session_series.append(None)
+    if has_any_session:
+        data["session_count"] = session_series
+
+
+@login_required
+def interface_metrics(request, device_id: int):
+    """Trả về traffic theo interface cho Chart.js.
+
+    Tự động chọn nguồn dữ liệu:
+    - range ≤ 24h: raw data (InterfaceStats)
+    - range 7d: hourly aggregated (InterfaceStatsHourly)
+    - range ≥ 30d: daily aggregated (InterfaceStatsDaily)
+    """
+    device = get_object_or_404(Device, pk=device_id)
+    range_str = request.GET.get("range", "1h")
+    delta, source = _parse_range(range_str)
+    since = timezone.now() - delta
+    port = request.GET.get("port")
+
+    iface_qs = Interface.objects.filter(device=device)
+    if port:
+        iface_qs = iface_qs.filter(name=port)
+
+    if source == "daily":
+        return _interface_metrics_daily(iface_qs, since)
+    if source == "hourly":
+        return _interface_metrics_hourly(iface_qs, since)
+    return _interface_metrics_raw(iface_qs, since)
+
+
+def _interface_metrics_raw(iface_qs, since) -> JsonResponse:
+    """Query raw InterfaceStats — bulk fetch, then group in Python."""
+    ifaces = list(iface_qs)
+    iface_ids = [i.id for i in ifaces]
+
+    all_stats = (InterfaceStats.objects
+                 .filter(interface_id__in=iface_ids, timestamp__gte=since)
+                 .order_by("interface_id", "timestamp")
+                 .values("interface_id", "timestamp", "status", "in_mbps", "out_mbps"))
+    stats_by_iface: dict[int, list] = defaultdict(list)
+    for row in all_stats:
+        stats_by_iface[row["interface_id"]].append(row)
+
+    results = []
+    for iface in ifaces:
+        stats = stats_by_iface[iface.id]
+        results.append({
+            "port":           iface.name,
+            "is_uplink":      iface.is_uplink,
+            "labels":         [r["timestamp"].strftime("%H:%M") for r in stats],
+            "in_mbps":        [r["in_mbps"] for r in stats],
+            "out_mbps":       [r["out_mbps"] for r in stats],
+            "current_status": stats[-1]["status"] if stats else "unknown",
+        })
+    return JsonResponse({"interfaces": results, "source": "raw"})
+
+
+def _interface_metrics_hourly(iface_qs, since) -> JsonResponse:
+    """Query hourly aggregated InterfaceStats — bulk fetch, then group in Python."""
+    latest_raw_sq = (InterfaceStats.objects
+                     .filter(interface=OuterRef("pk"))
+                     .order_by("-timestamp")
+                     .values("status")[:1])
+    ifaces = list(iface_qs.annotate(latest_raw_status=Subquery(latest_raw_sq)))
+    iface_ids = [i.id for i in ifaces]
+
+    all_hourly = (InterfaceStatsHourly.objects
+                  .filter(interface_id__in=iface_ids, hour__gte=since)
+                  .order_by("interface_id", "hour")
+                  .values("interface_id", "hour", "in_mbps_avg", "in_mbps_max",
+                          "out_mbps_avg", "out_mbps_max"))
+    hourly_by_iface: dict[int, list] = defaultdict(list)
+    for row in all_hourly:
+        hourly_by_iface[row["interface_id"]].append(row)
+
+    results = []
+    for iface in ifaces:
+        stats = hourly_by_iface[iface.id]
+        results.append({
+            "port":           iface.name,
+            "is_uplink":      iface.is_uplink,
+            "labels":         [r["hour"].strftime("%d %H:00") for r in stats],
+            "in_mbps":        [r["in_mbps_avg"] for r in stats],
+            "in_mbps_max":    [r["in_mbps_max"] for r in stats],
+            "out_mbps":       [r["out_mbps_avg"] for r in stats],
+            "out_mbps_max":   [r["out_mbps_max"] for r in stats],
+            "current_status": iface.latest_raw_status or "unknown",
+        })
+    return JsonResponse({"interfaces": results, "source": "hourly"})
+
+
+def _interface_metrics_daily(iface_qs, since) -> JsonResponse:
+    """Query daily aggregated InterfaceStats — bulk fetch, then group in Python."""
+    latest_raw_sq = (InterfaceStats.objects
+                     .filter(interface=OuterRef("pk"))
+                     .order_by("-timestamp")
+                     .values("status")[:1])
+    ifaces = list(iface_qs.annotate(latest_raw_status=Subquery(latest_raw_sq)))
+    iface_ids = [i.id for i in ifaces]
+
+    all_daily = (InterfaceStatsDaily.objects
+                 .filter(interface_id__in=iface_ids, day__gte=since.date())
+                 .order_by("interface_id", "day")
+                 .values("interface_id", "day", "in_mbps_avg", "in_mbps_max",
+                         "out_mbps_avg", "out_mbps_max"))
+    daily_by_iface: dict[int, list] = defaultdict(list)
+    for row in all_daily:
+        daily_by_iface[row["interface_id"]].append(row)
+
+    results = []
+    for iface in ifaces:
+        stats = daily_by_iface[iface.id]
+        results.append({
+            "port":           iface.name,
+            "is_uplink":      iface.is_uplink,
+            "labels":         [r["day"].strftime("%d/%m") for r in stats],
+            "in_mbps":        [r["in_mbps_avg"] for r in stats],
+            "in_mbps_max":    [r["in_mbps_max"] for r in stats],
+            "out_mbps":       [r["out_mbps_avg"] for r in stats],
+            "out_mbps_max":   [r["out_mbps_max"] for r in stats],
+            "current_status": iface.latest_raw_status or "unknown",
+        })
+    return JsonResponse({"interfaces": results, "source": "daily"})

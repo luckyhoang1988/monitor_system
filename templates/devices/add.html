@@ -1,0 +1,200 @@
+{% extends "base.html" %}
+{% block title %}{{ title }}{% endblock %}
+{% block breadcrumb %}
+  <a href="{% url 'devices:list' %}" class="text-decoration-none text-muted">Thiết bị</a>
+  <span class="mx-2 text-muted">/</span> {{ title }}
+{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+  <div class="col-xl-7 col-lg-9">
+    <div class="card">
+      <div class="card-header bg-white py-3">
+        <h5 class="mb-0 fw-bold"><i class="bi bi-hdd-network me-2 text-primary"></i>{{ title }}</h5>
+      </div>
+      <div class="card-body p-4">
+        <form method="post" novalidate>
+          {% csrf_token %}
+          {% if form.errors %}
+            <div class="alert alert-danger py-2">
+              <ul class="mb-0">
+                {% for field in form %}
+                  {% if field.errors %}
+                    <li><strong>{{ field.label }}:</strong> {{ field.errors|striptags }}</li>
+                  {% endif %}
+                {% endfor %}
+                {% for error in form.non_field_errors %}
+                  <li>{{ error }}</li>
+                {% endfor %}
+              </ul>
+            </div>
+          {% endif %}
+
+          <!-- Basic info -->
+          <h6 class="text-muted small text-uppercase fw-semibold mb-3">Thông tin cơ bản</h6>
+          <div class="row g-3 mb-4">
+            <div class="col-sm-6">
+              <label class="form-label small fw-semibold">{{ form.name.label }}</label>
+              {{ form.name }}
+              {% if form.name.errors %}<div class="text-danger small mt-1">{{ form.name.errors }}</div>{% endif %}
+            </div>
+            <div class="col-sm-6">
+              <label class="form-label small fw-semibold">{{ form.ip_address.label }}</label>
+              {{ form.ip_address }}
+              {% if form.ip_address.errors %}<div class="text-danger small mt-1">{{ form.ip_address.errors }}</div>{% endif %}
+            </div>
+            <div class="col-sm-6">
+              <label class="form-label small fw-semibold">{{ form.device_type.label }}</label>
+              {{ form.device_type }}
+            </div>
+            <div class="col-sm-6">
+              <label class="form-label small fw-semibold">{{ form.vendor.label }}</label>
+              {{ form.vendor }}
+            </div>
+            <div class="col-sm-6">
+              <label class="form-label small fw-semibold">{{ form.location.label }}</label>
+              {{ form.location }}
+            </div>
+            <div class="col-sm-6">
+              <label class="form-label small fw-semibold">{{ form.collect_interval.label }}</label>
+              <div class="input-group">
+                {{ form.collect_interval }}
+                <span class="input-group-text text-muted small">giây</span>
+              </div>
+            </div>
+            <div class="col-sm-6">
+              <label class="form-label small fw-semibold">{{ form.uplink_ports.label }}</label>
+              {{ form.uplink_ports }}
+              <div class="form-text small text-muted">Ví dụ: GE0/0/1, GE0/0/2</div>
+            </div>
+          </div>
+
+          <!-- Protocol -->
+          <h6 class="text-muted small text-uppercase fw-semibold mb-3">Giao thức thu thập</h6>
+          <div class="row g-3 mb-4">
+            <div class="col-sm-4">
+              <label class="form-label small fw-semibold">{{ form.protocol.label }}</label>
+              {{ form.protocol }}
+            </div>
+            <div class="col-sm-4" id="field-snmp-version">
+              <label class="form-label small fw-semibold">{{ form.snmp_version.label }}</label>
+              {{ form.snmp_version }}
+            </div>
+            <div class="col-sm-4" id="field-snmp-community">
+              <label class="form-label small fw-semibold">{{ form.snmp_community.label }}</label>
+              {{ form.snmp_community }}
+            </div>
+            <div class="col-sm-4" id="field-snmpv3-username">
+              <label class="form-label small fw-semibold">{{ form.snmpv3_username.label }}</label>
+              {{ form.snmpv3_username }}
+            </div>
+            <div class="col-sm-4" id="field-snmpv3-auth-protocol">
+              <label class="form-label small fw-semibold">{{ form.snmpv3_auth_protocol.label }}</label>
+              {{ form.snmpv3_auth_protocol }}
+            </div>
+            <div class="col-sm-4" id="field-snmpv3-auth-password">
+              <label class="form-label small fw-semibold">{{ form.snmpv3_auth_password.label }}</label>
+              {{ form.snmpv3_auth_password }}
+            </div>
+            <div class="col-sm-4" id="field-snmpv3-priv-protocol">
+              <label class="form-label small fw-semibold">{{ form.snmpv3_priv_protocol.label }}</label>
+              {{ form.snmpv3_priv_protocol }}
+            </div>
+            <div class="col-sm-4" id="field-snmpv3-priv-password">
+              <label class="form-label small fw-semibold">{{ form.snmpv3_priv_password.label }}</label>
+              {{ form.snmpv3_priv_password }}
+            </div>
+            <div class="col-sm-6" id="field-ssh-username">
+              <label class="form-label small fw-semibold">{{ form.ssh_username.label }}</label>
+              {{ form.ssh_username }}
+            </div>
+            <div class="col-sm-6" id="field-ssh-password">
+              <label class="form-label small fw-semibold">{{ form.ssh_password.label }}</label>
+              {{ form.ssh_password }}
+            </div>
+          </div>
+
+          <!-- Misc -->
+          <h6 class="text-muted small text-uppercase fw-semibold mb-3">Tùy chọn khác</h6>
+          <div class="row g-3 mb-4">
+            <div class="col-12">
+              <label class="form-label small fw-semibold">{{ form.notes.label }}</label>
+              {{ form.notes }}
+            </div>
+            <div class="col-md-6">
+              <div class="form-check">
+                {{ form.enabled }}
+                <label class="form-check-label small fw-semibold" for="{{ form.enabled.id_for_label }}">
+                  {{ form.enabled.label }}
+                </label>
+              </div>
+            </div>
+            <div class="col-md-6">
+              <div class="form-check">
+                {{ form.backup_enabled }}
+                <label class="form-check-label small fw-semibold" for="{{ form.backup_enabled.id_for_label }}">
+                  {{ form.backup_enabled.label }}
+                </label>
+              </div>
+            </div>
+          </div>
+
+          <div class="d-flex gap-2">
+            <button type="submit" class="btn btn-primary px-4">
+              <i class="bi bi-check-circle me-1"></i> Lưu
+            </button>
+            <a href="{% url 'devices:list' %}" class="btn btn-outline-secondary">Hủy</a>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+// Auto-add Bootstrap form-control class to all form fields
+document.querySelectorAll("input:not([type=checkbox]), select, textarea").forEach(el => {
+  if (!el.classList.contains("form-control") && !el.classList.contains("form-select")) {
+    if (el.tagName === "SELECT") {
+      el.classList.add("form-select", "form-select-sm");
+    } else if (el.tagName === "TEXTAREA") {
+      el.classList.add("form-control", "form-control-sm");
+    } else {
+      el.classList.add("form-control", "form-control-sm");
+    }
+  }
+});
+
+// Show/hide credential fields based on selected protocol
+const sshFields   = ["field-ssh-username", "field-ssh-password"];
+
+function updateProtocolFields() {
+  const protocol = document.getElementById("id_protocol").value;
+  const snmpVersionEl = document.getElementById("id_snmp_version");
+  const snmpVersion = snmpVersionEl ? snmpVersionEl.value : "v2c";
+  const showSnmp = protocol === "snmp";
+  const showSsh  = protocol === "ssh" || protocol === "winrm";
+  const showV3 = showSnmp && snmpVersion === "v3";
+
+  document.getElementById("field-snmp-version").style.display = showSnmp ? "" : "none";
+  document.getElementById("field-snmp-community").style.display = (showSnmp && !showV3) ? "" : "none";
+  ["field-snmpv3-username", "field-snmpv3-auth-protocol", "field-snmpv3-auth-password", "field-snmpv3-priv-protocol", "field-snmpv3-priv-password"]
+    .forEach(id => {
+      document.getElementById(id).style.display = showV3 ? "" : "none";
+    });
+  sshFields.forEach(id => {
+    document.getElementById(id).style.display = showSsh ? "" : "none";
+  });
+}
+
+const protocolSelect = document.getElementById("id_protocol");
+protocolSelect.addEventListener("change", updateProtocolFields);
+const snmpVersionSelect = document.getElementById("id_snmp_version");
+if (snmpVersionSelect) {
+  snmpVersionSelect.addEventListener("change", updateProtocolFields);
+}
+updateProtocolFields(); // chạy ngay khi tải trang (edit mode)
+</script>
+{% endblock %}

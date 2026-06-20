@@ -1,0 +1,32 @@
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+ignore = [
+    "E501",   # line too long — handled by formatter
+    "N806",   # variable in function should be lowercase (conflicts with Django ORM patterns)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"*/migrations/*.py" = ["E501", "N"]
+"config/settings/*.py" = ["F405", "F403"]
+
+[tool.mypy]
+python_version = "3.12"
+plugins = ["mypy_django_plugin.main"]
+ignore_missing_imports = true
+warn_unused_ignores = true
+strict_optional = true
+
+[tool.django-stubs]
+django_settings_module = "config.settings.development"
+
+[tool.pytest.ini_options]
+DJANGO_SETTINGS_MODULE = "config.settings.development"
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"
+testpaths = ["tests"]

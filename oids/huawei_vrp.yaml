@@ -1,0 +1,33 @@
+# Huawei VRP — S5700, S6700, S9300, S12700 (và các dòng tương tự)
+# Detection: sysDescr contains "VRP" hoặc sysObjectID prefix 1.3.6.1.4.1.2011
+# Nhất quán trên tất cả model — không cần phân biệt S5700 vs S6700
+
+os_family: huawei_vrp
+snmp_versions: [v2c, v3]
+enterprise_oid_prefix: "1.3.6.1.4.1.2011"
+
+cpu:
+  # HUAWEI-ENTITY-EXTENT-MIB — hwEntityCpuUsage
+  # .0 tương ứng entity index 1 (main CPU)
+  cpu_usage: "1.3.6.1.4.1.2011.5.25.31.1.1.1.1.6.0"   # % CPU — DÙNG CHO ALERT
+  # Để lấy CPU của từng card/slot: walk table 1.3.6.1.4.1.2011.5.25.31.1.1.1.1.6
+
+memory:
+  # HUAWEI-ENTITY-EXTENT-MIB — hwEntityMemUsage (phần trăm trực tiếp)
+  mem_usage: "1.3.6.1.4.1.2011.5.25.31.1.1.1.1.5.0"   # % Memory — DÙNG CHO ALERT
+  # Không cần tính toán — đã là % sẵn (khác Cisco)
+
+# Chú ý: Huawei trả về % trực tiếp, không cần tính từ used/free
+mem_percent_formula: "mem_usage"   # dùng thẳng, không cần formula
+
+# Fan và power (optional monitoring)
+env:
+  fan_table:   "1.3.6.1.4.1.2011.5.25.31.1.1.7"   # hwEntityFanState
+  power_table: "1.3.6.1.4.1.2011.5.25.31.1.1.9"   # hwEntityPowerState
+
+# SSH CLI commands (dùng khi protocol=ssh thay vì snmp)
+ssh_commands:
+  cpu:    "display cpu-usage"
+  memory: "display memory-usage"
+  interface: "display interface"
+  version: "display version"

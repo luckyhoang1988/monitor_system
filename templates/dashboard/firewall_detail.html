@@ -1,0 +1,248 @@
+{% extends "base.html" %}
+{% block title %}{{ device.name }}{% endblock %}
+{% block breadcrumb %}
+  <a href="{% url 'dashboard:index' %}" class="text-decoration-none text-muted">Dashboard</a>
+  <span class="mx-2 text-muted">/</span>
+  <a href="{% url 'dashboard:index' %}" class="text-decoration-none text-muted">Firewall</a>
+  <span class="mx-2 text-muted">/</span> {{ device.name }}
+{% endblock %}
+
+{% block content %}
+<!-- ===== Device Header ===== -->
+<div class="row g-3 mb-4">
+  <div class="col-12">
+    <div class="card">
+      <div class="card-body d-flex flex-wrap align-items-center gap-3 py-3">
+        <div class="text-danger" style="font-size:2.5rem; line-height:1;"><i class="bi bi-shield-fill-check"></i></div>
+        <div class="flex-grow-1">
+          <h5 class="mb-0 fw-bold">{{ device.name }}</h5>
+          <div class="text-muted small mt-1">
+            <span class="me-3"><i class="bi bi-geo-alt me-1"></i>{{ device.ip_address }}</span>
+            <span class="me-3"><i class="bi bi-cpu me-1"></i>{{ device.get_vendor_display }}{% if device.os_family %} / {{ device.os_family }}{% endif %}</span>
+            {% if device.location %}<span><i class="bi bi-pin-map me-1"></i>{{ device.location }}</span>{% endif %}
+          </div>
+        </div>
+        <div class="d-flex flex-column align-items-end gap-2">
+          {% if device.is_online %}
+            <span class="badge badge-online fs-6 px-3 py-2 rounded-pill">
+              <i class="bi bi-circle-fill me-1" style="font-size:.5rem;"></i>Online
+            </span>
+          {% else %}
+            <span class="badge badge-offline fs-6 px-3 py-2 rounded-pill">Offline</span>
+          {% endif %}
+          {% if device.last_seen %}
+            <span class="text-muted small">Last poll: {{ device.last_seen|date:"d/m H:i" }}</span>
+          {% endif %}
+        </div>
+
+        {% if latest_health %}
+        <div class="d-flex gap-3 border-start ps-3">
+          <div class="text-center">
+            <div class="fs-4 fw-bold {% if latest_health.cpu_percent > 80 %}text-danger{% elif latest_health.cpu_percent > 60 %}text-warning{% else %}text-success{% endif %}">
+              {{ latest_health.cpu_percent|floatformat:1 }}%
+            </div>
+            <div class="text-muted" style="font-size:.7rem;">CPU</div>
+          </div>
+          <div class="text-center">
+            <div class="fs-4 fw-bold {% if latest_health.mem_percent > 85 %}text-danger{% elif latest_health.mem_percent > 70 %}text-warning{% else %}text-success{% endif %}">
+              {{ latest_health.mem_percent|floatformat:1 }}%
+            </div>
+            <div class="text-muted" style="font-size:.7rem;">RAM</div>
+          </div>
+          {% if session_count is not None %}
+          <div class="text-center">
+            <div class="fs-4 fw-bold text-danger">{{ session_count|floatformat:0 }}</div>
+            <div class="text-muted" style="font-size:.7rem;">Sessions</div>
+          </div>
+          {% endif %}
+        </div>
+        {% endif %}
+
+        <a href="{% url 'devices:edit' device.pk %}" class="btn btn-sm btn-outline-secondary">
+          <i class="bi bi-pencil"></i> Sửa
+        </a>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="row g-3 mb-4">
+  <!-- ===== CPU + Sessions Chart ===== -->
+  <div class="col-xl-6">
+    <div class="card">
+      <div class="card-header bg-white py-2 d-flex align-items-center justify-content-between">
+        <span class="fw-semibold"><i class="bi bi-cpu me-2 text-danger"></i>CPU & RAM (%)</span>
+        <select id="rangeSelect" class="form-select form-select-sm w-auto">
+          <option value="1h">1 giờ</option>
+          <option value="6h">6 giờ</option>
+          <option value="24h">24 giờ</option>
+          <option value="7d">7 ngày</option>
+        </select>
+      </div>
+      <div class="card-body">
+        <div class="chart-wrap"><canvas id="cpuChart"></canvas></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== Traffic Chart ===== -->
+  <div class="col-xl-6">
+    <div class="card">
+      <div class="card-header bg-white py-2 d-flex align-items-center justify-content-between">
+        <span class="fw-semibold"><i class="bi bi-activity me-2 text-success"></i>Traffic (Mbps)</span>
+        <span class="text-muted small" id="trafficRange">1h</span>
+      </div>
+      <div class="card-body">
+        <div class="chart-wrap"><canvas id="trafficChart"></canvas></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== Interface Table ===== -->
+<div class="card">
+  <div class="card-header bg-white py-2">
+    <span class="fw-semibold"><i class="bi bi-shield-half me-2"></i>Interfaces ({{ interfaces|length }})</span>
+  </div>
+  <div class="card-body p-0">
+    {% if interfaces %}
+    <table class="table table-hover mb-0">
+      <thead class="table-light">
+        <tr>
+          <th class="ps-3">Index</th>
+          <th>Port</th>
+          <th>Mô tả</th>
+          <th>Loại</th>
+          <th>Trạng thái</th>
+          <th class="text-end">In (Mbps)</th>
+          <th class="text-end pe-3">Out (Mbps)</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for iface in interfaces %}
+        <tr>
+          <td class="ps-3 text-muted font-monospace">{{ iface.if_index }}</td>
+          <td class="fw-medium">{{ iface.name }}</td>
+          <td class="text-muted small">{{ iface.description|default:"—" }}</td>
+          <td>
+            {% if iface.is_uplink %}
+              <span class="badge bg-danger-subtle text-danger rounded-pill px-2">WAN</span>
+            {% else %}
+              <span class="badge bg-secondary-subtle text-secondary rounded-pill px-2">Internal</span>
+            {% endif %}
+          </td>
+          <td>
+            {% if iface.cur_status == "up" %}
+              <span class="badge badge-up rounded-pill px-2"><i class="bi bi-arrow-up-short"></i>Up</span>
+            {% elif iface.cur_status == "down" %}
+              <span class="badge badge-down rounded-pill px-2"><i class="bi bi-arrow-down-short"></i>Down</span>
+            {% elif iface.cur_status %}
+              <span class="badge badge-unknown rounded-pill px-2">{{ iface.cur_status }}</span>
+            {% else %}
+              <span class="text-muted">—</span>
+            {% endif %}
+          </td>
+          <td class="text-end font-monospace">
+            {% if iface.cur_in_mbps is not None %}{{ iface.cur_in_mbps|floatformat:2 }}{% else %}—{% endif %}
+          </td>
+          <td class="text-end pe-3 font-monospace">
+            {% if iface.cur_out_mbps is not None %}{{ iface.cur_out_mbps|floatformat:2 }}{% else %}—{% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+      <div class="text-center text-muted py-4">
+        <i class="bi bi-shield-half fs-2 d-block mb-2"></i>Chưa có dữ liệu interface.
+      </div>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+const DEVICE_ID = {{ device.pk }};
+const API_METRICS = `/api/metrics/${DEVICE_ID}/`;
+const API_IFACES  = `/api/metrics/${DEVICE_ID}/interfaces/`;
+
+const cpuCtx  = document.getElementById("cpuChart").getContext("2d");
+const trfCtx  = document.getElementById("trafficChart").getContext("2d");
+
+const chartDefaults = {
+  responsive: true, maintainAspectRatio: false,
+  plugins: { legend: { position: "top", labels: { boxWidth: 12, font: { size: 11 } } } },
+  scales: {
+    x: { ticks: { maxTicksLimit: 8, font: { size: 10 } }, grid: { display: false } },
+    y: { beginAtZero: true, ticks: { font: { size: 10 } } },
+    y1: { beginAtZero: true, position: "right", ticks: { font: { size: 10 } }, grid: { drawOnChartArea: false } },
+  },
+};
+
+const cpuChart = new Chart(cpuCtx, {
+  type: "line",
+  data: { labels: [], datasets: [
+    { label: "CPU %", data: [], borderColor: "#ef4444", backgroundColor: "rgba(239,68,68,.1)",
+      tension: .3, fill: true, pointRadius: 2 },
+    { label: "RAM %", data: [], borderColor: "#10b981", backgroundColor: "rgba(16,185,129,.1)",
+      tension: .3, fill: true, pointRadius: 2 },
+    { label: "Sessions", data: [], borderColor: "#111827", backgroundColor: "transparent",
+      tension: .3, fill: false, pointRadius: 1, yAxisID: "y1" },
+  ]},
+  options: { ...chartDefaults, scales: { ...chartDefaults.scales, y: { ...chartDefaults.scales.y, max: 100 } } },
+});
+
+const trafficChart = new Chart(trfCtx, {
+  type: "line",
+  data: { labels: [], datasets: [] },
+  options: chartDefaults,
+});
+
+function loadMetrics(range) {
+  fetch(`${API_METRICS}?range=${range}`)
+    .then(r => r.json())
+    .then(d => {
+      cpuChart.data.labels = d.labels;
+      cpuChart.data.datasets[0].data = d.cpu_percent;
+      cpuChart.data.datasets[1].data = d.mem_percent;
+      // Optional firewall metric: session_count
+      cpuChart.data.datasets[2].data = d.session_count || [];
+      // Hide dataset if not available
+      cpuChart.data.datasets[2].hidden = !d.session_count;
+      cpuChart.update();
+    })
+    .catch(() => {});
+}
+
+function loadTraffic(range) {
+  document.getElementById("trafficRange").textContent = range;
+  fetch(`${API_IFACES}?range=${range}`)
+    .then(r => r.json())
+    .then(d => {
+      const colors = ["#ef4444","#10b981","#f59e0b","#3b82f6","#8b5cf6","#06b6d4"];
+      const ifaces = d.interfaces.slice(0, 4);
+      trafficChart.data.labels   = ifaces[0]?.labels ?? [];
+      trafficChart.data.datasets = [];
+      ifaces.forEach((iface, idx) => {
+        const c = colors[idx % colors.length];
+        trafficChart.data.datasets.push(
+          { label: `${iface.port} In`,  data: iface.in_mbps,  borderColor: c,
+            backgroundColor: "transparent", tension: .3, pointRadius: 2 },
+          { label: `${iface.port} Out`, data: iface.out_mbps, borderColor: c,
+            backgroundColor: "transparent", tension: .3, pointRadius: 2, borderDash: [4,3] },
+        );
+      });
+      trafficChart.update();
+    })
+    .catch(() => {});
+}
+
+loadMetrics("1h");
+loadTraffic("1h");
+document.getElementById("rangeSelect").addEventListener("change", function () {
+  loadMetrics(this.value);
+  loadTraffic(this.value);
+});
+</script>
+{% endblock %}
