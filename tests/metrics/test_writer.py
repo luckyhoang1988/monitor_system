@@ -169,3 +169,84 @@ class TestSaveMetrics:
         data = self._make_normalized(device, vms=vms)
         save_metrics(device, data)
         assert VMStats.objects.filter(device=device, vm_name="VM-Test").count() == 1
+
+    def test_auto_detects_trunk_by_description_keyword(self, device):
+        ifaces = [
+            InterfaceData(
+                name="Gi1/0/24",
+                if_index=24,
+                status="up",
+                in_bytes=1000,
+                out_bytes=2000,
+                description="Uplink to CORE-SW",
+                speed_mbps=1000,
+            )
+        ]
+        data = self._make_normalized(device, interfaces=ifaces)
+        save_metrics(device, data)
+        iface = Interface.objects.get(device=device, if_index=24)
+        assert iface.is_uplink is True
+
+    def test_auto_detects_trunk_by_aggregated_port_name(self, device):
+        ifaces = [
+            InterfaceData(
+                name="Port-channel1",
+                if_index=1001,
+                status="up",
+                in_bytes=1000,
+                out_bytes=2000,
+                speed_mbps=1000,
+            )
+        ]
+        data = self._make_normalized(device, interfaces=ifaces)
+        save_metrics(device, data)
+        iface = Interface.objects.get(device=device, if_index=1001)
+        assert iface.is_uplink is True
+
+    def test_auto_detects_trunk_by_high_speed(self, device):
+        ifaces = [
+            InterfaceData(
+                name="Gi1/0/48",
+                if_index=48,
+                status="up",
+                in_bytes=1000,
+                out_bytes=2000,
+                speed_mbps=10000,
+            )
+        ]
+        data = self._make_normalized(device, interfaces=ifaces)
+        save_metrics(device, data)
+        iface = Interface.objects.get(device=device, if_index=48)
+        assert iface.is_uplink is True
+
+    def test_updates_existing_interface_uplink_flag_after_new_poll(self, device):
+        iface = Interface.objects.create(
+            device=device,
+            if_index=1,
+            name="Gi1/0/1",
+            description="",
+            is_uplink=False,
+        )
+        InterfaceStats.objects.create(
+            interface=iface,
+            timestamp=make_timestamp(300),
+            status="up",
+            in_bytes=100,
+            out_bytes=100,
+        )
+
+        ifaces = [
+            InterfaceData(
+                name="Gi1/0/1",
+                if_index=1,
+                status="up",
+                in_bytes=200,
+                out_bytes=300,
+                description="TRUNK to Dist-SW",
+                speed_mbps=1000,
+            )
+        ]
+        data = self._make_normalized(device, interfaces=ifaces)
+        save_metrics(device, data)
+        iface.refresh_from_db()
+        assert iface.is_uplink is True

@@ -9,6 +9,27 @@ from .models import InterfaceStats, SystemHealth, VMStats
 logger = logging.getLogger(__name__)
 
 
+TRUNK_NAME_PREFIXES = (
+    "po",              # Cisco Port-channel short name
+    "port-channel",
+    "eth-trunk",
+    "bridge-aggregation",
+    "bond",
+    "lag",
+    "ae",              # Juniper aggregated ethernet style
+    "trunk",
+)
+TRUNK_DESC_KEYWORDS = (
+    "trunk",
+    "uplink",
+    "up-link",
+    "backbone",
+    "inter-switch",
+    "to-core",
+    "to core",
+)
+
+
 def save_metrics(device: Device, data: NormalizedData) -> None:
     _save_system_health(device, data)
     if data.interfaces:
@@ -32,6 +53,32 @@ def _save_system_health(device: Device, data: NormalizedData) -> None:
 
 from datetime import timedelta
 
+
+def _normalize_text(value: str | None) -> str:
+    return (value or "").strip().lower()
+
+
+def _is_trunk_interface(device: Device, iface_data: InterfaceData) -> bool:
+    # Manual cấu hình luôn được ưu tiên.
+    normalized_manual = {_normalize_text(p) for p in (device.uplink_ports or [])}
+    normalized_name = _normalize_text(iface_data.name)
+    if normalized_name in normalized_manual:
+        return True
+
+    normalized_desc = _normalize_text(iface_data.description)
+    if normalized_desc and any(keyword in normalized_desc for keyword in TRUNK_DESC_KEYWORDS):
+        return True
+
+    if normalized_name.startswith(TRUNK_NAME_PREFIXES):
+        return True
+
+    # Uplink liên tầng thường là 10G+ (heuristic mềm, tránh phụ thuộc vendor).
+    if float(iface_data.speed_mbps or 0) >= 10000:
+        return True
+
+    return False
+
+
 def _save_interface_stats(device: Device, data: NormalizedData) -> None:
     # 1. Đồng bộ Interface list (giảm N get_or_create thành bulk)
     existing_ifaces = {i.if_index: i for i in Interface.objects.filter(device=device)}
@@ -41,8 +88,15 @@ def _save_interface_stats(device: Device, data: NormalizedData) -> None:
     for iface_data in data.interfaces:
         if iface_data.if_index in existing_ifaces:
             iface = existing_ifaces[iface_data.if_index]
-            if iface.name != iface_data.name:
+            next_is_uplink = _is_trunk_interface(device, iface_data)
+            if (
+                iface.name != iface_data.name
+                or iface.description != iface_data.description
+                or iface.is_uplink != next_is_uplink
+            ):
                 iface.name = iface_data.name
+                iface.description = iface_data.description
+                iface.is_uplink = next_is_uplink
                 update_ifaces.append(iface)
         else:
             new_ifaces.append(Interface(
@@ -50,7 +104,7 @@ def _save_interface_stats(device: Device, data: NormalizedData) -> None:
                 if_index=iface_data.if_index,
                 name=iface_data.name,
                 description=iface_data.description,
-                is_uplink=(iface_data.name in device.uplink_ports),
+                is_uplink=_is_trunk_interface(device, iface_data),
             ))
 
     if new_ifaces:
@@ -60,7 +114,7 @@ def _save_interface_stats(device: Device, data: NormalizedData) -> None:
         existing_ifaces = {i.if_index: i for i in Interface.objects.filter(device=device)}
     
     if update_ifaces:
-        Interface.objects.bulk_update(update_ifaces, ["name"])
+        Interface.objects.bulk_update(update_ifaces, ["name", "description", "is_uplink"])
 
     # 2. Fetch "previous stats" cho tất cả interface bằng 1 query (lấy trong khoảng 3 chu kỳ gần nhất)
     # Rất tối ưu, tránh N queries.
