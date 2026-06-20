@@ -50,10 +50,37 @@ def _probe_snmp(ip: str, community: str = "public") -> tuple[bool, str]:
 
 
 # Views
+_SORTABLE_FIELDS = {"name", "ip"}
+
+
+def _order_devices(sort: str, direction: str):
+    desc = direction == "desc"
+    if sort == "ip":
+        devices = list(Device.objects.all())
+        devices.sort(
+            key=lambda d: ipaddress.ip_address(str(d.ip_address)),
+            reverse=desc,
+        )
+        return devices
+    order = "-name" if desc else "name"
+    return Device.objects.all().order_by(order)
+
+
 @login_required
 def device_list(request):
-    devices = Device.objects.all().order_by("device_type", "name")
-    return render(request, "devices/list.html", {"devices": devices})
+    sort = request.GET.get("sort", "name")
+    direction = request.GET.get("dir", "asc")
+    if sort not in _SORTABLE_FIELDS:
+        sort = "name"
+    if direction not in ("asc", "desc"):
+        direction = "asc"
+
+    devices = _order_devices(sort, direction)
+    return render(
+        request,
+        "devices/list.html",
+        {"devices": devices, "sort": sort, "dir": direction},
+    )
 
 
 @login_required

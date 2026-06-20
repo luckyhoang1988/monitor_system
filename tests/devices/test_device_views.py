@@ -18,6 +18,20 @@ class TestDeviceViews:
         assert response.status_code == 200
         assert device.name in response.content.decode("utf-8")
 
+    def test_device_list_sort_by_name(self, logged_in_client):
+        CiscoSNMPDeviceFactory(name="Z-Switch", ip_address="10.0.0.2")
+        CiscoSNMPDeviceFactory(name="A-Switch", ip_address="10.0.0.1")
+        response = logged_in_client.get(reverse("devices:list"), {"sort": "name", "dir": "asc"})
+        content = response.content.decode("utf-8")
+        assert content.index("A-Switch") < content.index("Z-Switch")
+
+    def test_device_list_sort_by_ip(self, logged_in_client):
+        CiscoSNMPDeviceFactory(name="Device-B", ip_address="10.0.0.10")
+        CiscoSNMPDeviceFactory(name="Device-A", ip_address="10.0.0.2")
+        response = logged_in_client.get(reverse("devices:list"), {"sort": "ip", "dir": "asc"})
+        content = response.content.decode("utf-8")
+        assert content.index("10.0.0.2") < content.index("10.0.0.10")
+
     def test_device_add_view_get(self, logged_in_client):
         response = logged_in_client.get(reverse("devices:add"))
         assert response.status_code == 200

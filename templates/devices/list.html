@@ -21,9 +21,29 @@
     <table class="table table-hover mb-0">
       <thead class="table-light">
         <tr>
-          <th class="ps-3">Tên</th>
+          <th class="ps-3">
+            <a href="?sort=name&dir={% if sort == 'name' and dir == 'asc' %}desc{% else %}asc{% endif %}"
+               class="text-decoration-none text-dark d-inline-flex align-items-center gap-1">
+              Tên
+              {% if sort == 'name' %}
+                <i class="bi bi-caret-{% if dir == 'asc' %}up{% else %}down{% endif %}-fill small"></i>
+              {% else %}
+                <i class="bi bi-arrow-down-up text-muted small opacity-50"></i>
+              {% endif %}
+            </a>
+          </th>
           <th>Loại</th>
-          <th>IP</th>
+          <th>
+            <a href="?sort=ip&dir={% if sort == 'ip' and dir == 'asc' %}desc{% else %}asc{% endif %}"
+               class="text-decoration-none text-dark d-inline-flex align-items-center gap-1">
+              IP
+              {% if sort == 'ip' %}
+                <i class="bi bi-caret-{% if dir == 'asc' %}up{% else %}down{% endif %}-fill small"></i>
+              {% else %}
+                <i class="bi bi-arrow-down-up text-muted small opacity-50"></i>
+              {% endif %}
+            </a>
+          </th>
           <th>Vendor</th>
           <th>Giao thức</th>
           <th>Trạng thái</th>
