@@ -221,6 +221,17 @@ class TestSnmpV3SessionArgs:
         with pytest.raises(ValueError, match="username"):
             SwitchSNMPCollector(device)
 
+    def test_v3_legacy_device_without_v3_fields_raises_value_error_instead_of_attribute_error(self):
+        class LegacyDevice:
+            ip_address = "10.0.0.1"
+            snmp_version = "v3"
+            snmp_community = ""
+            name = "legacy-switch"
+
+        device = LegacyDevice()
+        with pytest.raises(ValueError, match="username"):
+            SwitchSNMPCollector(device)
+
 
 # ---------------------------------------------------------------------------
 # adapt
@@ -250,3 +261,32 @@ class TestAdapt:
                "mem_percent": 0.0, "uptime_secs": 0, "interfaces": []}
         result = collector.adapt(raw)
         assert result.timestamp.tzinfo == timezone.utc
+
+
+class TestCollectRawResilience:
+    def test_collect_raw_cisco_missing_memory_oids_does_not_raise(self, mocker):
+        collector = SwitchSNMPCollector(CiscoSNMPDeviceFactory.build())
+        mocker.patch.object(collector, "detect_os_family", return_value="cisco_ios")
+        mocker.patch("apps.collectors.switch_snmp._load_oid_profile", return_value={
+            "cpu": {"cpu_5min": "1.2.3"},
+            "memory": {},
+        })
+        mocker.patch.object(collector, "_snmp_get", return_value=0)
+        mocker.patch.object(collector, "_collect_interfaces", return_value=[])
+
+        raw = collector.collect_raw()
+        assert raw["mem_percent"] == 0.0
+
+    def test_collect_raw_mikrotik_missing_memory_oids_does_not_raise(self, mocker):
+        collector = SwitchSNMPCollector(CiscoSNMPDeviceFactory.build())
+        mocker.patch.object(collector, "detect_os_family", return_value="mikrotik_routeros")
+        mocker.patch("apps.collectors.switch_snmp._load_oid_profile", return_value={
+            "cpu": {"processor_table": "1.2.3"},
+            "memory": {},
+        })
+        mocker.patch.object(collector, "_snmp_walk", return_value=[("1.2.3.1", "10")])
+        mocker.patch.object(collector, "_snmp_get", return_value=0)
+        mocker.patch.object(collector, "_collect_interfaces", return_value=[])
+
+        raw = collector.collect_raw()
+        assert raw["mem_percent"] == 0.0

@@ -207,11 +207,12 @@ class SwitchSNMPCollector(BaseCollector):
             return kwargs
 
         # SNMPv3
-        username = (self.device.snmpv3_username or "").strip()
-        auth_protocol = (self.device.snmpv3_auth_protocol or "").strip()
-        auth_password = (self.device.snmpv3_auth_password or "").strip()
-        priv_protocol = (self.device.snmpv3_priv_protocol or "").strip()
-        priv_password = (self.device.snmpv3_priv_password or "").strip()
+        # Dùng getattr để tương thích dữ liệu/model cũ chưa có đủ field SNMPv3.
+        username = (getattr(self.device, "snmpv3_username", "") or "").strip()
+        auth_protocol = (getattr(self.device, "snmpv3_auth_protocol", "") or "").strip()
+        auth_password = (getattr(self.device, "snmpv3_auth_password", "") or "").strip()
+        priv_protocol = (getattr(self.device, "snmpv3_priv_protocol", "") or "").strip()
+        priv_password = (getattr(self.device, "snmpv3_priv_password", "") or "").strip()
 
         if not username:
             raise ValueError("SNMPv3 yêu cầu username.")
@@ -336,11 +337,15 @@ class SwitchSNMPCollector(BaseCollector):
 
     def _collect_cpu_mem_mikrotik(self, oid_profile: dict) -> tuple[float, float]:
         """CPU và Memory cho MikroTik RouterOS."""
-        cpu_rows = self._snmp_walk(oid_profile["cpu"]["processor_table"])
+        cpu_table_oid = oid_profile.get("cpu", {}).get("processor_table")
+        cpu_rows = self._snmp_walk(cpu_table_oid) if cpu_table_oid else []
         cpu_val  = float(cpu_rows[0][1]) if cpu_rows else 0.0
 
-        mem_used  = int(self._snmp_get(oid_profile["memory"]["mem_used"])  or 0)
-        mem_total = int(self._snmp_get(oid_profile["memory"]["mem_total"]) or 1)
+        mem_profile = oid_profile.get("memory", {})
+        mem_used_oid = mem_profile.get("mem_used")
+        mem_total_oid = mem_profile.get("mem_total")
+        mem_used = int(self._snmp_get(mem_used_oid) or 0) if mem_used_oid else 0
+        mem_total = int(self._snmp_get(mem_total_oid) or 1) if mem_total_oid else 1
         mem_val   = mem_used / mem_total * 100 if mem_total else 0.0
         return cpu_val, round(mem_val, 1)
 
@@ -375,13 +380,20 @@ class SwitchSNMPCollector(BaseCollector):
         else:
             # Cisco IOS / IOS-XE: CPU từ OID 5-min, Memory cần tính
             cpu_val  = float(self._snmp_get(oid_profile["cpu"]["cpu_5min"]) or 0)
-            mem_profile = oid_profile["memory"]
+            mem_profile = oid_profile.get("memory", {})
             mem_used_oid = mem_profile.get("mem_used") or mem_profile.get("mem_processor_used")
             mem_free_oid = mem_profile.get("mem_free") or mem_profile.get("mem_processor_free")
             if not mem_used_oid or not mem_free_oid:
-                raise KeyError("OID profile memory thiếu mem_used/mem_free cho Cisco.")
-            mem_used = int(self._snmp_get(mem_used_oid) or 0)
-            mem_free = int(self._snmp_get(mem_free_oid) or 1)
+                logger.warning(
+                    "OID profile memory thiếu key dùng được cho %s (%s).",
+                    self.device.name,
+                    os_family,
+                )
+                mem_used = 0
+                mem_free = 1
+            else:
+                mem_used = int(self._snmp_get(mem_used_oid) or 0)
+                mem_free = int(self._snmp_get(mem_free_oid) or 1)
             mem_val  = mem_used / (mem_used + mem_free) * 100 if (mem_used + mem_free) else 0
 
         return {
