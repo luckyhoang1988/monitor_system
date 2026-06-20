@@ -35,3 +35,6 @@ Thumbs.db
 
 # Debug logs
 debug-*.log
+
+# TLS certificates (private keys — never commit)
+nginx/certs/

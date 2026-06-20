@@ -23,6 +23,19 @@ SECURE_BROWSER_XSS_FILTER = True
 X_FRAME_OPTIONS = "DENY"
 SECURE_CONTENT_TYPE_NOSNIFF = True
 
+# ── HTTPS sau reverse proxy (nginx termination) ──
+# nginx set header X-Forwarded-Proto=https → Django coi request la secure
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+# nginx da lo viec redirect 80→443, khong de Django redirect (tranh double redirect)
+SECURE_SSL_REDIRECT = False
+SESSION_COOKIE_SECURE = True
+CSRF_COOKIE_SECURE = True
+# Origin tin cay cho POST/CSRF qua HTTPS (Django 4+). Mac dinh suy ra tu ALLOWED_HOSTS.
+CSRF_TRUSTED_ORIGINS = env.list(
+    "CSRF_TRUSTED_ORIGINS",
+    default=[f"https://{h}" for h in ALLOWED_HOSTS],
+)
+
 EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
 EMAIL_HOST          = SMTP_HOST
 EMAIL_PORT          = SMTP_PORT
