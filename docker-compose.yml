@@ -4,13 +4,13 @@ services:
     restart: unless-stopped
     env_file: .env.production
     environment:
-      POSTGRES_DB: ${DB_NAME}
-      POSTGRES_USER: ${DB_USER}
-      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME:-monitor_db}
+      POSTGRES_USER: ${DB_USER:-monitor_user}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-change_me_db_password}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-monitor_user} -d ${DB_NAME:-monitor_db}"]
       interval: 10s
       timeout: 5s
       retries: 5
