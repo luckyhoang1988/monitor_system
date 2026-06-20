@@ -1,0 +1,22 @@
+---
+description: Quy trình deploy sau khi chỉnh sửa code
+alwaysApply: true
+---
+
+# Deploy Workflow
+
+Sau khi hoàn thành chỉnh sửa code (khi user yêu cầu hoặc task xong), thực hiện:
+
+1. **Commit** thay đổi lên branch `master`
+2. **Push** lên GitHub: `git push origin master`
+3. **Pull trên server** qua SSH alias `monitorsrv`:
+
+```powershell
+ssh monitorsrv "cd /home/monitorsys/monitor_system && git pull origin master && docker compose up -d --build app worker beat && docker compose restart nginx && docker compose ps"
+```
+
+## Thông tin server
+- SSH alias: `monitorsrv`
+- Đường dẫn project: `/home/monitorsys/monitor_system`
+- Deploy: Docker Compose (app + worker + beat)
+- Remote: `https://github.com/luckyhoang1988/monitor_system.git`
