@@ -140,10 +140,10 @@
             {% endif %}
           </td>
           <td class="text-end font-monospace">
-            {% if iface.cur_in_mbps is not None %}{{ iface.cur_in_mbps|floatformat:2 }}{% else %}—{% endif %}
+            {% if iface.cur_in_mbps is not None %}{{ iface.cur_in_mbps|floatformat:3 }}{% else %}—{% endif %}
           </td>
           <td class="text-end pe-3 font-monospace">
-            {% if iface.cur_out_mbps is not None %}{{ iface.cur_out_mbps|floatformat:2 }}{% else %}—{% endif %}
+            {% if iface.cur_out_mbps is not None %}{{ iface.cur_out_mbps|floatformat:3 }}{% else %}—{% endif %}
           </td>
         </tr>
         {% endfor %}
@@ -210,9 +210,16 @@ function loadTraffic(range) {
   fetch(`${API_IFACES}?range=${range}`)
     .then(r => r.json())
     .then(d => {
-      // Show only uplink interfaces
+      const peak = (iface) => Math.max(
+        ...(iface.in_mbps || [0]),
+        ...(iface.out_mbps || [0]),
+        0,
+      );
       const uplinks = d.interfaces.filter(i => i.is_uplink);
-      const target  = uplinks.length ? uplinks : d.interfaces.slice(0, 4);
+      const active  = d.interfaces.filter(i => peak(i) > 0);
+      const target  = uplinks.length
+        ? uplinks
+        : (active.length ? active.slice(0, 6) : d.interfaces.slice(0, 4));
       const colors  = ["#3b82f6","#10b981","#f59e0b","#ef4444","#8b5cf6","#06b6d4"];
       trafficChart.data.labels   = target[0]?.labels ?? [];
       trafficChart.data.datasets = [];

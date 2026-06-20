@@ -18,6 +18,12 @@ TRUNK_NAME_PREFIXES = (
     "lag",
     "ae",              # Juniper aggregated ethernet style
     "trunk",
+    "xgigabit",        # Huawei 10G
+    "xge",
+    "10ge",
+    "25ge",
+    "40ge",
+    "100ge",
 )
 TRUNK_DESC_KEYWORDS = (
     "trunk",
@@ -121,7 +127,8 @@ def _save_interface_stats(device: Device, data: NormalizedData) -> None:
     cutoff = data.timestamp - timedelta(seconds=device.collect_interval * 3)
     recent_stats = InterfaceStats.objects.filter(
         interface__device=device,
-        timestamp__gte=cutoff
+        timestamp__lt=data.timestamp,
+        timestamp__gte=cutoff,
     ).order_by("interface_id", "-timestamp")
 
     prev_stats_dict = {}

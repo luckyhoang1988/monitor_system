@@ -118,6 +118,14 @@ def switch_detail(request, pk):
         cur_in_mbps  =Subquery(latest_status.values("in_mbps")[:1]),
         cur_out_mbps =Subquery(latest_status.values("out_mbps")[:1]),
     )
+    interfaces = sorted(
+        interfaces,
+        key=lambda i: (
+            -int(i.is_uplink),
+            -float(i.cur_in_mbps or 0) - float(i.cur_out_mbps or 0),
+            i.if_index,
+        ),
+    )
 
     return render(request, "dashboard/switch_detail.html", {
         "device":         device,
@@ -180,6 +188,14 @@ def _switch_like_detail(request, pk: int, device_type: str, template: str):
         cur_status   =Subquery(latest_status.values("status")[:1]),
         cur_in_mbps  =Subquery(latest_status.values("in_mbps")[:1]),
         cur_out_mbps =Subquery(latest_status.values("out_mbps")[:1]),
+    )
+    interfaces = sorted(
+        interfaces,
+        key=lambda i: (
+            -int(i.is_uplink),
+            -float(i.cur_in_mbps or 0) - float(i.cur_out_mbps or 0),
+            i.if_index,
+        ),
     )
     return render(request, template, {
         "device":        device,
