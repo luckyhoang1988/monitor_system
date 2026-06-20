@@ -34,6 +34,7 @@ services:
     environment:
       DJANGO_SETTINGS_MODULE: config.settings.production
       HOME: /tmp
+      TZ: Asia/Ho_Chi_Minh
     volumes:
       - static_volume:/app/staticfiles
       - backup_volume:/app/backups
@@ -57,6 +58,7 @@ services:
     environment:
       DJANGO_SETTINGS_MODULE: config.settings.production
       HOME: /tmp
+      TZ: Asia/Ho_Chi_Minh
     command: celery -A config worker -l info --concurrency=2
     volumes:
       - backup_volume:/app/backups
@@ -73,6 +75,7 @@ services:
     environment:
       DJANGO_SETTINGS_MODULE: config.settings.production
       HOME: /tmp
+      TZ: Asia/Ho_Chi_Minh
     command: celery -A config beat -l info --scheduler django_celery_beat.schedulers:DatabaseScheduler
     depends_on:
       db:
@@ -83,6 +86,8 @@ services:
   nginx:
     image: nginx:alpine
     restart: unless-stopped
+    environment:
+      TZ: Asia/Ho_Chi_Minh
     ports:
       - "80:80"
       - "443:443"
