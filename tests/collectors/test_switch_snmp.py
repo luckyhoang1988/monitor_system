@@ -290,3 +290,31 @@ class TestCollectRawResilience:
 
         raw = collector.collect_raw()
         assert raw["mem_percent"] == 0.0
+
+    def test_collect_cpu_mem_huawei_walks_entity_table_when_scalar_empty(self, mocker):
+        collector = SwitchSNMPCollector(HuaweiSNMPDeviceFactory.build())
+        mocker.patch.object(collector, "_snmp_get", return_value="")
+        mocker.patch.object(collector, "_snmp_walk", side_effect=[
+            [
+                ("1.3.6.1.4.1.2011.5.25.31.1.1.1.1.6.67108867", "0"),
+                ("1.3.6.1.4.1.2011.5.25.31.1.1.1.1.6.67108873", "95"),
+            ],
+            [
+                ("1.3.6.1.4.1.2011.5.25.31.1.1.1.1.5.67108867", "0"),
+                ("1.3.6.1.4.1.2011.5.25.31.1.1.1.1.5.67108873", "6"),
+            ],
+        ])
+
+        cpu_val, mem_val = collector._collect_cpu_mem_huawei({
+            "cpu": {
+                "cpu_usage": "1.3.6.1.4.1.2011.5.25.31.1.1.1.1.6.0",
+                "cpu_table": "1.3.6.1.4.1.2011.5.25.31.1.1.1.1.6",
+            },
+            "memory": {
+                "mem_usage": "1.3.6.1.4.1.2011.5.25.31.1.1.1.1.5.0",
+                "mem_table": "1.3.6.1.4.1.2011.5.25.31.1.1.1.1.5",
+            },
+        })
+
+        assert cpu_val == 95.0
+        assert mem_val == 6.0

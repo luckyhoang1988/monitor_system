@@ -8,14 +8,14 @@ enterprise_oid_prefix: "1.3.6.1.4.1.2011"
 
 cpu:
   # HUAWEI-ENTITY-EXTENT-MIB — hwEntityCpuUsage
-  # .0 tương ứng entity index 1 (main CPU)
+  # .0 thường trống trên S5700/S6700 — collector sẽ walk table nếu GET fail
   cpu_usage: "1.3.6.1.4.1.2011.5.25.31.1.1.1.1.6.0"   # % CPU — DÙNG CHO ALERT
-  # Để lấy CPU của từng card/slot: walk table 1.3.6.1.4.1.2011.5.25.31.1.1.1.1.6
+  cpu_table: "1.3.6.1.4.1.2011.5.25.31.1.1.1.1.6"     # walk khi scalar trống
 
 memory:
   # HUAWEI-ENTITY-EXTENT-MIB — hwEntityMemUsage (phần trăm trực tiếp)
   mem_usage: "1.3.6.1.4.1.2011.5.25.31.1.1.1.1.5.0"   # % Memory — DÙNG CHO ALERT
-  # Không cần tính toán — đã là % sẵn (khác Cisco)
+  mem_table: "1.3.6.1.4.1.2011.5.25.31.1.1.1.1.5"     # walk khi scalar trống
 
 # Chú ý: Huawei trả về % trực tiếp, không cần tính từ used/free
 mem_percent_formula: "mem_usage"   # dùng thẳng, không cần formula

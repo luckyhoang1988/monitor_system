@@ -162,7 +162,7 @@ def _calc_mbps(
     fallback_interval_secs: int,
 ) -> tuple[float, float]:
     """Tính tốc độ Mbps từ delta bytes / delta time giữa 2 poll."""
-    if not prev_stat or prev_stat.in_bytes == 0:
+    if not prev_stat:
         return 0.0, 0.0
     try:
         # seconds between samples

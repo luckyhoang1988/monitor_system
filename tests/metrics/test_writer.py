@@ -33,14 +33,16 @@ class TestCalcMbps:
                             in_bytes=1_000_000, out_bytes=500_000)
         assert _calc_mbps(None, new, make_timestamp(), fallback_interval_secs=300) == (0.0, 0.0)
 
-    def test_prev_in_bytes_zero_returns_zeros(self, iface):
+    def test_prev_in_bytes_zero_still_calculates_delta(self, iface):
         prev = InterfaceStats.objects.create(
             interface=iface, timestamp=make_timestamp(300),
             status="up", in_bytes=0, out_bytes=0,
         )
         new = InterfaceData(name="Gi0/1", if_index=1, status="up",
                             in_bytes=1_000_000, out_bytes=500_000)
-        assert _calc_mbps(prev, new, make_timestamp(), fallback_interval_secs=300) == (0.0, 0.0)
+        in_mbps, out_mbps = _calc_mbps(prev, new, make_timestamp(), fallback_interval_secs=300)
+        assert in_mbps > 0
+        assert out_mbps > 0
 
     def test_normal_delta_in(self, iface):
         prev = InterfaceStats.objects.create(

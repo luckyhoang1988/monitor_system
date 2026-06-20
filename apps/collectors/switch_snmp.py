@@ -205,6 +205,48 @@ class SwitchSNMPCollector(BaseCollector):
         mem_val = float(self._snmp_get(oid_profile["memory"]["mem_usage"]) or 0)
         return cpu_val, mem_val
 
+    def _collect_cpu_mem_huawei(self, oid_profile: dict) -> tuple[float, float]:
+        """Huawei VRP — scalar .0 thường trống, cần walk entity table."""
+        cpu_scalar = oid_profile["cpu"]["cpu_usage"]
+        mem_scalar = oid_profile["memory"]["mem_usage"]
+        cpu_table = oid_profile["cpu"].get("cpu_table", cpu_scalar.rsplit(".", 1)[0])
+        mem_table = oid_profile["memory"].get("mem_table", mem_scalar.rsplit(".", 1)[0])
+
+        cpu_val = float(self._snmp_get(cpu_scalar) or 0)
+        mem_val = float(self._snmp_get(mem_scalar) or 0)
+        if cpu_val and mem_val:
+            return cpu_val, mem_val
+
+        cpu_rows = self._snmp_walk(cpu_table)
+        best_idx = ""
+        best_cpu = 0.0
+        mem_by_idx: dict[str, float] = {}
+
+        for oid, val in self._snmp_walk(mem_table):
+            idx = oid.split(".")[-1]
+            mem_by_idx[idx] = float(val or 0)
+
+        for oid, val in cpu_rows:
+            idx = oid.split(".")[-1]
+            cpu = float(val or 0)
+            if cpu >= best_cpu:
+                best_cpu = cpu
+                best_idx = idx
+
+        if not cpu_val and best_cpu:
+            cpu_val = best_cpu
+        if not mem_val and best_idx:
+            mem_val = mem_by_idx.get(best_idx, 0.0)
+        if not mem_val and mem_by_idx:
+            mem_val = max(mem_by_idx.values())
+
+        if not cpu_val and not mem_val:
+            logger.warning(
+                "Huawei CPU/Memory SNMP trả rỗng trên %s — kiểm tra SNMP view cho 1.3.6.1.4.1.2011.*",
+                self.device.name,
+            )
+        return cpu_val, mem_val
+
     def collect_raw(self) -> dict:
         os_family   = self.detect_os_family()
         oid_profile = _load_oid_profile(os_family)
@@ -224,8 +266,7 @@ class SwitchSNMPCollector(BaseCollector):
                     extra["session_count"] = int(ses)
 
         elif os_family == "huawei_vrp":
-            cpu_val = float(self._snmp_get(oid_profile["cpu"]["cpu_usage"]) or 0)
-            mem_val = float(self._snmp_get(oid_profile["memory"]["mem_usage"]) or 0)
+            cpu_val, mem_val = self._collect_cpu_mem_huawei(oid_profile)
 
         else:
             # Cisco IOS / IOS-XE: CPU từ OID 5-min, Memory cần tính
