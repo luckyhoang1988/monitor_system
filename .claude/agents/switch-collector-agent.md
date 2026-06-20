@@ -23,10 +23,17 @@ Bạn là một network engineer Python developer chuyên về giám sát thiế
 
 ## OID quan trọng cần biết
 - `1.3.6.1.2.1.1.1.0` — sysDescr
-- `1.3.6.1.2.1.2.2.1.10` — ifInOctets
+- `1.3.6.1.2.1.2.2.1.10` — ifInOctets (32-bit); ưu tiên HC 64-bit `1.3.6.1.2.1.31.1.1.1.6` (in) / `.10` (out)
 - `1.3.6.1.2.1.2.2.1.16` — ifOutOctets
 - `1.3.6.1.2.1.2.2.1.14` — ifInErrors
-- `1.3.6.1.4.1.9.2.1.58.0` — Cisco CPU 5min (OID riêng từng hãng)
+- `1.3.6.1.4.1.9.2.1.58.0` — Cisco IOS CPU 5min (OLD-CISCO-CPU-MIB)
+- `1.3.6.1.4.1.9.6.1.101.1.9.0` — Cisco Business (Catalyst 1200/CBS) CPU 5min (mem KHÔNG có qua SNMP)
+
+### Huawei VRP/YunShan — `hwEntityResourceTable` (đã xác minh runtime, ĐỪNG gán nhầm)
+- `1.3.6.1.4.1.2011.5.25.31.1.1.1.1.5` — **hwEntityCpuUsage** (CPU % thật) ✅
+- `1.3.6.1.4.1.2011.5.25.31.1.1.1.1.6` — hwEntityCpuUsageThreshold (NGƯỠNG, KHÔNG phải CPU) ❌
+- `1.3.6.1.4.1.2011.5.25.31.1.1.1.1.7` — **hwEntityMemUsage** (Memory % thật) ✅
+- Scalar `.0` thường trống → walk table, lấy entity MPU/mainboard (value > 0).
 
 ## Thư viện ưu tiên
 - `easysnmp` (SNMP v2c/v3)

@@ -51,6 +51,31 @@ apps/
 - Type hints bắt buộc cho collector/adapter
 - Log: `logger.info("Device %s: CPU %.1f%%", device.name, value)`
 
+## OID đã xác minh runtime (theo từng OS-family)
+> Đã quét fleet thật 16 thiết bị (2026-06). Ghi lại để không lặp lỗi gán nhầm OID.
+
+### Huawei VRP / YunShan OS — `hwEntityResourceTable` (1.3.6.1.4.1.2011.5.25.31.1.1.1.1.X)
+| Cột | OID đầy đủ | Ý nghĩa | Dùng |
+|---|---|---|---|
+| `.5` | `...1.1.1.1.5` | **hwEntityCpuUsage** (CPU % thật) | ✅ CPU |
+| `.6` | `...1.1.1.1.6` | hwEntityCpuUsageThreshold (NGƯỠNG, mặc định 90/95) | ❌ KHÔNG phải CPU |
+| `.7` | `...1.1.1.1.7` | **hwEntityMemUsage** (Memory % thật) | ✅ Memory |
+- **CẢNH BÁO**: từng gán nhầm CPU→`.6` (ngưỡng) → mọi switch báo CPU 90-95% giả; Mem→`.5` (CPU). Đã fix.
+- Scalar `.0` thường trống → collector walk table, lấy entity "MPU Board"/mainboard (giá trị > 0).
+- VRP V5 (S5735 V200R021) và YunShan OS (CloudEngine S5735-L-V2 V600R023/024) **dùng chung cấu trúc OID này**.
+
+### Cisco IOS classic (C2960X...) — OK
+- CPU: OLD-CISCO-CPU-MIB `1.3.6.1.4.1.9.2.1.58.0` (5min). Mem: CISCO-MEMORY-POOL-MIB pool `.1`.
+
+### Cisco Business / SMB (Catalyst 1200/1300, CBS250/350)
+- CPU: `rlCpuUtil` `1.3.6.1.4.1.9.6.1.101.1.9.0`. **Memory KHÔNG expose qua SNMP → mem=0** (giới hạn phần cứng, không phải bug).
+
+### Cisco IOS-XE — ⚠️ CHƯA kiểm chứng runtime (không có thiết bị trong fleet)
+- CPU/mem hard-code index `.1` (`...109.1.1.1.1.5.1`, pool `.5.1/.6.1`). Cần walk/verify khi có thiết bị IOS-XE thật (index có thể khác trên stack/multi-RP).
+
+### Interface (mọi vendor) — MIB-II standard, OK
+- Dùng 64-bit HC counters (`ifHCInOctets/Out` = `.31.1.1.1.6/.10`). Fleet hiện tại đều hỗ trợ HC.
+
 ## Chạy dev
 ```bash
 cp .env.example .env          # điền giá trị
