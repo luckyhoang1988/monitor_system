@@ -217,9 +217,10 @@ function loadTraffic(range) {
       );
       const uplinks = d.interfaces.filter(i => i.is_uplink);
       const active  = d.interfaces.filter(i => peak(i) > 0);
-      const target  = uplinks.length
-        ? uplinks
-        : (active.length ? active.slice(0, 6) : d.interfaces.slice(0, 4));
+      const uplinksActive = uplinks.filter(i => peak(i) > 0);
+      const target  = uplinksActive.length
+        ? uplinksActive
+        : (active.length ? active.slice(0, 6) : uplinks.length ? uplinks.slice(0, 4) : d.interfaces.slice(0, 4));
       const colors  = ["#3b82f6","#10b981","#f59e0b","#ef4444","#8b5cf6","#06b6d4"];
       trafficChart.data.labels   = target[0]?.labels ?? [];
       trafficChart.data.datasets = [];

@@ -38,6 +38,13 @@ class TestDetectOsFamily:
         ])
         assert cisco_collector.detect_os_family() == "cisco_iosxe"
 
+    def test_detects_cisco_business_c1200(self, mocker, cisco_collector):
+        mocker.patch.object(cisco_collector, "_snmp_get", side_effect=[
+            "1.3.6.1.4.1.9.1.3212",
+            "Catalyst 1200 Series Smart Switch, 8-port GE",
+        ])
+        assert cisco_collector.detect_os_family() == "cisco_business"
+
     def test_detects_cisco_iosxe_hyphen(self, mocker, cisco_collector):
         mocker.patch.object(cisco_collector, "_snmp_get", side_effect=[
             "1.3.6.1.4.1.9.1.2227",
@@ -318,3 +325,12 @@ class TestCollectRawResilience:
 
         assert cpu_val == 95.0
         assert mem_val == 6.0
+
+    def test_collect_cpu_mem_cisco_business(self, mocker):
+        collector = SwitchSNMPCollector(CiscoSNMPDeviceFactory.build())
+        mocker.patch.object(collector, "_snmp_get", return_value="12")
+        cpu_val, mem_val = collector._collect_cpu_mem_cisco_business({
+            "cpu": {"cpu_5min": "1.3.6.1.4.1.9.6.1.101.1.9.0"},
+        })
+        assert cpu_val == 12.0
+        assert mem_val == 0.0

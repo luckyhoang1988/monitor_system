@@ -41,6 +41,20 @@ OID_IF_SPEED   = "1.3.6.1.2.1.31.1.1.1.15"  # ifHighSpeed (Mbps)
 IF_STATUS_MAP = {1: "up", 2: "down", 3: "testing", 4: "unknown",
                  5: "dormant", 6: "notPresent", 7: "lowerLayerDown"}
 
+_CISCO_BUSINESS_MARKERS = (
+    "catalyst 1200",
+    "catalyst 1300",
+    "cbs250",
+    "cbs350",
+    "cbs220",
+    "cbs150",
+)
+
+
+def _is_cisco_business(sys_desc: str) -> bool:
+    lowered = sys_desc.lower()
+    return any(marker in lowered for marker in _CISCO_BUSINESS_MARKERS)
+
 
 def _load_oid_profile(os_family: str) -> dict:
     path = OID_DIR / f"{os_family}.yaml"
@@ -140,6 +154,10 @@ class SwitchSNMPCollector(BaseCollector):
         # Huawei — enterprise prefix 2011
         if "2011" in sys_oid or "VRP" in sys_desc:
             return "huawei_vrp"
+
+        # Cisco Business (Catalyst 1200/1300, CBS) — OID khác enterprise IOS
+        if _is_cisco_business(sys_desc):
+            return "cisco_business"
 
         # Cisco — enterprise prefix 9
         if "IOS-XE" in sys_desc or "IOS XE" in sys_desc:
@@ -247,6 +265,11 @@ class SwitchSNMPCollector(BaseCollector):
             )
         return cpu_val, mem_val
 
+    def _collect_cpu_mem_cisco_business(self, oid_profile: dict) -> tuple[float, float]:
+        """Catalyst 1200/1300, CBS — rlCpuUtil OID, không có memory % qua SNMP."""
+        cpu_val = float(self._snmp_get(oid_profile["cpu"]["cpu_5min"]) or 0)
+        return cpu_val, 0.0
+
     def collect_raw(self) -> dict:
         os_family   = self.detect_os_family()
         oid_profile = _load_oid_profile(os_family)
@@ -267,6 +290,9 @@ class SwitchSNMPCollector(BaseCollector):
 
         elif os_family == "huawei_vrp":
             cpu_val, mem_val = self._collect_cpu_mem_huawei(oid_profile)
+
+        elif os_family == "cisco_business":
+            cpu_val, mem_val = self._collect_cpu_mem_cisco_business(oid_profile)
 
         else:
             # Cisco IOS / IOS-XE: CPU từ OID 5-min, Memory cần tính
