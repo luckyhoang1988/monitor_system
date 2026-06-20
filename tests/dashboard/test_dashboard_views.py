@@ -54,6 +54,17 @@ class TestDashboardViews:
         assert stats["firewall"]["total"] == 1
         assert stats["hyperv"]["total"] == 0
 
+    def test_dashboard_index_shows_all_device_panels(self, logged_in_client):
+        response = logged_in_client.get(reverse("dashboard:index"))
+        assert response.status_code == 200
+        content = response.content.decode("utf-8")
+        assert "Switch (" in content
+        assert "Router (" in content
+        assert "Firewall (" in content
+        assert "HyperV (" in content
+        assert "dashboard-panels" in content
+        assert "grid-template-rows: repeat(2" in content
+
     def test_dashboard_index_shows_offline_notice_with_group_per_line(self, logged_in_client):
         online_sw = CiscoSNMPDeviceFactory(name="sw-online", device_type="switch")
         online_sw.last_seen = timezone.now() - timedelta(seconds=30)
