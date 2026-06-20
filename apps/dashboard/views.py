@@ -32,6 +32,12 @@ def health_check(request):
 def index(request):
     # 1 query instead of 4 separate device_type queries
     all_devices = list(Device.objects.filter(enabled=True).order_by("device_type", "name"))
+    group_labels = {
+        "switch": "Switch",
+        "router": "Router",
+        "firewall": "Firewall",
+        "hyperv": "HyperV",
+    }
     by_type: dict[str, list] = defaultdict(list)
     for d in all_devices:
         by_type[d.device_type].append(d)
@@ -39,7 +45,17 @@ def index(request):
     routers   = by_type["router"]
     firewalls = by_type["firewall"]
     hyperv    = by_type["hyperv"]
-    online_count = sum(1 for d in all_devices if d.is_online)
+    online_devices = [d for d in all_devices if d.is_online]
+    offline_devices = [d for d in all_devices if not d.is_online]
+    online_count = len(online_devices)
+    offline_notice_rows = [
+        {
+            "name": d.name,
+            "ip_address": d.ip_address,
+            "group_label": group_labels.get(d.device_type, d.device_type.title()),
+        }
+        for d in offline_devices
+    ]
     active_alerts = list(Alert.objects.filter(is_active=True)
                          .select_related("device", "rule")
                          .order_by("-triggered_at")[:20])
@@ -51,7 +67,8 @@ def index(request):
         "active_alerts":  active_alerts,
         "total_devices":  len(all_devices),
         "online_count":   online_count,
-        "offline_count":  len(all_devices) - online_count,
+        "offline_count":  len(offline_devices),
+        "offline_notice_rows": offline_notice_rows,
         "alert_count":    len(active_alerts),
     }
     return render(request, "dashboard/index.html", context)

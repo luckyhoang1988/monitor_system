@@ -1,5 +1,6 @@
 """Tests for Dashboard Views."""
 import pytest
+from datetime import timedelta
 from django.contrib.auth.models import User
 from django.urls import reverse
 from tests.conftest import (
@@ -39,6 +40,22 @@ class TestDashboardViews:
         assert "rt-1" in content
         assert "fw-1" in content
         assert "hv-1" in content
+
+    def test_dashboard_index_shows_offline_notice_with_group_per_line(self, logged_in_client):
+        online_sw = CiscoSNMPDeviceFactory(name="sw-online", device_type="switch")
+        online_sw.last_seen = timezone.now() - timedelta(seconds=30)
+        online_sw.save(update_fields=["last_seen"])
+        CiscoSNMPDeviceFactory(name="sw-offline", device_type="switch")
+        HyperVDeviceFactory(name="hv-offline", device_type="hyperv")
+
+        response = logged_in_client.get(reverse("dashboard:index"))
+        assert response.status_code == 200
+        content = response.content.decode("utf-8")
+        assert "Thiết bị đang Offline" in content
+        assert "sw-offline" in content
+        assert "hv-offline" in content
+        assert "Nhóm: Switch" in content
+        assert "Nhóm: HyperV" in content
 
     def test_switch_detail_view(self, logged_in_client):
         switch = CiscoSNMPDeviceFactory(name="sw-1", device_type="switch")
