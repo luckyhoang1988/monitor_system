@@ -109,6 +109,28 @@ class HyperVDeviceFactory(DeviceFactory):
 
 
 @pytest.fixture
+def logged_in_client(client, db):
+    """Client đăng nhập với quyền Network Admin (write)."""
+    from django.contrib.auth.models import User, Group
+    admin_group, _ = Group.objects.get_or_create(name="Network Admins")
+    user = User.objects.create_user(username="admin", password="password123")
+    user.groups.add(admin_group)
+    client.login(username="admin", password="password123")
+    return client
+
+
+@pytest.fixture
+def readonly_client(client, db):
+    """Client đăng nhập read-only (không có quyền write)."""
+    from django.contrib.auth.models import User, Group
+    read_group, _ = Group.objects.get_or_create(name="Read-Only Operators")
+    user = User.objects.create_user(username="readonly", password="password123")
+    user.groups.add(read_group)
+    client.login(username="readonly", password="password123")
+    return client
+
+
+@pytest.fixture
 def hyperv_device(db):
     return HyperVDeviceFactory()
 

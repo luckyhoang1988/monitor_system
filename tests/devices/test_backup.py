@@ -1,19 +1,11 @@
 """Tests for Switch/Router configuration backup via SSH."""
 import pytest
 import os
-from django.contrib.auth.models import User
 from django.urls import reverse
 from django.conf import settings
 from unittest.mock import patch, mock_open
 from tests.conftest import CiscoSSHDeviceFactory, CiscoSNMPDeviceFactory
 from apps.devices.backup import get_device_backups, save_backup_file
-
-
-@pytest.fixture
-def logged_in_client(client, db):
-    user = User.objects.create_user(username="admin", password="password123")
-    client.login(username="admin", password="password123")
-    return client
 
 
 @pytest.mark.django_db

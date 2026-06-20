@@ -8,26 +8,29 @@
   <span class="text-muted small"><i class="bi bi-clock me-1"></i>{{ "now"|date:"d/m/Y H:i" }}</span>
 </div>
 
-<!-- ===== Stat Cards ===== -->
+<!-- ===== Stat Cards theo loại thiết bị ===== -->
+<div class="row g-3 mb-3">
+  {% for stat in device_type_stats %}
+  <div class="col-6 col-xl-3">
+    <div class="stat-card">
+      <div class="stat-icon {{ stat.color_class }}"><i class="bi {{ stat.icon }}"></i></div>
+      <div>
+        <div class="text-muted small">{{ stat.label }}</div>
+        <div class="fs-3 fw-bold lh-1">{{ stat.total }}</div>
+        <div class="small mt-1">
+          <span class="text-success">{{ stat.online }} online</span>
+          {% if stat.offline %}
+            <span class="text-muted"> · </span>
+            <span class="text-danger">{{ stat.offline }} offline</span>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+
 <div class="row g-3 mb-4">
-  <div class="col-6 col-xl-3">
-    <div class="stat-card">
-      <div class="stat-icon text-primary"><i class="bi bi-hdd-network"></i></div>
-      <div>
-        <div class="text-muted small">Tổng thiết bị</div>
-        <div class="fs-3 fw-bold lh-1">{{ total_devices }}</div>
-      </div>
-    </div>
-  </div>
-  <div class="col-6 col-xl-3">
-    <div class="stat-card">
-      <div class="stat-icon text-success"><i class="bi bi-check-circle-fill"></i></div>
-      <div>
-        <div class="text-muted small">Online</div>
-        <div class="fs-3 fw-bold lh-1 text-success">{{ online_count }}</div>
-      </div>
-    </div>
-  </div>
   <div class="col-6 col-xl-3">
     <div class="stat-card">
       <div class="stat-icon text-danger"><i class="bi bi-x-circle-fill"></i></div>

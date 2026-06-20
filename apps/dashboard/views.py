@@ -38,6 +38,12 @@ def index(request):
         "firewall": "Firewall",
         "hyperv": "HyperV",
     }
+    device_type_meta = [
+        ("switch", "Switch", "bi-hdd-network", "text-primary"),
+        ("router", "Router", "bi-router", "text-warning"),
+        ("firewall", "Firewall", "bi-shield-fill-check", "text-danger"),
+        ("hyperv", "HyperV Host", "bi-server", "text-info"),
+    ]
     by_type: dict[str, list] = defaultdict(list)
     for d in all_devices:
         by_type[d.device_type].append(d)
@@ -45,6 +51,20 @@ def index(request):
     routers   = by_type["router"]
     firewalls = by_type["firewall"]
     hyperv    = by_type["hyperv"]
+    device_type_stats = []
+    for dtype, label, icon, color_class in device_type_meta:
+        devices = by_type.get(dtype, [])
+        online = sum(1 for d in devices if d.is_online)
+        total = len(devices)
+        device_type_stats.append({
+            "type": dtype,
+            "label": label,
+            "icon": icon,
+            "color_class": color_class,
+            "total": total,
+            "online": online,
+            "offline": total - online,
+        })
     online_devices = [d for d in all_devices if d.is_online]
     offline_devices = [d for d in all_devices if not d.is_online]
     online_count = len(online_devices)
@@ -65,6 +85,7 @@ def index(request):
         "firewalls":      firewalls,
         "hyperv_hosts":   hyperv,
         "active_alerts":  active_alerts,
+        "device_type_stats": device_type_stats,
         "total_devices":  len(all_devices),
         "online_count":   online_count,
         "offline_count":  len(offline_devices),

@@ -41,6 +41,19 @@ class TestDashboardViews:
         assert "fw-1" in content
         assert "hv-1" in content
 
+    def test_dashboard_index_shows_per_type_stats(self, logged_in_client):
+        CiscoSNMPDeviceFactory.create_batch(3, device_type="switch")
+        MikroTikSNMPDeviceFactory.create_batch(2, device_type="router")
+        FortinetSNMPDeviceFactory(name="fw-only", device_type="firewall")
+
+        response = logged_in_client.get(reverse("dashboard:index"))
+        assert response.status_code == 200
+        stats = {s["type"]: s for s in response.context["device_type_stats"]}
+        assert stats["switch"]["total"] == 3
+        assert stats["router"]["total"] == 2
+        assert stats["firewall"]["total"] == 1
+        assert stats["hyperv"]["total"] == 0
+
     def test_dashboard_index_shows_offline_notice_with_group_per_line(self, logged_in_client):
         online_sw = CiscoSNMPDeviceFactory(name="sw-online", device_type="switch")
         online_sw.last_seen = timezone.now() - timedelta(seconds=30)

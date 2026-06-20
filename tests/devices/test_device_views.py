@@ -1,17 +1,9 @@
 """Tests for Device Views."""
 import pytest
-from django.contrib.auth.models import User
 from django.urls import reverse
 from unittest.mock import patch
 from tests.conftest import CiscoSNMPDeviceFactory
 from apps.devices.models import Device
-
-
-@pytest.fixture
-def logged_in_client(client, db):
-    user = User.objects.create_user(username="admin", password="password123")
-    client.login(username="admin", password="password123")
-    return client
 
 
 @pytest.mark.django_db

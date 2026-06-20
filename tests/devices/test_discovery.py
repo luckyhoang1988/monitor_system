@@ -1,16 +1,8 @@
 """Tests for Auto-Discovery Scanner."""
 import pytest
-from django.contrib.auth.models import User
 from django.urls import reverse
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 from apps.devices.models import Device, DiscoveredDevice
-
-
-@pytest.fixture
-def logged_in_client(client, db):
-    user = User.objects.create_user(username="admin", password="password123")
-    client.login(username="admin", password="password123")
-    return client
 
 
 @pytest.mark.django_db
@@ -57,7 +49,7 @@ class TestDiscoveryViews:
         assert response.status_code == 200
         data = response.json()
         assert data["success"] is False
-        assert "vui lòng quét dải mạng tối đa /24" in data["message"].lower()
+        assert "256" in data["message"]
 
     @patch("apps.devices.views._ping_ip")
     @patch("apps.devices.views._probe_snmp")

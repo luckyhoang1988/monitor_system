@@ -1,8 +1,5 @@
 """SNMP Collector cho Switch — tự động detect vendor/OS-family."""
-import asyncio
 import logging
-import json
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -11,6 +8,12 @@ import yaml
 
 from .base import BaseCollector, NormalizedData, InterfaceData
 from .adapters import get_adapter
+from .snmp_client import (
+    create_snmp_session,
+    resolve_snmp_backend,
+    snmp_get_value,
+    snmp_walk_pairs,
+)
 
 if TYPE_CHECKING:
     from apps.devices.models import Device
@@ -18,7 +21,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 OID_DIR = Path(__file__).resolve().parent.parent.parent / "oids"
-DEBUG_LOG_PATH = Path(__file__).resolve().parent.parent.parent / "debug-f05be0.log"
 
 # OIDs dùng để auto-detect
 OID_SYS_DESCR    = "1.3.6.1.2.1.1.1.0"
@@ -40,124 +42,6 @@ IF_STATUS_MAP = {1: "up", 2: "down", 3: "testing", 4: "unknown",
                  5: "dormant", 6: "notPresent", 7: "lowerLayerDown"}
 
 
-@dataclass
-class _SnmpResult:
-    oid: str
-    value: str
-
-
-class _PySnmpSession:
-    """Fallback SNMP session dùng pysnmp cho môi trường không có easysnmp (Windows)."""
-    def __init__(self, *, hostname: str, version: int, community: str, timeout: int, retries: int) -> None:
-        if version not in (1, 2):
-            raise RuntimeError("Fallback pysnmp hiện chỉ hỗ trợ SNMP v1/v2c.")
-        self.hostname = hostname
-        self.mp_model = 0 if version == 1 else 1
-        self.community = community
-        self.timeout = float(timeout)
-        self.retries = int(retries)
-
-    async def _build_target(self):
-        from pysnmp.hlapi.v1arch import UdpTransportTarget
-        return await UdpTransportTarget.create(
-            (self.hostname, 161),
-            timeout=self.timeout,
-            retries=self.retries,
-        )
-
-    def get(self, oid: str) -> _SnmpResult:
-        return asyncio.run(self._get(oid))
-
-    async def _get(self, oid: str) -> _SnmpResult:
-        from pysnmp.hlapi.v1arch import (
-            CommunityData,
-            ObjectIdentity,
-            ObjectType,
-            SnmpDispatcher,
-            get_cmd,
-        )
-        dispatcher = SnmpDispatcher()
-        try:
-            target = await self._build_target()
-            err_ind, err_status, err_index, var_binds = await get_cmd(
-                dispatcher,
-                CommunityData(self.community, mpModel=self.mp_model),
-                target,
-                ObjectType(ObjectIdentity(oid)),
-            )
-            if err_ind:
-                raise ConnectionError(str(err_ind))
-            if err_status:
-                raise ConnectionError(f"{err_status.prettyPrint()} at {err_index}")
-            if not var_binds:
-                raise ConnectionError("Không nhận được dữ liệu SNMP.")
-            var_bind = var_binds[0]
-            return _SnmpResult(oid=str(var_bind[0]), value=str(var_bind[1]))
-        finally:
-            dispatcher.close()
-
-    def walk(self, oid_prefix: str) -> list[_SnmpResult]:
-        return asyncio.run(self._walk(oid_prefix))
-
-    async def _walk(self, oid_prefix: str) -> list[_SnmpResult]:
-        from pysnmp.hlapi.v1arch import (
-            CommunityData,
-            ObjectIdentity,
-            ObjectType,
-            SnmpDispatcher,
-            next_cmd,
-        )
-        dispatcher = SnmpDispatcher()
-        try:
-            target = await self._build_target()
-            results: list[_SnmpResult] = []
-            current_oid = oid_prefix
-            max_steps = 4096
-            for _ in range(max_steps):
-                err_ind, err_status, err_index, var_binds = await next_cmd(
-                    dispatcher,
-                    CommunityData(self.community, mpModel=self.mp_model),
-                    target,
-                    ObjectType(ObjectIdentity(current_oid)),
-                    lexicographicMode=False,
-                )
-                if err_ind:
-                    raise ConnectionError(str(err_ind))
-                if err_status:
-                    raise ConnectionError(f"{err_status.prettyPrint()} at {err_index}")
-                if not var_binds:
-                    break
-                var_bind = var_binds[0]
-                oid = str(var_bind[0])
-                if not oid.startswith(f"{oid_prefix}."):
-                    break
-                value = str(var_bind[1])
-                results.append(_SnmpResult(oid=oid, value=value))
-                if oid == current_oid:
-                    break
-                current_oid = oid
-            return results
-        finally:
-            dispatcher.close()
-
-
-def _debug_log(run_id: str, hypothesis_id: str, location: str, message: str, data: dict) -> None:
-    try:
-        payload = {
-            "sessionId": "f05be0",
-            "runId": run_id,
-            "hypothesisId": hypothesis_id,
-            "location": location,
-            "message": message,
-            "data": data,
-            "timestamp": int(datetime.now(tz=timezone.utc).timestamp() * 1000),
-        }
-        with DEBUG_LOG_PATH.open("a", encoding="utf-8") as fp:
-            fp.write(json.dumps(payload, ensure_ascii=True) + "\n")
-    except Exception:
-        pass
-
-
 def _load_oid_profile(os_family: str) -> dict:
     path = OID_DIR / f"{os_family}.yaml"
     if not path.exists():
@@ -169,25 +53,7 @@ class SwitchSNMPCollector(BaseCollector):
     def __init__(self, device: "Device") -> None:
         super().__init__(device)
         self._snmp_kwargs = self._build_snmp_kwargs()
-        self._snmp_backend = "easysnmp"
-        try:
-            import easysnmp  # noqa: F401
-        except Exception:
-            self._snmp_backend = "pysnmp"
-        # region agent log
-        _debug_log(
-            run_id="pre-fix",
-            hypothesis_id="H1",
-            location="apps/collectors/switch_snmp.py:57",
-            message="SNMP session parameters computed",
-            data={
-                "device": device.name,
-                "device_snmp_version": device.snmp_version,
-                "effective_snmp_version": self._snmp_kwargs["version"],
-                "snmp_backend": self._snmp_backend,
-            },
-        )
-        # endregion
+        self._snmp_backend = resolve_snmp_backend()
         self.__session = None
 
     def _build_snmp_kwargs(self) -> dict:
@@ -242,37 +108,21 @@ class SwitchSNMPCollector(BaseCollector):
     def _session(self):
         """Lazy-init SNMP Session để tái sử dụng kết nối (giảm chi phí setup UDP/SNMP)."""
         if self.__session is None:
-            if self._snmp_backend == "easysnmp":
-                from easysnmp import Session
-                self.__session = Session(**self._snmp_kwargs)
-            else:
-                self.__session = _PySnmpSession(
-                    hostname=self._snmp_kwargs["hostname"],
-                    version=self._snmp_kwargs["version"],
-                    community=self._snmp_kwargs.get("community", ""),
-                    timeout=self._snmp_kwargs["timeout"],
-                    retries=self._snmp_kwargs["retries"],
-                )
+            self.__session = create_snmp_session(self._snmp_kwargs, backend=self._snmp_backend)
         return self.__session
 
     def _snmp_get(self, oid: str) -> str | int | None:
-        try:
-            result = self._session.get(oid)
-            return result.value
-        except Exception as exc:
-            logger.debug("SNMP GET %s on device %s failed: %s", oid, self.device.name, type(exc).__name__)
-            return None
+        value = snmp_get_value(self._session, oid)
+        if value is None:
+            logger.debug("SNMP GET %s on device %s failed", oid, self.device.name)
+        return value
 
     def _snmp_walk(self, oid_prefix: str) -> list[tuple[str, str]]:
         """Walk một OID table, trả về list (oid, value)."""
-        try:
-            # easysnmp.Session.walk tự động dùng GetBulk với SNMPv2c
-            results = self._session.walk(oid_prefix)
-            return [(r.oid, r.value) for r in results]
-        except Exception as exc:
-            logger.warning("SNMP WALK %s failed on %s: %s",
-                           oid_prefix, self.device.name, exc)
-            return []
+        results = snmp_walk_pairs(self._session, oid_prefix)
+        if not results:
+            logger.warning("SNMP WALK %s failed on %s", oid_prefix, self.device.name)
+        return results
 
     def detect_os_family(self) -> str:
         """Detect vendor và OS-family từ sysObjectID + sysDescr."""

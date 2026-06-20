@@ -1,11 +1,8 @@
 import ipaddress
-import json
-import time
 import subprocess
 import sys
 import socket
 import os
-from pathlib import Path
 from django.conf import settings
 from django.shortcuts import render, get_object_or_404, redirect
 from django.contrib.auth.decorators import login_required
@@ -16,31 +13,19 @@ from .models import Device, DiscoveredDevice
 from .forms import DeviceForm
 from .backup import run_ssh_backup, save_backup_file, get_device_backups
 
-DEBUG_LOG_PATH = Path(__file__).resolve().parent.parent.parent / "debug-f05be0.log"
-
-
-def _debug_log(run_id: str, hypothesis_id: str, location: str, message: str, data: dict) -> None:
-    try:
-        payload = {
-            "sessionId": "f05be0",
-            "runId": run_id,
-            "hypothesisId": hypothesis_id,
-            "location": location,
-            "message": message,
-            "data": data,
-            "timestamp": int(time.time() * 1000),
-        }
-        with DEBUG_LOG_PATH.open("a", encoding="utf-8") as fp:
-            fp.write(json.dumps(payload, ensure_ascii=True) + "\n")
-    except Exception:
-        pass
-
 
 def _can_write(request) -> bool:
     return bool(
         request.user
         and request.user.is_authenticated
         and (request.user.is_superuser or request.user.groups.filter(name="Network Admins").exists())
+    )
+
+
+def _forbidden_json() -> JsonResponse:
+    return JsonResponse(
+        {"success": False, "message": "Bạn không có quyền thực hiện thao tác này."},
+        status=403,
     )
 
 
@@ -60,14 +45,8 @@ def _ping_ip(ip: str) -> tuple[str, bool]:
 
 
 def _probe_snmp(ip: str, community: str = "public") -> tuple[bool, str]:
-    try:
-        from easysnmp import Session
-        session = Session(hostname=ip, community=community, version=2, timeout=1, retries=1)
-        descr = session.get("1.3.6.1.2.1.1.1.0").value or ""
-        name = session.get("1.3.6.1.2.1.1.5.0").value or ""
-        return True, f"{name} - {descr}"[:300]
-    except Exception:
-        return False, ""
+    from apps.collectors.snmp_client import probe_snmp_v2c
+    return probe_snmp_v2c(ip, community, timeout=1, retries=1)
 
 
 # Views
@@ -80,15 +59,6 @@ def device_list(request):
 @login_required
 def device_add(request):
     if not _can_write(request):
-        # region agent log
-        _debug_log(
-            run_id="post-fix",
-            hypothesis_id="H3",
-            location="apps/devices/views.py:77",
-            message="device_add denied by RBAC",
-            data={"username": request.user.username},
-        )
-        # endregion
         return HttpResponseForbidden("Bạn không có quyền thực hiện thao tác này.")
     initial = {}
     if request.method == "GET":
@@ -99,23 +69,8 @@ def device_add(request):
             "snmp_community": request.GET.get("snmp_community", ""),
         }
     form = DeviceForm(request.POST or None, initial=initial)
-    if request.method == "POST":
-        # region agent log
-        _debug_log(
-            run_id="pre-fix",
-            hypothesis_id="H3",
-            location="apps/devices/views.py:86",
-            message="device_add POST permission context",
-            data={
-                "username": request.user.username,
-                "is_superuser": request.user.is_superuser,
-                "is_network_admin": request.user.groups.filter(name="Network Admins").exists(),
-            },
-        )
-        # endregion
     if form.is_valid():
-        device = form.save()
-        # Đánh dấu DiscoveredDevice là đã được imported
+        form.save()
         ip_addr = form.cleaned_data.get("ip_address")
         if ip_addr:
             DiscoveredDevice.objects.filter(ip_address=ip_addr).update(is_imported=True)
@@ -126,33 +81,9 @@ def device_add(request):
 @login_required
 def device_edit(request, pk):
     if not _can_write(request):
-        # region agent log
-        _debug_log(
-            run_id="post-fix",
-            hypothesis_id="H3",
-            location="apps/devices/views.py:111",
-            message="device_edit denied by RBAC",
-            data={"username": request.user.username, "device_id": pk},
-        )
-        # endregion
         return HttpResponseForbidden("Bạn không có quyền thực hiện thao tác này.")
     device = get_object_or_404(Device, pk=pk)
     form = DeviceForm(request.POST or None, instance=device)
-    if request.method == "POST":
-        # region agent log
-        _debug_log(
-            run_id="pre-fix",
-            hypothesis_id="H3",
-            location="apps/devices/views.py:108",
-            message="device_edit POST permission context",
-            data={
-                "username": request.user.username,
-                "is_superuser": request.user.is_superuser,
-                "is_network_admin": request.user.groups.filter(name="Network Admins").exists(),
-                "device_id": device.id,
-            },
-        )
-        # endregion
     if form.is_valid():
         form.save()
         return redirect("devices:list")
@@ -162,32 +93,9 @@ def device_edit(request, pk):
 @login_required
 def device_delete(request, pk):
     if not _can_write(request):
-        # region agent log
-        _debug_log(
-            run_id="post-fix",
-            hypothesis_id="H3",
-            location="apps/devices/views.py:140",
-            message="device_delete denied by RBAC",
-            data={"username": request.user.username, "device_id": pk},
-        )
-        # endregion
         return HttpResponseForbidden("Bạn không có quyền thực hiện thao tác này.")
     device = get_object_or_404(Device, pk=pk)
     if request.method == "POST":
-        # region agent log
-        _debug_log(
-            run_id="pre-fix",
-            hypothesis_id="H3",
-            location="apps/devices/views.py:129",
-            message="device_delete POST permission context",
-            data={
-                "username": request.user.username,
-                "is_superuser": request.user.is_superuser,
-                "is_network_admin": request.user.groups.filter(name="Network Admins").exists(),
-                "device_id": device.id,
-            },
-        )
-        # endregion
         device.delete()
         return redirect("devices:list")
     return render(request, "devices/confirm_delete.html", {"device": device})
@@ -196,6 +104,8 @@ def device_delete(request, pk):
 @login_required
 def device_test_connection(request, pk):
     """AJAX endpoint — test SNMP/SSH kết nối và trả về kết quả JSON."""
+    if not _can_write(request):
+        return _forbidden_json()
     device = get_object_or_404(Device, pk=pk)
     try:
         from apps.collectors.factory import CollectorFactory
@@ -208,22 +118,6 @@ def device_test_connection(request, pk):
                              "is_online": True,
                              "message": f"Kết nối OK — {os_family}"})
     except Exception as exc:
-        # region agent log
-        _debug_log(
-            run_id="pre-fix-hyperv",
-            hypothesis_id="HYP-6",
-            location="apps/devices/views.py:187",
-            message="device_test_connection failed",
-            data={
-                "device_id": device.id,
-                "device_name": device.name,
-                "device_type": device.device_type,
-                "protocol": device.protocol,
-                "exc_type": type(exc).__name__,
-                "exc": str(exc)[:300],
-            },
-        )
-        # endregion
         return JsonResponse({"success": False, "message": str(exc)}, status=200)
 
 
@@ -238,6 +132,9 @@ def device_discovery(request):
 def device_discovery_scan(request):
     if request.method != "POST":
         return JsonResponse({"success": False, "message": "Method not allowed"}, status=405)
+
+    if not _can_write(request):
+        return _forbidden_json()
 
     subnet = request.POST.get("subnet", "").strip()
     community = request.POST.get("community", "public").strip() or "public"
@@ -256,7 +153,7 @@ def device_discovery_scan(request):
     snmp_workers      = getattr(settings, "DISCOVERY_SNMP_WORKERS", 80)
 
     if len(ips) > max_ips:
-        return JsonResponse({"success": False, "message": f"Để tối ưu hiệu năng, vui lòng quét dải mạng tối đa /{max_ips} IPs"})
+        return JsonResponse({"success": False, "message": f"Để tối ưu hiệu năng, vui lòng quét dải mạng tối đa {max_ips} IPs"})
 
     discovered_hosts: list[dict] = []
 
@@ -282,7 +179,6 @@ def device_discovery_scan(request):
             hostname = f"Host-{ip.replace('.', '-')}"
         return ip, has_snmp, sys_descr, hostname
 
-    # Collect enriched data from threads first, then batch-upsert
     enriched: list[tuple[str, bool, str, str]] = []
     workers2 = min(len(alive_ips), snmp_workers)
     with ThreadPoolExecutor(max_workers=workers2) as executor:
@@ -290,13 +186,11 @@ def device_discovery_scan(request):
         for future in as_completed(futures2):
             enriched.append(future.result())
 
-    # 1 query to check which IPs already have a Device record
     enriched_ips = [r[0] for r in enriched]
     imported_ips = set(
         Device.objects.filter(ip_address__in=enriched_ips).values_list("ip_address", flat=True)
     )
 
-    # Bulk upsert — Django 4.2+ bulk_create with update_conflicts
     objs = [
         DiscoveredDevice(
             ip_address=ip,
@@ -314,7 +208,6 @@ def device_discovery_scan(request):
         update_fields=["hostname", "snmp_status", "sys_descr", "is_imported"],
     )
 
-    # Re-fetch saved objects to get PKs for response
     saved = {
         obj.ip_address: obj
         for obj in DiscoveredDevice.objects.filter(ip_address__in=enriched_ips)
@@ -344,6 +237,8 @@ def device_backups(request, pk):
 
 @login_required
 def device_run_backup(request, pk):
+    if not _can_write(request):
+        return _forbidden_json()
     device = get_object_or_404(Device, pk=pk)
     if device.protocol != "ssh":
         return JsonResponse({"success": False, "message": "Sao lưu tự động chỉ hỗ trợ giao thức SSH"}, status=200)
@@ -357,8 +252,9 @@ def device_run_backup(request, pk):
 
 @login_required
 def device_download_backup(request, pk, filename):
+    if not _can_write(request):
+        return HttpResponseForbidden("Bạn không có quyền thực hiện thao tác này.")
     device = get_object_or_404(Device, pk=pk)
-    # Ngăn chặn Directory Traversal
     if ".." in filename or "/" in filename or "\\" in filename:
         raise Http404("Tên tệp tin không hợp lệ")
 

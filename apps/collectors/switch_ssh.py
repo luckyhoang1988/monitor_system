@@ -1,8 +1,6 @@
 """SSH/CLI Collector cho Switch — dùng Netmiko, hỗ trợ Cisco và Huawei."""
 import logging
-import json
 import re
-from pathlib import Path
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
@@ -12,7 +10,6 @@ if TYPE_CHECKING:
     from apps.devices.models import Device
 
 logger = logging.getLogger(__name__)
-DEBUG_LOG_PATH = Path(__file__).resolve().parent.parent.parent / "debug-f05be0.log"
 
 NETMIKO_DRIVER = {
     "cisco":    "cisco_ios",    # Netmiko tự detect IOS vs IOS-XE
@@ -54,23 +51,6 @@ COMMANDS = {
 }
 
 
-def _debug_log(run_id: str, hypothesis_id: str, location: str, message: str, data: dict) -> None:
-    try:
-        payload = {
-            "sessionId": "f05be0",
-            "runId": run_id,
-            "hypothesisId": hypothesis_id,
-            "location": location,
-            "message": message,
-            "data": data,
-            "timestamp": int(datetime.now(tz=timezone.utc).timestamp() * 1000),
-        }
-        with DEBUG_LOG_PATH.open("a", encoding="utf-8") as fp:
-            fp.write(json.dumps(payload, ensure_ascii=True) + "\n")
-    except Exception:
-        pass
-
-
 class SwitchSSHCollector(BaseCollector):
     def __init__(self, device: "Device") -> None:
         super().__init__(device)
@@ -98,60 +78,15 @@ class SwitchSSHCollector(BaseCollector):
             raise TimeoutError(f"SSH timeout connecting to device {self.device.name} ({self.device.ip_address})")
 
     def detect_os_family(self) -> str:
-        # region agent log
-        _debug_log(
-            run_id="pre-fix",
-            hypothesis_id="H2",
-            location="apps/collectors/switch_ssh.py:98",
-            message="SSH OS detection started",
-            data={"device": self.device.name, "vendor": self.device.vendor},
-        )
-        # endregion
         if self.device.vendor == "mikrotik":
-            # region agent log
-            _debug_log(
-                run_id="post-fix",
-                hypothesis_id="H2",
-                location="apps/collectors/switch_ssh.py:106",
-                message="SSH vendor shortcut selected",
-                data={"vendor": self.device.vendor, "os_family": "mikrotik_routeros"},
-            )
-            # endregion
             return "mikrotik_routeros"
         if self.device.vendor == "fortinet":
-            # region agent log
-            _debug_log(
-                run_id="post-fix",
-                hypothesis_id="H2",
-                location="apps/collectors/switch_ssh.py:115",
-                message="SSH vendor shortcut selected",
-                data={"vendor": self.device.vendor, "os_family": "fortinet_fortios"},
-            )
-            # endregion
             return "fortinet_fortios"
         if self.device.vendor == "hp":
-            # region agent log
-            _debug_log(
-                run_id="post-fix",
-                hypothesis_id="H2",
-                location="apps/collectors/switch_ssh.py:124",
-                message="SSH vendor shortcut selected",
-                data={"vendor": self.device.vendor, "os_family": "hp_comware"},
-            )
-            # endregion
             return "hp_comware"
 
         cmd_set = COMMANDS.get(self.device.vendor, {})
         version_cmd = cmd_set.get("version")
-        # region agent log
-        _debug_log(
-            run_id="pre-fix",
-            hypothesis_id="H2",
-            location="apps/collectors/switch_ssh.py:109",
-            message="SSH version command resolved",
-            data={"vendor": self.device.vendor, "has_version_cmd": bool(version_cmd)},
-        )
-        # endregion
         if not version_cmd:
             raise KeyError(f"Missing version command for vendor={self.device.vendor}")
         with self._get_connection() as conn:

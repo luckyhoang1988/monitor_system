@@ -1,8 +1,5 @@
 """API xuất dữ liệu Metrics ra CSV và Excel."""
 import csv
-import json
-import time
-from pathlib import Path
 from django.http import HttpResponse
 from django.utils import timezone
 from rest_framework.decorators import api_view, permission_classes
@@ -16,38 +13,9 @@ from apps.metrics.api import _parse_range
 import openpyxl
 from openpyxl.utils import get_column_letter
 
-DEBUG_LOG_PATH = Path(__file__).resolve().parent.parent.parent / "debug-f05be0.log"
-
-
-def _debug_log(run_id: str, hypothesis_id: str, location: str, message: str, data: dict) -> None:
-    try:
-        payload = {
-            "sessionId": "f05be0",
-            "runId": run_id,
-            "hypothesisId": hypothesis_id,
-            "location": location,
-            "message": message,
-            "data": data,
-            "timestamp": int(time.time() * 1000),
-        }
-        with DEBUG_LOG_PATH.open("a", encoding="utf-8") as fp:
-            fp.write(json.dumps(payload, ensure_ascii=True) + "\n")
-    except Exception:
-        pass
-
-
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def export_metrics(request):
-    # region agent log
-    _debug_log(
-        run_id="pre-fix",
-        hypothesis_id="H4",
-        location="apps/metrics/api_export.py:44",
-        message="export_metrics invoked",
-        data={"query_keys": sorted(list(request.GET.keys()))},
-    )
-    # endregion
     """
     Export metrics (System Health hoặc Interface) ra CSV/Excel.
     Query params:
