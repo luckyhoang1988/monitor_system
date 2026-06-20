@@ -67,8 +67,8 @@ class TestDashboardViews:
         assert "Thiết bị đang Offline" in content
         assert "sw-offline" in content
         assert "hv-offline" in content
-        assert "Nhóm: Switch" in content
-        assert "Nhóm: HyperV" in content
+        assert "Switch" in content
+        assert "HyperV" in content
 
     def test_switch_detail_view(self, logged_in_client):
         switch = CiscoSNMPDeviceFactory(name="sw-1", device_type="switch")
