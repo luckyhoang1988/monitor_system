@@ -15,6 +15,20 @@
   </div>
 </div>
 
+<div class="d-flex flex-wrap align-items-center gap-2 mb-3">
+  <span class="text-muted small me-1"><i class="bi bi-funnel me-1"></i>Lọc loại:</span>
+  <a href="?sort={{ sort }}&dir={{ dir }}"
+     class="btn btn-sm {% if not device_type %}btn-primary{% else %}btn-outline-secondary{% endif %}">
+    Tất cả <span class="badge {% if not device_type %}bg-light text-primary{% else %}bg-secondary-subtle text-secondary{% endif %} ms-1">{{ total_count }}</span>
+  </a>
+  {% for f in type_filters %}
+  <a href="?type={{ f.value }}&sort={{ sort }}&dir={{ dir }}"
+     class="btn btn-sm {% if device_type == f.value %}btn-primary{% else %}btn-outline-secondary{% endif %}">
+    {{ f.label }} <span class="badge {% if device_type == f.value %}bg-light text-primary{% else %}bg-secondary-subtle text-secondary{% endif %} ms-1">{{ f.count }}</span>
+  </a>
+  {% endfor %}
+</div>
+
 <div class="card">
   <div class="card-body p-0">
     {% if devices %}
@@ -22,7 +36,7 @@
       <thead class="table-light">
         <tr>
           <th class="ps-3">
-            <a href="?sort=name&dir={% if sort == 'name' and dir == 'asc' %}desc{% else %}asc{% endif %}"
+            <a href="?sort=name&dir={% if sort == 'name' and dir == 'asc' %}desc{% else %}asc{% endif %}{% if device_type %}&type={{ device_type }}{% endif %}"
                class="text-decoration-none text-dark d-inline-flex align-items-center gap-1">
               Tên
               {% if sort == 'name' %}
@@ -34,7 +48,7 @@
           </th>
           <th>Loại</th>
           <th>
-            <a href="?sort=ip&dir={% if sort == 'ip' and dir == 'asc' %}desc{% else %}asc{% endif %}"
+            <a href="?sort=ip&dir={% if sort == 'ip' and dir == 'asc' %}desc{% else %}asc{% endif %}{% if device_type %}&type={{ device_type }}{% endif %}"
                class="text-decoration-none text-dark d-inline-flex align-items-center gap-1">
               IP
               {% if sort == 'ip' %}
@@ -118,10 +132,17 @@
     {% else %}
       <div class="text-center text-muted py-5">
         <i class="bi bi-hdd-network fs-1 d-block mb-3"></i>
-        <p>Chưa có thiết bị nào.</p>
-        <a href="{% url 'devices:add' %}" class="btn btn-primary">
-          <i class="bi bi-plus-circle me-1"></i> Thêm thiết bị đầu tiên
-        </a>
+        {% if device_type %}
+          <p>Không có thiết bị loại này.</p>
+          <a href="?sort={{ sort }}&dir={{ dir }}" class="btn btn-outline-secondary">
+            <i class="bi bi-x-circle me-1"></i> Xóa bộ lọc
+          </a>
+        {% else %}
+          <p>Chưa có thiết bị nào.</p>
+          <a href="{% url 'devices:add' %}" class="btn btn-primary">
+            <i class="bi bi-plus-circle me-1"></i> Thêm thiết bị đầu tiên
+          </a>
+        {% endif %}
       </div>
     {% endif %}
   </div>

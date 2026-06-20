@@ -51,35 +51,58 @@ def _probe_snmp(ip: str, community: str = "public") -> tuple[bool, str]:
 
 # Views
 _SORTABLE_FIELDS = {"name", "ip"}
+_VALID_DEVICE_TYPES = {t[0] for t in Device.DEVICE_TYPES}
 
 
-def _order_devices(sort: str, direction: str):
+def _order_devices(queryset, sort: str, direction: str):
     desc = direction == "desc"
     if sort == "ip":
-        devices = list(Device.objects.all())
+        devices = list(queryset)
         devices.sort(
             key=lambda d: ipaddress.ip_address(str(d.ip_address)),
             reverse=desc,
         )
         return devices
     order = "-name" if desc else "name"
-    return Device.objects.all().order_by(order)
+    return queryset.order_by(order)
 
 
 @login_required
 def device_list(request):
     sort = request.GET.get("sort", "name")
     direction = request.GET.get("dir", "asc")
+    device_type = request.GET.get("type", "")
     if sort not in _SORTABLE_FIELDS:
         sort = "name"
     if direction not in ("asc", "desc"):
         direction = "asc"
+    if device_type and device_type not in _VALID_DEVICE_TYPES:
+        device_type = ""
 
-    devices = _order_devices(sort, direction)
+    queryset = Device.objects.all()
+    if device_type:
+        queryset = queryset.filter(device_type=device_type)
+
+    devices = _order_devices(queryset, sort, direction)
+    type_counts = {
+        value: Device.objects.filter(device_type=value).count()
+        for value, _ in Device.DEVICE_TYPES
+    }
+    type_filters = [
+        {"value": value, "label": label, "count": type_counts[value]}
+        for value, label in Device.DEVICE_TYPES
+    ]
     return render(
         request,
         "devices/list.html",
-        {"devices": devices, "sort": sort, "dir": direction},
+        {
+            "devices": devices,
+            "sort": sort,
+            "dir": direction,
+            "device_type": device_type,
+            "type_filters": type_filters,
+            "total_count": sum(type_counts.values()),
+        },
     )
 
 

@@ -32,6 +32,23 @@ class TestDeviceViews:
         content = response.content.decode("utf-8")
         assert content.index("10.0.0.2") < content.index("10.0.0.10")
 
+    def test_device_list_filter_by_type(self, logged_in_client):
+        from tests.conftest import HyperVDeviceFactory
+
+        CiscoSNMPDeviceFactory(name="SW-Only", device_type="switch")
+        HyperVDeviceFactory(name="HV-Only", device_type="hyperv")
+        response = logged_in_client.get(reverse("devices:list"), {"type": "switch"})
+        content = response.content.decode("utf-8")
+        assert "SW-Only" in content
+        assert "HV-Only" not in content
+
+    def test_device_list_invalid_type_filter_ignored(self, logged_in_client):
+        device = CiscoSNMPDeviceFactory(name="Keep-Me")
+        response = logged_in_client.get(reverse("devices:list"), {"type": "invalid"})
+        content = response.content.decode("utf-8")
+        assert response.status_code == 200
+        assert device.name in content
+
     def test_device_add_view_get(self, logged_in_client):
         response = logged_in_client.get(reverse("devices:add"))
         assert response.status_code == 200
