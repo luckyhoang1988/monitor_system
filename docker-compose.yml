@@ -59,7 +59,7 @@ services:
       DJANGO_SETTINGS_MODULE: config.settings.production
       HOME: /tmp
       TZ: Asia/Ho_Chi_Minh
-    command: celery -A config worker -l info --concurrency=2
+    command: celery -A config worker -l info --concurrency=4
     volumes:
       - backup_volume:/app/backups
     depends_on:

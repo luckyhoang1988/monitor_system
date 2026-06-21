@@ -106,7 +106,7 @@ from celery.schedules import crontab  # noqa: E402
 CELERY_BEAT_SCHEDULE = {
     "poll-all-network-devices": {
         "task": "apps.collectors.tasks.poll_all_network_devices",
-        "schedule": 300,  # every 5 min — switch, router, firewall
+        "schedule": 120,  # mỗi 120s — switch, router, firewall (SNMP/SSH)
     },
     "poll-all-ping-devices": {
         "task": "apps.collectors.tasks.poll_all_ping_devices",
