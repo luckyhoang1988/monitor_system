@@ -180,6 +180,16 @@ ALERT_GRACE_PERIOD_SECS    = 120  # min seconds before "no data" is treated as o
 ALERT_EVAL_WINDOW_MINUTES  = 10   # look-back window for alert task
 DEVICE_ONLINE_MIN_GRACE_SECS = 300  # min grace for Device.is_online to avoid flapping
 
+# Hysteresis: vùng đệm ngưỡng phục hồi (% so với threshold) để tránh dao động quanh ngưỡng.
+# Vd 0.1 → rule gt 90% chỉ resolve khi value < 81%.
+ALERT_HYSTERESIS_PCT  = env.float("ALERT_HYSTERESIS_PCT", default=0.1)
+# Flapping: nếu một (device, rule) fire ≥ THRESHOLD lần trong WINDOW phút → bỏ qua notification.
+ALERT_FLAP_WINDOW_MIN = env.int("ALERT_FLAP_WINDOW_MIN", default=30)
+ALERT_FLAP_THRESHOLD  = env.int("ALERT_FLAP_THRESHOLD", default=4)
+
+# Chart API: giới hạn số điểm trả về cho series raw (downsample phía server).
+CHART_MAX_POINTS = env.int("CHART_MAX_POINTS", default=500)
+
 # Metric aggregation buffers (avoid rolling up incomplete time buckets)
 HOURLY_ROLLUP_BUFFER_HOURS = 2
 DAILY_ROLLUP_BUFFER_DAYS   = 1

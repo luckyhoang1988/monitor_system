@@ -1,4 +1,5 @@
 """API endpoints cho metrics — tự động chọn raw/hourly/daily theo time range."""
+import math
 from collections import defaultdict
 from django.conf import settings
 from django.http import JsonResponse
@@ -31,6 +32,23 @@ def _parse_range(range_str: str) -> tuple[timedelta, str]:
     """Parse range string → (timedelta, data_source)."""
     delta, source = RANGE_CONFIG.get(range_str, (timedelta(hours=1), "raw"))
     return delta, source
+
+
+def _downsample(rows: list, max_points: int | None = None) -> list:
+    """Lấy mẫu thưa list (đã sort theo thời gian) xuống ≤ max_points, giữ điểm cuối.
+
+    Giảm tải Chart.js khi collect_interval ngắn (vd 60s → 1440 điểm/24h).
+    """
+    if max_points is None:
+        max_points = int(getattr(settings, "CHART_MAX_POINTS", 500))
+    n = len(rows)
+    if max_points <= 0 or n <= max_points:
+        return rows
+    step = math.ceil(n / max_points)
+    sampled = rows[::step]
+    if sampled[-1] is not rows[-1]:
+        sampled.append(rows[-1])
+    return sampled
 
 
 def _format_timestamp(ts, source: str) -> str:
@@ -124,7 +142,7 @@ def _device_metrics_raw(device: Device, since) -> JsonResponse:
           .order_by("timestamp")
           .values("timestamp", "cpu_percent", "mem_percent", "extra"))
 
-    rows = list(qs)
+    rows = _downsample(list(qs))
     data = {
         "labels":      [r["timestamp"].strftime("%H:%M") for r in rows],
         "cpu_percent": [r["cpu_percent"] for r in rows],
@@ -234,7 +252,7 @@ def _interface_metrics_raw(iface_qs, since) -> JsonResponse:
 
     results = []
     for iface in ifaces:
-        stats = stats_by_iface[iface.id]
+        stats = _downsample(stats_by_iface[iface.id])
         results.append({
             "port":           iface.name,
             "is_uplink":      iface.is_uplink,

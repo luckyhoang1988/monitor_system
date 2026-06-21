@@ -1,11 +1,15 @@
 """Alert rule engine — đánh giá ngưỡng và tạo Alert record."""
 import logging
 from datetime import timedelta
+from django.conf import settings
 from django.utils import timezone
 from apps.devices.models import Device
 from .models import AlertRule, Alert, AlertNotification
 
 logger = logging.getLogger(__name__)
+
+# Metric nhị phân (0/1) — không áp dụng vùng đệm hysteresis.
+BINARY_METRICS = {"if_status"}
 
 CONDITION_FN = {
     "gt":  lambda v, t: v > t,
@@ -173,6 +177,7 @@ def _sustained_uplink_traffic_max(device: Device, rule: AlertRule, window_since)
     We compute 'max uplink Mbps' per poll-snapshot timestamp, then require the condition
     to hold for all snapshots in the window.
     """
+    from django.db.models import Max
     from apps.metrics.models import InterfaceStats
     from apps.devices.models import Interface
 
@@ -181,23 +186,15 @@ def _sustained_uplink_traffic_max(device: Device, rule: AlertRule, window_since)
         return None
 
     field = "in_mbps" if rule.metric == "uplink_in_mbps_max" else "out_mbps"
-    timestamps = list(
-        InterfaceStats.objects.filter(interface_id__in=uplink_ids, timestamp__gte=window_since)
-        .order_by("timestamp")
-        .values_list("timestamp", flat=True)
-        .distinct()
-    )
-    if not timestamps:
+    # 1 query: gom max(field) theo từng snapshot timestamp (thay vòng lặp N query).
+    rows = (InterfaceStats.objects
+            .filter(interface_id__in=uplink_ids, timestamp__gte=window_since)
+            .values("timestamp")
+            .annotate(m=Max(field))
+            .order_by("timestamp"))
+    values: list[float] = [float(r["m"] or 0.0) for r in rows]
+    if not values:
         return None
-
-    values: list[float] = []
-    for ts in timestamps:
-        v = (InterfaceStats.objects
-             .filter(interface_id__in=uplink_ids, timestamp=ts)
-             .order_by(f"-{field}")
-             .values_list(field, flat=True)
-             .first())
-        values.append(float(v or 0.0))
 
     latest = float(values[-1])
     threshold = float(rule.threshold)
@@ -263,6 +260,7 @@ def _sustained_vm_metric(device: Device, rule: AlertRule, window_since) -> float
     then require the condition to hold for ALL snapshots in the window.
     Returns latest snapshot value (for messaging) if sustained, else None.
     """
+    from django.db.models import Count
     from apps.metrics.models import VMStats
 
     # timestamps present in window (snapshots)
@@ -275,19 +273,22 @@ def _sustained_vm_metric(device: Device, rule: AlertRule, window_since) -> float
     if not timestamps:
         return None
 
-    values: list[float] = []
+    # 1 query gom nhóm theo timestamp; snapshot không khớp điều kiện → count = 0.
     if rule.metric == "vm_count_running":
-        for ts in timestamps:
-            values.append(float(VMStats.objects.filter(device=device, timestamp=ts, state="Running").count()))
+        rows = (VMStats.objects
+                .filter(device=device, timestamp__gte=window_since, state="Running")
+                .values("timestamp").annotate(c=Count("id")))
     elif rule.metric == "vm_repl_unhealthy":
         _HEALTHY = {"Normal", "NotConfigured"}
-        for ts in timestamps:
-            values.append(float(
-                VMStats.objects.filter(device=device, timestamp=ts).exclude(repl_health__in=_HEALTHY).count()
-            ))
+        rows = (VMStats.objects
+                .filter(device=device, timestamp__gte=window_since)
+                .exclude(repl_health__in=_HEALTHY)
+                .values("timestamp").annotate(c=Count("id")))
     else:
         return None
 
+    counts = {r["timestamp"]: r["c"] for r in rows}
+    values: list[float] = [float(counts.get(ts, 0)) for ts in timestamps]
     if not values:
         return None
 
@@ -329,6 +330,47 @@ def _count_vms_repl_unhealthy(device: Device, since) -> float | None:
     ).exclude(repl_health__in=_HEALTHY).count())
 
 
+def _recovered(rule: AlertRule, value: float) -> bool:
+    """True nếu value đã ra khỏi vùng đệm hysteresis (đủ điều kiện phục hồi).
+
+    - Metric nhị phân (if_status) và eq/ne: không có vùng đệm → phục hồi ngay.
+    - gt/gte: phục hồi khi value < threshold * (1 - pct).
+    - lt/lte: phục hồi khi value > threshold * (1 + pct).
+    """
+    if rule.metric in BINARY_METRICS or rule.condition in ("eq", "ne"):
+        return True
+    pct = float(getattr(settings, "ALERT_HYSTERESIS_PCT", 0.1) or 0)
+    t = float(rule.threshold)
+    if rule.condition in ("gt", "gte"):
+        return value < t * (1 - pct)
+    if rule.condition in ("lt", "lte"):
+        return value > t * (1 + pct)
+    return True
+
+
+def _decide_transition(rule: AlertRule, value: float, has_active: bool) -> str:
+    """Quyết định hành động: 'fire' | 'resolve' | 'hold' | 'none'."""
+    cond_fn = CONDITION_FN.get(rule.condition)
+    if cond_fn and cond_fn(value, rule.threshold):
+        return "fire"
+    if not has_active:
+        return "none"
+    return "resolve" if _recovered(rule, value) else "hold"
+
+
+def _is_flapping(device: Device, rule: AlertRule) -> bool:
+    """True nếu (device, rule) fire quá nhiều lần trong cửa sổ → nên chặn notification spam."""
+    window = int(getattr(settings, "ALERT_FLAP_WINDOW_MIN", 30))
+    threshold = int(getattr(settings, "ALERT_FLAP_THRESHOLD", 4))
+    if threshold <= 0:
+        return False
+    flap_since = timezone.now() - timedelta(minutes=window)
+    recent_fires = Alert.objects.filter(
+        device=device, rule=rule, triggered_at__gte=flap_since
+    ).count()
+    return recent_fires >= threshold
+
+
 def check_device_alerts(device: Device, since) -> None:
     rules = AlertRule.objects.filter(enabled=True).filter(
         device_type__in=[device.device_type, "all"]
@@ -360,11 +402,13 @@ def check_device_alerts(device: Device, since) -> None:
         if value is None:
             continue
 
-        cond_fn = CONDITION_FN.get(rule.condition)
-        if cond_fn and cond_fn(value, rule.threshold):
+        has_active = Alert.objects.filter(device=device, rule=rule, is_active=True).exists()
+        action = _decide_transition(rule, value, has_active)
+        if action == "fire":
             _fire_alert(device, rule, value)
-        else:
+        elif action == "resolve":
             _resolve_alert(device, rule)
+        # "hold" (trong vùng đệm hysteresis) / "none" (không có alert active): không làm gì
 
 
 def _fire_alert(device: Device, rule: AlertRule, value: float) -> None:
@@ -397,7 +441,10 @@ def _fire_alert(device: Device, rule: AlertRule, value: float) -> None:
         metric_value=float(value),
         is_active=True,
     )
-    _send_notifications(alert, rule.channels)
+    if _is_flapping(device, rule):
+        logger.warning("ALERT flapping — bỏ qua notification: %s", alert.message)
+    else:
+        _send_notifications(alert, rule.channels)
     logger.warning("ALERT fired: %s", alert.message)
 
 

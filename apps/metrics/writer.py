@@ -162,6 +162,21 @@ def _save_interface_stats(device: Device, data: NormalizedData) -> None:
         InterfaceStats.objects.bulk_create(stats_to_create)
 
 
+def _counter_delta(prev: int, new: int, max_counter: int) -> int:
+    """Tính delta của counter, phân biệt wrap (tràn) vs reset (reboot).
+
+    - Delta dương: bình thường.
+    - Delta âm + prev gần trần (> 90% max): counter tràn vòng → cộng max_counter.
+    - Delta âm khác: counter bị reset (thiết bị reboot) → trả 0 (bỏ mẫu, tránh spike giả).
+    """
+    delta = new - prev
+    if delta >= 0:
+        return delta
+    if prev > max_counter * 0.9:
+        return delta + max_counter
+    return 0
+
+
 def _calc_mbps(
     prev_stat: InterfaceStats | None,
     new: InterfaceData,
@@ -182,15 +197,24 @@ def _calc_mbps(
             return 0.0, 0.0
 
         max_counter = 2**64  # ifHCIn/OutOctets are 64-bit counters
-        raw_delta_in = new.in_bytes - prev_stat.in_bytes
-        raw_delta_out = new.out_bytes - prev_stat.out_bytes
-
-        # If counter decreased (reboot/reset), clamp delta to 0.
-        delta_in = max(0, raw_delta_in)
-        delta_out = max(0, raw_delta_out)
+        delta_in = _counter_delta(prev_stat.in_bytes, new.in_bytes, max_counter)
+        delta_out = _counter_delta(prev_stat.out_bytes, new.out_bytes, max_counter)
 
         in_mbps  = (delta_in * 8) / (interval * 1_000_000)
         out_mbps = (delta_out * 8) / (interval * 1_000_000)
+
+        # Sanity cap: nếu tốc độ tính ra vượt ~1.5× tốc độ cổng → coi là số rác
+        # (counter nhảy bất thường) và bỏ mẫu thay vì lưu spike giả.
+        speed = float(getattr(new, "speed_mbps", 0) or 0)
+        if speed > 0:
+            cap = speed * 1.5
+            if in_mbps > cap or out_mbps > cap:
+                logger.debug(
+                    "_calc_mbps: bỏ mẫu vì vượt cap (in=%.1f out=%.1f cap=%.1f Mbps)",
+                    in_mbps, out_mbps, cap,
+                )
+                return 0.0, 0.0
+
         return round(in_mbps, 3), round(out_mbps, 3)
     except Exception as exc:
         logger.debug("_calc_mbps failed: %s", exc)

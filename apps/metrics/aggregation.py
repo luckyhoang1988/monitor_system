@@ -47,23 +47,28 @@ def rollup_system_health_hourly() -> int:
         )
     )
 
-    count = 0
-    for row in aggregated:
-        _, created = SystemHealthHourly.objects.update_or_create(
+    objs = [
+        SystemHealthHourly(
             device_id=row["device_id"],
             hour=row["hour"],
-            defaults={
-                "cpu_avg": round(row["cpu_avg"], 2),
-                "cpu_max": round(row["cpu_max"], 2),
-                "mem_avg": round(row["mem_avg"], 2),
-                "mem_max": round(row["mem_max"], 2),
-                "sample_count": row["sample_count"],
-            },
+            cpu_avg=round(row["cpu_avg"], 2),
+            cpu_max=round(row["cpu_max"], 2),
+            mem_avg=round(row["mem_avg"], 2),
+            mem_max=round(row["mem_max"], 2),
+            sample_count=row["sample_count"],
         )
-        count += 1
+        for row in aggregated
+    ]
+    if objs:
+        SystemHealthHourly.objects.bulk_create(
+            objs,
+            update_conflicts=True,
+            unique_fields=["device", "hour"],
+            update_fields=["cpu_avg", "cpu_max", "mem_avg", "mem_max", "sample_count"],
+        )
 
-    logger.info("Hourly rollup SystemHealth: %d records processed", count)
-    return count
+    logger.info("Hourly rollup SystemHealth: %d records processed", len(objs))
+    return len(objs)
 
 
 def rollup_interface_stats_hourly() -> int:
@@ -91,25 +96,31 @@ def rollup_interface_stats_hourly() -> int:
         )
     )
 
-    count = 0
-    for row in aggregated:
-        InterfaceStatsHourly.objects.update_or_create(
+    objs = [
+        InterfaceStatsHourly(
             interface_id=row["interface_id"],
             hour=row["hour"],
-            defaults={
-                "in_mbps_avg": round(row["in_mbps_avg"], 3),
-                "in_mbps_max": round(row["in_mbps_max"], 3),
-                "out_mbps_avg": round(row["out_mbps_avg"], 3),
-                "out_mbps_max": round(row["out_mbps_max"], 3),
-                "in_errors": row["in_errors_sum"] or 0,
-                "out_errors": row["out_errors_sum"] or 0,
-                "sample_count": row["sample_count"],
-            },
+            in_mbps_avg=round(row["in_mbps_avg"], 3),
+            in_mbps_max=round(row["in_mbps_max"], 3),
+            out_mbps_avg=round(row["out_mbps_avg"], 3),
+            out_mbps_max=round(row["out_mbps_max"], 3),
+            in_errors=row["in_errors_sum"] or 0,
+            out_errors=row["out_errors_sum"] or 0,
+            sample_count=row["sample_count"],
         )
-        count += 1
+        for row in aggregated
+    ]
+    if objs:
+        InterfaceStatsHourly.objects.bulk_create(
+            objs,
+            update_conflicts=True,
+            unique_fields=["interface", "hour"],
+            update_fields=["in_mbps_avg", "in_mbps_max", "out_mbps_avg",
+                           "out_mbps_max", "in_errors", "out_errors", "sample_count"],
+        )
 
-    logger.info("Hourly rollup InterfaceStats: %d records processed", count)
-    return count
+    logger.info("Hourly rollup InterfaceStats: %d records processed", len(objs))
+    return len(objs)
 
 
 def rollup_system_health_daily() -> int:
@@ -135,23 +146,28 @@ def rollup_system_health_daily() -> int:
         )
     )
 
-    count = 0
-    for row in aggregated:
-        SystemHealthDaily.objects.update_or_create(
+    objs = [
+        SystemHealthDaily(
             device_id=row["device_id"],
             day=row["day"],
-            defaults={
-                "cpu_avg": round(row["cpu_avg"], 2),
-                "cpu_max": round(row["cpu_max"], 2),
-                "mem_avg": round(row["mem_avg"], 2),
-                "mem_max": round(row["mem_max"], 2),
-                "sample_count": row["sample_count"],
-            },
+            cpu_avg=round(row["cpu_avg"], 2),
+            cpu_max=round(row["cpu_max"], 2),
+            mem_avg=round(row["mem_avg"], 2),
+            mem_max=round(row["mem_max"], 2),
+            sample_count=row["sample_count"],
         )
-        count += 1
+        for row in aggregated
+    ]
+    if objs:
+        SystemHealthDaily.objects.bulk_create(
+            objs,
+            update_conflicts=True,
+            unique_fields=["device", "day"],
+            update_fields=["cpu_avg", "cpu_max", "mem_avg", "mem_max", "sample_count"],
+        )
 
-    logger.info("Daily rollup SystemHealth: %d records processed", count)
-    return count
+    logger.info("Daily rollup SystemHealth: %d records processed", len(objs))
+    return len(objs)
 
 
 def rollup_interface_stats_daily() -> int:
@@ -179,25 +195,31 @@ def rollup_interface_stats_daily() -> int:
         )
     )
 
-    count = 0
-    for row in aggregated:
-        InterfaceStatsDaily.objects.update_or_create(
+    objs = [
+        InterfaceStatsDaily(
             interface_id=row["interface_id"],
             day=row["day"],
-            defaults={
-                "in_mbps_avg": round(row["in_mbps_avg"], 3),
-                "in_mbps_max": round(row["in_mbps_max"], 3),
-                "out_mbps_avg": round(row["out_mbps_avg"], 3),
-                "out_mbps_max": round(row["out_mbps_max"], 3),
-                "in_errors": row["in_errors_sum"] or 0,
-                "out_errors": row["out_errors_sum"] or 0,
-                "sample_count": row["sample_count"],
-            },
+            in_mbps_avg=round(row["in_mbps_avg"], 3),
+            in_mbps_max=round(row["in_mbps_max"], 3),
+            out_mbps_avg=round(row["out_mbps_avg"], 3),
+            out_mbps_max=round(row["out_mbps_max"], 3),
+            in_errors=row["in_errors_sum"] or 0,
+            out_errors=row["out_errors_sum"] or 0,
+            sample_count=row["sample_count"],
         )
-        count += 1
+        for row in aggregated
+    ]
+    if objs:
+        InterfaceStatsDaily.objects.bulk_create(
+            objs,
+            update_conflicts=True,
+            unique_fields=["interface", "day"],
+            update_fields=["in_mbps_avg", "in_mbps_max", "out_mbps_avg",
+                           "out_mbps_max", "in_errors", "out_errors", "sample_count"],
+        )
 
-    logger.info("Daily rollup InterfaceStats: %d records processed", count)
-    return count
+    logger.info("Daily rollup InterfaceStats: %d records processed", len(objs))
+    return len(objs)
 
 
 def cleanup_rolled_up_raw_data() -> tuple[int, int]:
