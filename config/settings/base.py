@@ -169,6 +169,10 @@ WINRM_CERT_VALIDATE = env("WINRM_CERT_VALIDATE", default="validate")
 # Metrics retention (ngày)
 METRICS_RETENTION_DAYS = env.int("METRICS_RETENTION_DAYS", default=90)
 
+# Đường dẫn để theo dõi dung lượng disk (trang Cảnh báo → Dung lượng).
+# Mặc định "/" — trong container, overlay fs phản ánh disk host nơi đặt volume DB.
+STORAGE_MONITOR_PATH = env("STORAGE_MONITOR_PATH", default="/")
+
 # ── Collector / Alert / Aggregation tuning ────────────────────────────────────
 # Auto-discovery scan limits
 DISCOVERY_MAX_IPS       = 256   # max host IPs per subnet scan

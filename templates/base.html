@@ -122,6 +122,12 @@
         <i class="bi bi-sliders"></i> Alert Rules
       </a>
     </li>
+    <li>
+      <a href="{% url 'alerts:storage' %}"
+         class="nav-link {% if request.resolver_match.namespace == 'alerts' and request.resolver_match.url_name == 'storage' %}active{% endif %}">
+        <i class="bi bi-hdd"></i> Dung lượng
+      </a>
+    </li>
   </ul>
 </nav>
 

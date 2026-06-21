@@ -5,6 +5,7 @@ app_name = "alerts"
 
 urlpatterns = [
     path("", views.alert_list, name="list"),
+    path("storage/", views.storage, name="storage"),
     path("<int:pk>/ack/", views.alert_acknowledge, name="ack"),
     # AlertRule CRUD
     path("rules/", views.rule_list, name="rule_list"),

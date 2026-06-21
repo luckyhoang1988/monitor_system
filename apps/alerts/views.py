@@ -1,9 +1,72 @@
+import os
+import shutil
 from django.shortcuts import render, get_object_or_404, redirect
 from django.contrib.auth.decorators import login_required
 from django.http import HttpResponseForbidden
+from django.conf import settings
+from django.db import connection
 from django.utils import timezone
 from .models import Alert, AlertRule
 from .forms import AlertRuleForm
+
+
+def _db_size_bytes() -> int:
+    """Kích thước database hiện tại (PostgreSQL prod / SQLite dev)."""
+    if connection.vendor == "postgresql":
+        with connection.cursor() as cur:
+            cur.execute("SELECT pg_database_size(current_database())")
+            row = cur.fetchone()
+            return int(row[0]) if row else 0
+    if connection.vendor == "sqlite":
+        name = connection.settings_dict.get("NAME")
+        try:
+            return os.path.getsize(name) if name and os.path.exists(name) else 0
+        except OSError:
+            return 0
+    return 0
+
+
+def _fmt_bytes(n: float) -> str:
+    n = float(n or 0)
+    units = ["B", "KB", "MB", "GB", "TB", "PB"]
+    i = 0
+    while n >= 1024 and i < len(units) - 1:
+        n /= 1024
+        i += 1
+    return f"{int(n)} B" if i == 0 else f"{n:.1f} {units[i]}"
+
+
+@login_required
+def storage(request):
+    """Theo dõi dung lượng: kích thước database + disk của host nơi đặt volume DB."""
+    path = getattr(settings, "STORAGE_MONITOR_PATH", "/") or "/"
+    try:
+        total, used, free = shutil.disk_usage(path)
+    except OSError:
+        total = used = free = 0
+
+    db_bytes = _db_size_bytes()
+    disk_pct = round(used / total * 100, 1) if total else 0.0
+    db_vs_disk_pct = round(db_bytes / total * 100, 1) if total else 0.0
+
+    if disk_pct < 70:
+        bar_class = "bg-success"
+    elif disk_pct < 85:
+        bar_class = "bg-warning"
+    else:
+        bar_class = "bg-danger"
+
+    return render(request, "alerts/storage.html", {
+        "db_size":        _fmt_bytes(db_bytes),
+        "db_vs_disk_pct": db_vs_disk_pct,
+        "disk_total":     _fmt_bytes(total),
+        "disk_used":      _fmt_bytes(used),
+        "disk_free":      _fmt_bytes(free),
+        "disk_pct":       disk_pct,
+        "bar_class":      bar_class,
+        "monitor_path":   path,
+        "db_vendor":      connection.vendor,
+    })
 
 
 def _can_write(request) -> bool:
