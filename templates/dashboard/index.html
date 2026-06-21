@@ -25,13 +25,10 @@
   .dashboard-offline .card-body { padding-top: .35rem !important; padding-bottom: .35rem !important; }
 
   .dashboard-panels {
-    flex: 1;
-    min-height: 0;
     display: grid !important;
     grid-template-columns: repeat(2, minmax(0, 1fr));
-    grid-template-rows: repeat(2, minmax(0, 1fr));
+    grid-auto-rows: min-content;
     gap: .5rem;
-    overflow: hidden;
     margin: 0;
     --bs-gutter-x: 0;
     --bs-gutter-y: 0;
@@ -52,8 +49,8 @@
     flex-direction: column;
   }
   .device-scroll {
-    flex: 1;
-    min-height: 0;
+    /* Hiển thị tối đa ~5 dòng + header; nhiều hơn thì cuộn dọc. */
+    max-height: 12rem;
     overflow-y: auto;
     overflow-x: auto;
   }

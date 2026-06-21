@@ -61,9 +61,10 @@ class TestDashboardViews:
         assert "Switch (" in content
         assert "Router (" in content
         assert "Firewall (" in content
+        assert "NAS (" in content
         assert "HyperV (" in content
         assert "dashboard-panels" in content
-        assert "grid-template-rows: repeat(2" in content
+        assert "grid-auto-rows: min-content" in content
 
     def test_dashboard_index_shows_offline_notice_with_group_per_line(self, logged_in_client):
         online_sw = CiscoSNMPDeviceFactory(name="sw-online", device_type="switch")
