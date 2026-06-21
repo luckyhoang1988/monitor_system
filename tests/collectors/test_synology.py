@@ -15,8 +15,10 @@ def _collector(**overrides):
 SYN_PROFILE = {
     "cpu": {"cpu_idle": "1.3.6.1.4.1.2021.11.11.0"},
     "memory": {
-        "mem_total": "1.3.6.1.4.1.2021.4.5.0",
-        "mem_avail": "1.3.6.1.4.1.2021.4.6.0",
+        "mem_total":  "1.3.6.1.4.1.2021.4.5.0",
+        "mem_avail":  "1.3.6.1.4.1.2021.4.6.0",
+        "mem_buffer": "1.3.6.1.4.1.2021.4.14.0",
+        "mem_cached": "1.3.6.1.4.1.2021.4.15.0",
     },
 }
 
@@ -57,17 +59,25 @@ class TestDetectSynology:
 
 
 class TestSynologyCpuMem:
-    def test_cpu_from_idle_and_mem_from_total_avail(self, mocker):
+    def test_cpu_idle_and_mem_excludes_cache(self, mocker):
         c = _collector()
-        # ssCpuIdle=95 → cpu=5; total=1000, avail=400 → mem=60%
-        mocker.patch.object(c, "_snmp_get", side_effect=["95", "1000", "400"])
+        # idle=95 → cpu=5; total=1000 avail=400 buffer=100 cached=200
+        # used = 1000-400-100-200 = 300 → mem=30%
+        mocker.patch.object(c, "_snmp_get", side_effect=["95", "1000", "400", "100", "200"])
         cpu, mem = c._collect_cpu_mem_synology(SYN_PROFILE)
         assert cpu == 5.0
+        assert mem == 30.0
+
+    def test_fallback_when_no_buffer_cached(self, mocker):
+        c = _collector()
+        # buffer+cached lớn bất thường → used âm → fallback total-avail = 600 → 60%
+        mocker.patch.object(c, "_snmp_get", side_effect=["95", "1000", "400", "900", "900"])
+        cpu, mem = c._collect_cpu_mem_synology(SYN_PROFILE)
         assert mem == 60.0
 
     def test_handles_missing_values(self, mocker):
         c = _collector()
-        mocker.patch.object(c, "_snmp_get", side_effect=[None, None, None])
+        mocker.patch.object(c, "_snmp_get", side_effect=[None, None, None, None, None])
         cpu, mem = c._collect_cpu_mem_synology(SYN_PROFILE)
         assert cpu == 0.0 and mem == 0.0
 

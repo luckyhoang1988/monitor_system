@@ -290,12 +290,28 @@ class SwitchSNMPCollector(BaseCollector):
         return cpu_val, 0.0
 
     def _collect_cpu_mem_synology(self, oid_profile: dict) -> tuple[float, float]:
-        """Synology DSM — UCD-SNMP-MIB. CPU = 100 - ssCpuIdle; Mem từ total/avail (KB)."""
+        """Synology DSM — UCD-SNMP-MIB. CPU = 100 - ssCpuIdle.
+
+        Mem 'thực dùng' = total - free - buffer - cached (loại cache/buffer để khớp
+        DSM Resource Monitor). Nếu thiếu buffer/cached → quay về total - free.
+        """
         idle = self._snmp_get(oid_profile["cpu"]["cpu_idle"])
         cpu_val = max(0.0, 100.0 - float(idle)) if idle is not None else 0.0
-        mem_total = float(self._snmp_get(oid_profile["memory"]["mem_total"]) or 0)
-        mem_avail = float(self._snmp_get(oid_profile["memory"]["mem_avail"]) or 0)
-        mem_val = ((mem_total - mem_avail) / mem_total * 100.0) if mem_total else 0.0
+
+        mem = oid_profile["memory"]
+
+        def _kb(oid: str | None) -> float:
+            return float(self._snmp_get(oid) or 0) if oid else 0.0
+
+        total  = _kb(mem.get("mem_total"))
+        avail  = _kb(mem.get("mem_avail"))
+        buffer = _kb(mem.get("mem_buffer"))
+        cached = _kb(mem.get("mem_cached"))
+
+        used = total - avail - buffer - cached
+        if used < 0:  # thiết bị không trả buffer/cached hợp lý → fallback
+            used = total - avail
+        mem_val = (used / total * 100.0) if total else 0.0
         return cpu_val, mem_val
 
     def collect_raw(self) -> dict:
