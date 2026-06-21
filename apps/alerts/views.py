@@ -1,6 +1,9 @@
 import os
 import shutil
+from datetime import datetime, time, timedelta
+from zoneinfo import ZoneInfo
 from django.shortcuts import render, get_object_or_404, redirect
+from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from django.http import HttpResponseForbidden
 from django.conf import settings
@@ -36,9 +39,55 @@ def _fmt_bytes(n: float) -> str:
     return f"{int(n)} B" if i == 0 else f"{n:.1f} {units[i]}"
 
 
+def _purge_metrics(start, end) -> int:
+    """Xóa metrics (raw + aggregated) trong [start, end). Trả tổng số bản ghi đã xóa.
+
+    KHÔNG đụng tới lịch sử cảnh báo (Alert/AlertNotification).
+    """
+    from apps.metrics.models import (
+        InterfaceStats, SystemHealth, VMStats,
+        SystemHealthHourly, SystemHealthDaily,
+        InterfaceStatsHourly, InterfaceStatsDaily,
+    )
+    total = 0
+    for model in (InterfaceStats, SystemHealth, VMStats):
+        total += model.objects.filter(timestamp__gte=start, timestamp__lt=end).delete()[0]
+    for model in (SystemHealthHourly, InterfaceStatsHourly):
+        total += model.objects.filter(hour__gte=start, hour__lt=end).delete()[0]
+    for model in (SystemHealthDaily, InterfaceStatsDaily):
+        total += model.objects.filter(day__gte=start.date(), day__lt=end.date()).delete()[0]
+    return total
+
+
 @login_required
 def storage(request):
-    """Theo dõi dung lượng: kích thước database + disk của host nơi đặt volume DB."""
+    """Theo dõi dung lượng + xóa log metrics theo khoảng ngày (POST)."""
+    can_write = _can_write(request)
+
+    if request.method == "POST":
+        if not can_write:
+            return HttpResponseForbidden("Bạn không có quyền xóa dữ liệu.")
+        tz = ZoneInfo(getattr(settings, "TIME_ZONE", "UTC"))
+        from_raw = (request.POST.get("from_date") or "").strip()
+        to_raw   = (request.POST.get("to_date") or "").strip()
+        try:
+            from_d = datetime.strptime(from_raw, "%Y-%m-%d").date()
+            to_d   = datetime.strptime(to_raw, "%Y-%m-%d").date()
+        except ValueError:
+            messages.error(request, "Vui lòng chọn Từ ngày và Đến ngày hợp lệ.")
+            return redirect("alerts:storage")
+        if from_d > to_d:
+            messages.error(request, "Từ ngày phải ≤ Đến ngày.")
+            return redirect("alerts:storage")
+        start = datetime.combine(from_d, time.min, tzinfo=tz)
+        end   = datetime.combine(to_d, time.min, tzinfo=tz) + timedelta(days=1)
+        deleted = _purge_metrics(start, end)
+        messages.success(
+            request,
+            f"Đã xóa {deleted:,} bản ghi metrics từ {from_d:%d/%m/%Y} đến {to_d:%d/%m/%Y}.",
+        )
+        return redirect("alerts:storage")
+
     path = getattr(settings, "STORAGE_MONITOR_PATH", "/") or "/"
     try:
         total, used, free = shutil.disk_usage(path)
@@ -66,6 +115,8 @@ def storage(request):
         "bar_class":      bar_class,
         "monitor_path":   path,
         "db_vendor":      connection.vendor,
+        "can_write":      can_write,
+        "auto_cleanup":   getattr(settings, "METRICS_AUTO_CLEANUP", False),
     })
 
 

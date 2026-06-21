@@ -169,6 +169,10 @@ WINRM_CERT_VALIDATE = env("WINRM_CERT_VALIDATE", default="validate")
 # Metrics retention (ngày)
 METRICS_RETENTION_DAYS = env.int("METRICS_RETENTION_DAYS", default=90)
 
+# Tự động xóa metrics cũ (cleanup_old_metrics + dọn raw đã rollup).
+# False = TẮT auto-delete, quản lý dung lượng thủ công qua trang Cảnh báo → Dung lượng.
+METRICS_AUTO_CLEANUP = env.bool("METRICS_AUTO_CLEANUP", default=False)
+
 # Đường dẫn để theo dõi dung lượng disk (trang Cảnh báo → Dung lượng).
 # Mặc định "/" — trong container, overlay fs phản ánh disk host nơi đặt volume DB.
 STORAGE_MONITOR_PATH = env("STORAGE_MONITOR_PATH", default="/")

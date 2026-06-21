@@ -44,7 +44,48 @@
     <div class="text-muted small mt-3">
       <i class="bi bi-info-circle me-1"></i>Disk của host nơi đặt volume database (pgdata).
       Database <span class="font-monospace">{{ db_vendor }}</span> tại <span class="font-monospace">{{ monitor_path }}</span>.
+      {% if auto_cleanup %}
+        <span class="badge bg-warning text-dark ms-2">Auto-cleanup: BẬT</span>
+      {% else %}
+        <span class="badge bg-secondary ms-2">Auto-cleanup: TẮT</span>
+      {% endif %}
     </div>
+  </div>
+</div>
+
+<!-- ===== Xóa log theo khoảng ngày ===== -->
+<div class="card mb-4">
+  <div class="card-header bg-white py-2">
+    <span class="fw-semibold"><i class="bi bi-trash me-2 text-danger"></i>Xóa log theo khoảng ngày</span>
+  </div>
+  <div class="card-body">
+    <p class="text-muted small mb-3">
+      Xóa dữ liệu metrics (CPU/RAM, traffic interface, VM) trong khoảng ngày đã chọn
+      (theo giờ local) để giải phóng dung lượng. <strong>Không xóa lịch sử cảnh báo.</strong>
+    </p>
+    {% if can_write %}
+    <form method="post" action="{% url 'alerts:storage' %}"
+          onsubmit="return confirm('Xóa toàn bộ metrics trong khoảng ngày đã chọn? Thao tác không thể hoàn tác.');">
+      {% csrf_token %}
+      <div class="row g-2 align-items-end">
+        <div class="col-auto">
+          <label class="form-label small mb-1">Từ ngày</label>
+          <input type="date" name="from_date" class="form-control form-control-sm" required>
+        </div>
+        <div class="col-auto">
+          <label class="form-label small mb-1">Đến ngày</label>
+          <input type="date" name="to_date" class="form-control form-control-sm" required>
+        </div>
+        <div class="col-auto">
+          <button type="submit" class="btn btn-sm btn-danger">
+            <i class="bi bi-trash me-1"></i>Xóa log
+          </button>
+        </div>
+      </div>
+    </form>
+    {% else %}
+    <div class="text-muted small"><i class="bi bi-lock me-1"></i>Bạn cần quyền ghi (Network Admin) để xóa dữ liệu.</div>
+    {% endif %}
   </div>
 </div>
 {% endblock %}
