@@ -57,6 +57,18 @@ class TestDetectSynology:
         mocker.patch.object(c, "_snmp_get", side_effect=fake_get)
         assert c.detect_os_family() == "cisco_ios"
 
+    def test_empty_string_probe_not_synology(self, mocker):
+        """Regression: backend trả "" cho OID không tồn tại → KHÔNG nhận nhầm Synology."""
+        c = _collector()
+        def fake_get(oid):
+            if oid == OID_SYS_OBJECT_ID:
+                return "1.3.6.1.4.1.9.1.1"
+            if oid == OID_SYS_DESCR:
+                return "Cisco IOS Software, C2960"
+            return ""  # OID_SYNO_MODEL → chuỗi rỗng (không phải None!)
+        mocker.patch.object(c, "_snmp_get", side_effect=fake_get)
+        assert c.detect_os_family() == "cisco_ios"
+
 
 class TestSynologyCpuMem:
     def test_cpu_idle_and_mem_excludes_cache(self, mocker):

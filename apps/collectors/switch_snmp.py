@@ -178,8 +178,9 @@ class SwitchSNMPCollector(BaseCollector):
             return "cisco_iosxe"
 
         # Fallback (auto-discovery chưa set vendor): probe OID model Synology
-        # trước khi mặc định Cisco IOS. Thiết bị non-Synology trả None ngay.
-        if self._snmp_get(OID_SYNO_MODEL) is not None:
+        # trước khi mặc định Cisco IOS. Lưu ý: backend SNMP có thể trả "" (chuỗi
+        # rỗng) cho OID không tồn tại — phải kiểm tra TRUTHY, không dùng `is not None`.
+        if self._snmp_get(OID_SYNO_MODEL):
             return "synology_dsm"
 
         return "cisco_ios"
@@ -295,13 +296,19 @@ class SwitchSNMPCollector(BaseCollector):
         Mem 'thực dùng' = total - free - buffer - cached (loại cache/buffer để khớp
         DSM Resource Monitor). Nếu thiếu buffer/cached → quay về total - free.
         """
-        idle = self._snmp_get(oid_profile["cpu"]["cpu_idle"])
-        cpu_val = max(0.0, 100.0 - float(idle)) if idle is not None else 0.0
+        def _to_float(val) -> float:
+            try:
+                return float(val)
+            except (TypeError, ValueError):
+                return 0.0
+
+        idle_raw = self._snmp_get(oid_profile["cpu"]["cpu_idle"])
+        cpu_val = max(0.0, 100.0 - _to_float(idle_raw)) if idle_raw not in (None, "") else 0.0
 
         mem = oid_profile["memory"]
 
         def _kb(oid: str | None) -> float:
-            return float(self._snmp_get(oid) or 0) if oid else 0.0
+            return _to_float(self._snmp_get(oid)) if oid else 0.0
 
         total  = _kb(mem.get("mem_total"))
         avail  = _kb(mem.get("mem_avail"))
