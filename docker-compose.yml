@@ -35,6 +35,9 @@ services:
       DJANGO_SETTINGS_MODULE: config.settings.production
       HOME: /tmp
       TZ: Asia/Ho_Chi_Minh
+    # Cho phép ICMP ping từ user non-root (cho manage.py poll_device thủ công).
+    sysctls:
+      - net.ipv4.ping_group_range=0 2147483647
     volumes:
       - static_volume:/app/staticfiles
       - backup_volume:/app/backups
@@ -60,6 +63,9 @@ services:
       HOME: /tmp
       TZ: Asia/Ho_Chi_Minh
     command: celery -A config worker -l info --concurrency=4
+    # Cho phép ICMP ping từ user non-root (appuser) trong container.
+    sysctls:
+      - net.ipv4.ping_group_range=0 2147483647
     volumes:
       - backup_volume:/app/backups
     depends_on:

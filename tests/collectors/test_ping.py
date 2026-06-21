@@ -68,11 +68,11 @@ class TestPingCollector:
         assert "ping_rtt_ms" not in data.extra
 
     def test_parse_rtt_windows(self):
-        collector = PingCollector(MagicMock())
+        from apps.collectors.ping_util import _parse_rtt
         output = "Reply from 127.0.0.1: bytes=32 time=4ms TTL=128\nMinimum = 4ms, Maximum = 4ms, Average = 4ms"
-        assert collector._parse_rtt(output) == 4.0
+        assert _parse_rtt(output) == 4.0
 
     def test_parse_rtt_linux(self):
-        collector = PingCollector(MagicMock())
+        from apps.collectors.ping_util import _parse_rtt
         output = "64 bytes from 127.0.0.1: icmp_seq=1 ttl=64 time=0.045 ms"
-        assert collector._parse_rtt(output) == 0.045
+        assert _parse_rtt(output) == 0.045

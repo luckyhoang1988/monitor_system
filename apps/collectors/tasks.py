@@ -6,20 +6,72 @@ from django.utils import timezone
 logger = logging.getLogger(__name__)
 
 
+ICMP_DEVICE_TYPES = ("switch", "router", "firewall")
+
+
+def _has_valid_data(device, data) -> bool:
+    """Dữ liệu SNMP/SSH có 'thật' không (tránh coi poll rỗng là thành công).
+
+    - switch/router/firewall: phải có >=1 interface (walk thành công).
+    - thiết bị khác (hyperv...): chỉ cần collect không lỗi.
+    """
+    if device.device_type in ICMP_DEVICE_TYPES:
+        return len(data.interfaces) > 0
+    return data is not None
+
+
 def _poll_device_once(device_id: int) -> None:
+    from django.conf import settings
     from apps.devices.models import Device
     from apps.collectors.factory import CollectorFactory
+    from apps.collectors.ping_util import icmp_ping
     from apps.metrics.writer import save_metrics
 
     device = Device.objects.get(pk=device_id)
     collector = CollectorFactory.create(device)
-    data = collector.collect()
-    save_metrics(device, data)
-    device.last_seen = timezone.now()
-    device.os_family = data.os_family
-    device.save(update_fields=["last_seen", "os_family"])
-    logger.info("Polled %s (%s) — CPU %.1f%% MEM %.1f%%",
-                device.name, data.os_family, data.cpu_percent, data.mem_percent)
+
+    # ICMP độc lập với SNMP — chỉ áp dụng cho thiết bị mạng (switch/router/firewall).
+    require_icmp = (
+        bool(getattr(settings, "ONLINE_REQUIRE_ICMP", True))
+        and device.device_type in ICMP_DEVICE_TYPES
+    )
+    icmp_ok, rtt = (None, None)
+    if require_icmp:
+        icmp_ok, rtt = icmp_ping(
+            device.ip_address,
+            timeout_secs=int(getattr(settings, "PING_TIMEOUT_SECS", 1)),
+        )
+
+    data = None
+    snmp_valid = False
+    try:
+        data = collector.collect()
+        if require_icmp:
+            data.extra["ping_ok"] = bool(icmp_ok)
+            data.extra["ping_rtt_ms"] = rtt
+        save_metrics(device, data)
+        device.os_family = data.os_family
+        snmp_valid = _has_valid_data(device, data)
+    except Exception as exc:
+        logger.warning("Poll collect failed %s (%s): %s", device.name, device.ip_address, exc)
+
+    # Online = kết hợp. Với thiết bị mạng: CẢ ping VÀ SNMP-thật (AND).
+    online = (snmp_valid and bool(icmp_ok)) if require_icmp else snmp_valid
+
+    update_fields = []
+    if data is not None:
+        update_fields.append("os_family")
+    if online:
+        device.last_seen = timezone.now()
+        update_fields.append("last_seen")
+    if update_fields:
+        device.save(update_fields=update_fields)
+
+    logger.info(
+        "Polled %s — online=%s (snmp_valid=%s icmp=%s) ifaces=%s",
+        device.name, online, snmp_valid, icmp_ok,
+        len(data.interfaces) if data is not None else "n/a",
+    )
 
 
 @shared_task(bind=True, max_retries=3, default_retry_delay=30)

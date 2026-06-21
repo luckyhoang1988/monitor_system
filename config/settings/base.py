@@ -175,6 +175,12 @@ DISCOVERY_MAX_IPS       = 256   # max host IPs per subnet scan
 DISCOVERY_PING_WORKERS  = 100   # thread pool size for ping sweep
 DISCOVERY_SNMP_WORKERS  = 80    # thread pool size for SNMP probe
 
+# Online determination — kết hợp ICMP + SNMP
+# True: thiết bị mạng (switch/router/firewall) online chỉ khi CẢ ping ICMP thông
+# VÀ SNMP trả về dữ liệu thật (>=1 interface). Tránh false-online khi SNMP rỗng.
+ONLINE_REQUIRE_ICMP = env.bool("ONLINE_REQUIRE_ICMP", default=True)
+PING_TIMEOUT_SECS   = env.int("PING_TIMEOUT_SECS", default=1)
+
 # Alert engine
 ALERT_GRACE_PERIOD_SECS    = 120  # min seconds before "no data" is treated as offline
 ALERT_EVAL_WINDOW_MINUTES  = 10   # look-back window for alert task

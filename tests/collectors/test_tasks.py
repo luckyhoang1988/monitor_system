@@ -29,13 +29,18 @@ def _make_normalized_data(os_family: str = "cisco_ios") -> NormalizedData:
 @pytest.mark.django_db
 class TestPollDevice:
     def test_poll_device_saves_metrics_and_updates_last_seen(self, mocker):
+        from apps.collectors.base import InterfaceData
         device = CiscoSNMPDeviceFactory()
         data = _make_normalized_data("cisco_ios")
+        # Switch online cần SNMP có interface thật + ping thông (AND).
+        data.interfaces = [InterfaceData(name="Gi0/1", if_index=1, status="up",
+                                         in_bytes=0, out_bytes=0)]
 
         mock_collector = MagicMock()
         mock_collector.collect.return_value = data
         mocker.patch("apps.collectors.factory.CollectorFactory.create", return_value=mock_collector)
         mock_save = mocker.patch("apps.metrics.writer.save_metrics")
+        mocker.patch("apps.collectors.ping_util.icmp_ping", return_value=(True, 1.0))
 
         poll_device.run(device.pk)
 
