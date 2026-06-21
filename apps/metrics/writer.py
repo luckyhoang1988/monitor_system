@@ -1,6 +1,7 @@
 """Ghi NormalizedData vào PostgreSQL qua Django ORM."""
 import logging
 from datetime import datetime
+from django.conf import settings
 from django.utils import timezone
 from apps.collectors.base import NormalizedData, InterfaceData
 from apps.devices.models import Device, Interface
@@ -122,9 +123,15 @@ def _save_interface_stats(device: Device, data: NormalizedData) -> None:
     if update_ifaces:
         Interface.objects.bulk_update(update_ifaces, ["name", "description", "is_uplink"])
 
-    # 2. Fetch "previous stats" cho tất cả interface bằng 1 query (lấy trong khoảng 3 chu kỳ gần nhất)
-    # Rất tối ưu, tránh N queries.
-    cutoff = data.timestamp - timedelta(seconds=device.collect_interval * 3)
+    # 2. Fetch "previous stats" cho tất cả interface bằng 1 query.
+    # Cửa sổ tìm prev phải đủ rộng: nhịp poll thực do Celery beat quyết định (vd 300s)
+    # và có thể LỚN hơn device.collect_interval. Nếu cửa sổ < nhịp poll thật,
+    # prev luôn nằm ngoài → mbps=0 giả. Dùng floor METRIC_PREV_LOOKBACK_SECS.
+    lookback = max(
+        device.collect_interval * 3,
+        int(getattr(settings, "METRIC_PREV_LOOKBACK_SECS", 900)),
+    )
+    cutoff = data.timestamp - timedelta(seconds=lookback)
     recent_stats = InterfaceStats.objects.filter(
         interface__device=device,
         timestamp__lt=data.timestamp,

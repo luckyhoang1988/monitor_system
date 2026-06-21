@@ -193,3 +193,8 @@ CHART_MAX_POINTS = env.int("CHART_MAX_POINTS", default=500)
 # Metric aggregation buffers (avoid rolling up incomplete time buckets)
 HOURLY_ROLLUP_BUFFER_HOURS = 2
 DAILY_ROLLUP_BUFFER_DAYS   = 1
+
+# Cửa sổ (giây) tìm mẫu InterfaceStats trước để tính delta Mbps.
+# Phải ≥ nhịp poll thực của Celery beat (poll-all-network-devices = 300s) để
+# không bỏ lỡ mẫu trước khi device.collect_interval bị đặt nhỏ hơn nhịp poll.
+METRIC_PREV_LOOKBACK_SECS = env.int("METRIC_PREV_LOOKBACK_SECS", default=900)

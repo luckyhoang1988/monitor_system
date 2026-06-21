@@ -141,6 +141,39 @@ class TestSaveMetrics:
         assert Interface.objects.filter(device=device).count() == 2
         assert InterfaceStats.objects.count() == 2
 
+    def test_mbps_computed_when_poll_interval_exceeds_collect_interval(self, device):
+        """Regression: beat poll mỗi 300s nhưng collect_interval=60 → prev vẫn phải tìm thấy.
+
+        Trước đây cửa sổ prev = collect_interval*3 = 180s < 300s → prev=None → mbps=0 giả.
+        """
+        device.collect_interval = 60
+        device.save()
+        t0 = datetime.now(tz=timezone.utc) - timedelta(seconds=300)
+        t1 = datetime.now(tz=timezone.utc)
+
+        data0 = NormalizedData(
+            device_name=device.name, ip_address=device.ip_address, timestamp=t0,
+            os_family="cisco_ios", cpu_percent=10.0, mem_percent=20.0,
+            interfaces=[InterfaceData(name="Gi0/1", if_index=1, status="up",
+                                      in_bytes=1_000_000_000, out_bytes=2_000_000_000)],
+        )
+        save_metrics(device, data0)
+
+        # 300s sau: counter tăng ~37.5MB in → ~1 Mbps
+        data1 = NormalizedData(
+            device_name=device.name, ip_address=device.ip_address, timestamp=t1,
+            os_family="cisco_ios", cpu_percent=10.0, mem_percent=20.0,
+            interfaces=[InterfaceData(name="Gi0/1", if_index=1, status="up",
+                                      in_bytes=1_037_500_000, out_bytes=2_037_500_000)],
+        )
+        save_metrics(device, data1)
+
+        latest = (InterfaceStats.objects
+                  .filter(interface__device=device, interface__if_index=1)
+                  .order_by("-timestamp").first())
+        assert latest.in_mbps > 0
+        assert latest.out_mbps > 0
+
     def test_save_metrics_does_not_duplicate_interface(self, device):
         iface_data = InterfaceData(name="Gi0/1", if_index=1, status="up",
                                    in_bytes=1000, out_bytes=2000)
