@@ -26,6 +26,7 @@ OID_DIR = Path(__file__).resolve().parent.parent.parent / "oids"
 OID_SYS_DESCR    = "1.3.6.1.2.1.1.1.0"
 OID_SYS_OBJECT_ID= "1.3.6.1.2.1.1.2.0"
 OID_SYS_UPTIME   = "1.3.6.1.2.1.1.3.0"
+OID_SYNO_MODEL   = "1.3.6.1.4.1.6574.1.5.1.0"  # SYNOLOGY-SYSTEM-MIB modelName (probe Synology)
 
 # Interface table OIDs (MIB-II standard)
 OID_IF_INDEX   = "1.3.6.1.2.1.2.2.1.1"
@@ -139,7 +140,15 @@ class SwitchSNMPCollector(BaseCollector):
         return results
 
     def detect_os_family(self) -> str:
-        """Detect vendor và OS-family từ sysObjectID + sysDescr."""
+        """Detect OS-family từ vendor đã chọn + sysObjectID/sysDescr.
+
+        Synology DSM chạy net-snmp → sysObjectID trả 8072 (không phải 6574) và
+        sysDescr là "Linux ..." nên KHÔNG nhận diện được qua sysObjectID. Vì vậy
+        ưu tiên vendor người dùng chọn, và có probe OID đặc trưng Synology làm fallback.
+        """
+        if (self.device.vendor or "").lower() == "synology":
+            return "synology_dsm"
+
         sys_oid  = self._snmp_get(OID_SYS_OBJECT_ID) or ""
         sys_desc = self._snmp_get(OID_SYS_DESCR) or ""
 
@@ -155,8 +164,9 @@ class SwitchSNMPCollector(BaseCollector):
         if "2011" in sys_oid or "VRP" in sys_desc:
             return "huawei_vrp"
 
-        # Synology NAS (DSM) — enterprise prefix 6574
-        if "6574" in sys_oid or "synology" in sys_desc.lower():
+        # Synology NAS (DSM) — enterprise prefix 6574 (hiếm khi xuất hiện ở sysObjectID
+        # vì DSM dùng net-snmp; giữ lại cho trường hợp firmware báo 6574/descr có "synology")
+        if "6574" in sys_oid or "synology" in str(sys_desc).lower():
             return "synology_dsm"
 
         # Cisco Business (Catalyst 1200/1300, CBS) — OID khác enterprise IOS
@@ -166,6 +176,11 @@ class SwitchSNMPCollector(BaseCollector):
         # Cisco — enterprise prefix 9
         if "IOS-XE" in sys_desc or "IOS XE" in sys_desc:
             return "cisco_iosxe"
+
+        # Fallback (auto-discovery chưa set vendor): probe OID model Synology
+        # trước khi mặc định Cisco IOS. Thiết bị non-Synology trả None ngay.
+        if self._snmp_get(OID_SYNO_MODEL) is not None:
+            return "synology_dsm"
 
         return "cisco_ios"
 

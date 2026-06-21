@@ -56,6 +56,7 @@ class TestDetectOsFamily:
         mocker.patch.object(cisco_collector, "_snmp_get", side_effect=[
             "1.3.6.1.4.1.9.1.1",
             "Cisco IOS Software, Version 15.2",
+            None,  # OID_SYNO_MODEL probe → không phải Synology
         ])
         assert cisco_collector.detect_os_family() == "cisco_ios"
 

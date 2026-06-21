@@ -1,13 +1,15 @@
 """Tests cho hỗ trợ Synology NAS qua SNMP (detect + CPU/mem + validity)."""
-from apps.collectors.switch_snmp import SwitchSNMPCollector
+from apps.collectors.switch_snmp import (
+    SwitchSNMPCollector, OID_SYS_OBJECT_ID, OID_SYS_DESCR,
+)
 from apps.collectors.base import NormalizedData, InterfaceData
 from apps.collectors.tasks import _has_valid_data
 from apps.devices.models import Device
 from tests.conftest import CiscoSNMPDeviceFactory
 
 
-def _collector():
-    return SwitchSNMPCollector(CiscoSNMPDeviceFactory.build())
+def _collector(**overrides):
+    return SwitchSNMPCollector(CiscoSNMPDeviceFactory.build(**overrides))
 
 
 SYN_PROFILE = {
@@ -20,21 +22,38 @@ SYN_PROFILE = {
 
 
 class TestDetectSynology:
-    def test_detect_by_sys_oid(self, mocker):
-        c = _collector()
-        mocker.patch.object(c, "_snmp_get", side_effect=[
-            "1.3.6.1.4.1.6574.1",       # sysObjectID chứa "6574"
-            "Linux DiskStation 4.4",     # sysDescr
-        ])
+    def test_detect_by_vendor(self, mocker):
+        """Vendor=synology → synology_dsm dù SNMP báo net-snmp (8072 / Linux ...)."""
+        c = _collector(vendor="synology", os_family="synology_dsm")
+        # Không cần SNMP — vendor quyết định; nếu có gọi cũng trả net-snmp.
+        mocker.patch.object(c, "_snmp_get", return_value="1.3.6.1.4.1.8072.3.2.10")
         assert c.detect_os_family() == "synology_dsm"
 
-    def test_detect_by_descr(self, mocker):
-        c = _collector()
-        mocker.patch.object(c, "_snmp_get", side_effect=[
-            "1.3.6.1.4.1.8072.3.2.10",   # OID generic (net-snmp), không có 6574
-            "Synology DSM DS920+",        # descr chứa "synology"
-        ])
+    def test_detect_by_model_probe_when_vendor_unset(self, mocker):
+        """Auto-discovery (vendor=cisco mặc định): probe OID model 6574 → synology_dsm."""
+        c = _collector()  # vendor=cisco
+        def fake_get(oid):
+            if oid == "1.3.6.1.4.1.6574.1.5.1.0":
+                return "DS920+"        # probe Synology trả model
+            if oid == OID_SYS_OBJECT_ID:
+                return "1.3.6.1.4.1.8072.3.2.10"
+            if oid == OID_SYS_DESCR:
+                return "Linux DiskStation 4.4 x86_64"
+            return None
+        mocker.patch.object(c, "_snmp_get", side_effect=fake_get)
         assert c.detect_os_family() == "synology_dsm"
+
+    def test_cisco_not_misdetected_as_synology(self, mocker):
+        """Cisco IOS thật: probe 6574 trả None → vẫn cisco_ios."""
+        c = _collector()
+        def fake_get(oid):
+            if oid == OID_SYS_OBJECT_ID:
+                return "1.3.6.1.4.1.9.1.1"
+            if oid == OID_SYS_DESCR:
+                return "Cisco IOS Software, C2960"
+            return None  # OID_SYNO_MODEL → None
+        mocker.patch.object(c, "_snmp_get", side_effect=fake_get)
+        assert c.detect_os_family() == "cisco_ios"
 
 
 class TestSynologyCpuMem:
