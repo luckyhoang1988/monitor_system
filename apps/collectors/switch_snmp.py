@@ -155,6 +155,10 @@ class SwitchSNMPCollector(BaseCollector):
         if "2011" in sys_oid or "VRP" in sys_desc:
             return "huawei_vrp"
 
+        # Synology NAS (DSM) — enterprise prefix 6574
+        if "6574" in sys_oid or "synology" in sys_desc.lower():
+            return "synology_dsm"
+
         # Cisco Business (Catalyst 1200/1300, CBS) — OID khác enterprise IOS
         if _is_cisco_business(sys_desc):
             return "cisco_business"
@@ -270,6 +274,15 @@ class SwitchSNMPCollector(BaseCollector):
         cpu_val = float(self._snmp_get(oid_profile["cpu"]["cpu_5min"]) or 0)
         return cpu_val, 0.0
 
+    def _collect_cpu_mem_synology(self, oid_profile: dict) -> tuple[float, float]:
+        """Synology DSM — UCD-SNMP-MIB. CPU = 100 - ssCpuIdle; Mem từ total/avail (KB)."""
+        idle = self._snmp_get(oid_profile["cpu"]["cpu_idle"])
+        cpu_val = max(0.0, 100.0 - float(idle)) if idle is not None else 0.0
+        mem_total = float(self._snmp_get(oid_profile["memory"]["mem_total"]) or 0)
+        mem_avail = float(self._snmp_get(oid_profile["memory"]["mem_avail"]) or 0)
+        mem_val = ((mem_total - mem_avail) / mem_total * 100.0) if mem_total else 0.0
+        return cpu_val, mem_val
+
     def collect_raw(self) -> dict:
         os_family   = self.detect_os_family()
         oid_profile = _load_oid_profile(os_family)
@@ -293,6 +306,9 @@ class SwitchSNMPCollector(BaseCollector):
 
         elif os_family == "cisco_business":
             cpu_val, mem_val = self._collect_cpu_mem_cisco_business(oid_profile)
+
+        elif os_family == "synology_dsm":
+            cpu_val, mem_val = self._collect_cpu_mem_synology(oid_profile)
 
         else:
             # Cisco IOS / IOS-XE: CPU từ OID 5-min, Memory cần tính

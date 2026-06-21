@@ -8,6 +8,7 @@ class Device(models.Model):
         ("switch",   "Switch"),
         ("router",   "Router"),
         ("firewall", "Firewall"),
+        ("nas",      "NAS"),
         ("hyperv",   "HyperV Host"),
     ]
     VENDORS = [
@@ -16,6 +17,7 @@ class Device(models.Model):
         ("hp",       "HP/Aruba"),
         ("mikrotik", "MikroTik"),
         ("fortinet", "Fortinet"),
+        ("synology", "Synology"),
         ("microsoft","Microsoft"),
     ]
     PROTOCOLS    = [("snmp", "SNMP"), ("ssh", "SSH"), ("winrm", "WinRM"), ("ping", "Ping/ICMP")]

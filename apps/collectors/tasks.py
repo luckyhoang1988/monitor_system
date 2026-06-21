@@ -6,7 +6,7 @@ from django.utils import timezone
 logger = logging.getLogger(__name__)
 
 
-ICMP_DEVICE_TYPES = ("switch", "router", "firewall")
+ICMP_DEVICE_TYPES = ("switch", "router", "firewall", "nas")
 
 
 def _has_valid_data(device, data) -> bool:
@@ -15,6 +15,9 @@ def _has_valid_data(device, data) -> bool:
     - switch/router/firewall: phải có >=1 interface (walk thành công).
     - thiết bị khác (hyperv...): chỉ cần collect không lỗi.
     """
+    if device.device_type == "nas":
+        # NAS: hợp lệ khi có interface HOẶC đọc được memory (Synology qua UCD-SNMP).
+        return len(data.interfaces) > 0 or data.mem_percent > 0
     if device.device_type in ICMP_DEVICE_TYPES:
         return len(data.interfaces) > 0
     return data is not None
@@ -99,7 +102,7 @@ def poll_all_network_devices() -> None:
     """Poll thiết bị mạng SNMP/SSH (không bao gồm ping)."""
     from apps.devices.models import Device
     device_ids = list(Device.objects.filter(
-        device_type__in=["switch", "router", "firewall"],
+        device_type__in=["switch", "router", "firewall", "nas"],
         enabled=True,
         protocol__in=["snmp", "ssh"],
     ).values_list('pk', flat=True))
@@ -113,7 +116,7 @@ def poll_all_ping_devices() -> None:
     """Poll thiết bị dùng giao thức ping mỗi 3 phút."""
     from apps.devices.models import Device
     device_ids = list(Device.objects.filter(
-        device_type__in=["switch", "router", "firewall"],
+        device_type__in=["switch", "router", "firewall", "nas"],
         enabled=True,
         protocol="ping",
     ).values_list("pk", flat=True))

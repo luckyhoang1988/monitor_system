@@ -309,6 +309,54 @@
       </div>
     </div>
 
+    <!-- NAS -->
+    <div class="col-xl-6">
+      <div class="card h-100">
+        <div class="card-header bg-white d-flex align-items-center justify-content-between py-1 px-3">
+          <span class="fw-semibold small"><i class="bi bi-hdd-stack me-2 text-success"></i>NAS ({{ nas_devices|length }})</span>
+          <a href="{% url 'devices:add' %}" class="btn btn-sm btn-outline-primary py-0 px-2"><i class="bi bi-plus"></i></a>
+        </div>
+        <div class="device-scroll">
+          {% if nas_devices %}
+          <table class="table table-hover table-compact mb-0">
+            <thead class="table-light">
+              <tr>
+                <th class="ps-2">Tên</th>
+                <th>IP</th>
+                <th>Vendor</th>
+                <th>TT</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for nas in nas_devices %}
+              <tr>
+                <td class="ps-2 fw-medium" title="{{ nas.name }}">{{ nas.name }}</td>
+                <td class="text-muted font-monospace">{{ nas.ip_address }}</td>
+                <td>{{ nas.get_vendor_display }}</td>
+                <td>
+                  {% if nas.is_online %}
+                    <span class="badge badge-online rounded-pill px-2">On</span>
+                  {% else %}
+                    <span class="badge badge-offline rounded-pill px-2">Off</span>
+                  {% endif %}
+                </td>
+                <td>
+                  <a href="{% url 'dashboard:nas_detail' nas.pk %}" class="btn btn-sm btn-outline-secondary py-0 px-1">
+                    <i class="bi bi-graph-up"></i>
+                  </a>
+                </td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+          {% else %}
+            <div class="text-center text-muted py-3 small">Chưa có NAS.</div>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+
     <!-- HyperV -->
     <div class="col-xl-6">
       <div class="card h-100">

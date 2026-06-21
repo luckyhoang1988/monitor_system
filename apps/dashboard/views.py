@@ -36,12 +36,14 @@ def index(request):
         "switch": "Switch",
         "router": "Router",
         "firewall": "Firewall",
+        "nas": "NAS",
         "hyperv": "HyperV",
     }
     device_type_meta = [
         ("switch", "Switch", "bi-hdd-network", "text-primary"),
         ("router", "Router", "bi-router", "text-warning"),
         ("firewall", "Firewall", "bi-shield-fill-check", "text-danger"),
+        ("nas", "NAS", "bi-hdd-stack", "text-success"),
         ("hyperv", "HyperV Host", "bi-server", "text-info"),
     ]
     by_type: dict[str, list] = defaultdict(list)
@@ -50,6 +52,7 @@ def index(request):
     switches  = by_type["switch"]
     routers   = by_type["router"]
     firewalls = by_type["firewall"]
+    nas_list  = by_type["nas"]
     hyperv    = by_type["hyperv"]
     device_type_stats = []
     for dtype, label, icon, color_class in device_type_meta:
@@ -83,6 +86,7 @@ def index(request):
         "switches":       switches,
         "routers":        routers,
         "firewalls":      firewalls,
+        "nas_devices":    nas_list,
         "hyperv_hosts":   hyperv,
         "active_alerts":  active_alerts,
         "device_type_stats": device_type_stats,
@@ -207,6 +211,12 @@ def _switch_like_detail(request, pk: int, device_type: str, template: str):
 @login_required
 def router_detail(request, pk):
     return _switch_like_detail(request, pk, "router", "dashboard/router_detail.html")
+
+
+@login_required
+def nas_detail(request, pk):
+    # NAS (Synology) giống switch: có interface + CPU/RAM → tái dùng template switch.
+    return _switch_like_detail(request, pk, "nas", "dashboard/switch_detail.html")
 
 
 @login_required
