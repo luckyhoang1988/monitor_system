@@ -4,6 +4,7 @@ import sys
 import socket
 import os
 from django.conf import settings
+from django.db.models import Count
 from django.shortcuts import render, get_object_or_404, redirect
 from django.contrib.auth.decorators import login_required
 from django.http import JsonResponse, Http404, HttpResponse, HttpResponseForbidden
@@ -84,10 +85,10 @@ def device_list(request):
         queryset = queryset.filter(device_type=device_type)
 
     devices = _order_devices(queryset, sort, direction)
-    type_counts = {
-        value: Device.objects.filter(device_type=value).count()
-        for value, _ in Device.DEVICE_TYPES
-    }
+    # 1 aggregate query thay cho N query COUNT theo từng device_type.
+    counts_qs = Device.objects.values("device_type").annotate(c=Count("id"))
+    counts_map = {row["device_type"]: row["c"] for row in counts_qs}
+    type_counts = {value: counts_map.get(value, 0) for value, _ in Device.DEVICE_TYPES}
     type_filters = [
         {"value": value, "label": label, "count": type_counts[value]}
         for value, label in Device.DEVICE_TYPES
@@ -231,10 +232,17 @@ def device_discovery_scan(request):
 
     enriched: list[tuple[str, bool, str, str]] = []
     workers2 = min(len(alive_ips), snmp_workers)
-    with ThreadPoolExecutor(max_workers=workers2) as executor:
-        futures2 = {executor.submit(_enrich, ip): ip for ip in alive_ips}
-        for future in as_completed(futures2):
-            enriched.append(future.result())
+    # Chặn reverse-DNS treo thread khi DNS không phản hồi (gethostbyaddr không có tham số timeout).
+    dns_timeout = getattr(settings, "DISCOVERY_DNS_TIMEOUT", 2)
+    _prev_timeout = socket.getdefaulttimeout()
+    socket.setdefaulttimeout(dns_timeout)
+    try:
+        with ThreadPoolExecutor(max_workers=workers2) as executor:
+            futures2 = {executor.submit(_enrich, ip): ip for ip in alive_ips}
+            for future in as_completed(futures2):
+                enriched.append(future.result())
+    finally:
+        socket.setdefaulttimeout(_prev_timeout)
 
     enriched_ips = [r[0] for r in enriched]
     imported_ips = set(

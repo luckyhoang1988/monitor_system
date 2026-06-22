@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING
 import yaml
 
 from .base import BaseCollector, NormalizedData, InterfaceData
-from .adapters import get_adapter
 from .snmp_client import (
     create_snmp_session,
     resolve_snmp_backend,

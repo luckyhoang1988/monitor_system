@@ -101,7 +101,8 @@ class HyperVCollector(BaseCollector):
             try:
                 normalized = re.sub(r"(\.\d{6})\d*(Z|[+-]\d{2}:\d{2})$", r"\1+00:00", boot_str)
                 boot_dt = datetime.fromisoformat(normalized)
-                uptime_secs = int((datetime.now(tz=timezone.utc) - boot_dt).total_seconds())
+                # Chặn uptime âm khi đồng hồ host lệch (boot_time tương lai).
+                uptime_secs = max(0, int((datetime.now(tz=timezone.utc) - boot_dt).total_seconds()))
             except (ValueError, TypeError):
                 logger.warning("Device %s: could not parse boot time %r", self.device.name, boot_str)
         return NormalizedData(

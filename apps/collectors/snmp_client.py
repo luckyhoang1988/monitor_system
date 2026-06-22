@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 OID_SYS_DESCR = "1.3.6.1.2.1.1.1.0"
 OID_SYS_NAME = "1.3.6.1.2.1.1.5.0"
@@ -142,7 +145,8 @@ def snmp_get_value(session: Any, oid: str) -> str | None:
     try:
         result = session.get(oid)
         return str(getattr(result, "value", result))
-    except Exception:
+    except Exception as exc:
+        logger.debug("snmp get failed oid=%s: %s", oid, exc)
         return None
 
 
@@ -150,7 +154,8 @@ def snmp_walk_pairs(session: Any, oid_prefix: str) -> list[tuple[str, str]]:
     try:
         results = session.walk(oid_prefix)
         return [(r.oid, r.value) for r in results]
-    except Exception:
+    except Exception as exc:
+        logger.debug("snmp walk failed prefix=%s: %s", oid_prefix, exc)
         return []
 
 

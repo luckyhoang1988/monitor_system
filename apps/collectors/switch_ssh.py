@@ -294,8 +294,8 @@ class SwitchSSHCollector(BaseCollector):
         # "CPU states: 5% user 1% system 0% nice 94% idle"
         cpu_m = re.search(r"CPU states?:\s*(\d+)%\s*user", output)
         # "Memory: total=1000000 KB used=500000 KB free=500000 KB"
-        used_m  = re.search(r"Memory:.*?used=(\d+)\s*KB", output)
-        total_m = re.search(r"Memory:.*?total=(\d+)\s*KB", output)
+        used_m  = re.search(r"Memory:.*?used=(\d+)\s*KB", output, re.DOTALL)
+        total_m = re.search(r"Memory:.*?total=(\d+)\s*KB", output, re.DOTALL)
 
         cpu_val = float(cpu_m.group(1)) if cpu_m else 0.0
         mem_val = 0.0
