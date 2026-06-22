@@ -38,6 +38,8 @@ def index(request):
         "firewall": "Firewall",
         "nas": "NAS",
         "hyperv": "HyperV",
+        "wlan_controller": "WLAN Controller",
+        "ap": "Access Point",
     }
     device_type_meta = [
         ("switch", "Switch", "bi-hdd-network", "text-primary"),
@@ -45,6 +47,8 @@ def index(request):
         ("firewall", "Firewall", "bi-shield-fill-check", "text-danger"),
         ("nas", "NAS", "bi-hdd-stack", "text-success"),
         ("hyperv", "HyperV Host", "bi-server", "text-info"),
+        ("wlan_controller", "WLAN AC", "bi-broadcast-pin", "text-primary"),
+        ("ap", "Access Point", "bi-wifi", "text-success"),
     ]
     by_type: dict[str, list] = defaultdict(list)
     for d in all_devices:
@@ -54,6 +58,8 @@ def index(request):
     firewalls = by_type["firewall"]
     nas_list  = by_type["nas"]
     hyperv    = by_type["hyperv"]
+    wlan_controllers = by_type["wlan_controller"]
+    access_points    = by_type["ap"]
     device_type_stats = []
     for dtype, label, icon, color_class in device_type_meta:
         devices = by_type.get(dtype, [])
@@ -88,6 +94,8 @@ def index(request):
         "firewalls":      firewalls,
         "nas_devices":    nas_list,
         "hyperv_hosts":   hyperv,
+        "wlan_controllers": wlan_controllers,
+        "access_points":  access_points,
         "active_alerts":  active_alerts,
         "device_type_stats": device_type_stats,
         "total_devices":  len(all_devices),
@@ -217,6 +225,51 @@ def router_detail(request, pk):
 def nas_detail(request, pk):
     # NAS (Synology) giống switch: có interface + CPU/RAM → tái dùng template switch.
     return _switch_like_detail(request, pk, "nas", "dashboard/switch_detail.html")
+
+
+@login_required
+def wlan_detail(request, pk):
+    """Trang WLAN Controller (Huawei AC): AP online/offline + client đang kết nối."""
+    from apps.metrics.models import SystemHealth, WifiApStats, WifiClientStats
+
+    device = get_object_or_404(Device, pk=pk, device_type="wlan_controller")
+
+    latest_health = (SystemHealth.objects
+                     .filter(device=device)
+                     .order_by("-timestamp")
+                     .first())
+
+    # AP snapshot mới nhất.
+    latest_ap_ts = (WifiApStats.objects
+                    .filter(device=device)
+                    .order_by("-timestamp")
+                    .values_list("timestamp", flat=True)
+                    .first())
+    aps = list(WifiApStats.objects.filter(device=device, timestamp=latest_ap_ts)
+               .order_by("ap_name")) if latest_ap_ts else []
+
+    # Client snapshot mới nhất.
+    latest_cl_ts = (WifiClientStats.objects
+                    .filter(device=device)
+                    .order_by("-timestamp")
+                    .values_list("timestamp", flat=True)
+                    .first())
+    clients = list(WifiClientStats.objects.filter(device=device, timestamp=latest_cl_ts)
+                   .order_by("ap_name", "mac")) if latest_cl_ts else []
+
+    ap_online = sum(1 for a in aps if a.is_online)
+    return render(request, "dashboard/wlan_detail.html", {
+        "device":        device,
+        "latest_health": latest_health,
+        "aps":           aps,
+        "clients":       clients,
+        "ap_total":      len(aps),
+        "ap_online":     ap_online,
+        "ap_offline":    len(aps) - ap_online,
+        "client_total":  len(clients),
+        "ap_updated":    latest_ap_ts,
+        "client_updated": latest_cl_ts,
+    })
 
 
 @login_required

@@ -44,7 +44,9 @@ class TestRollupSystemHealthHourly:
 
     def test_creates_hourly_record_from_raw(self, device):
         """Raw data cũ hơn buffer → rollup thành hourly."""
-        ts = _hours_ago(HOURLY_BUFFER_HOURS + 1)
+        # Ghim phút=10 để 2 mẫu cách 5 phút luôn cùng 1 bucket TruncHour
+        # (tránh flaky khi test chạy gần đầu giờ).
+        ts = _hours_ago(HOURLY_BUFFER_HOURS + 1).replace(minute=10, second=0, microsecond=0)
         SystemHealth.objects.create(
             device=device, timestamp=ts,
             cpu_percent=50.0, mem_percent=60.0,
@@ -76,7 +78,8 @@ class TestRollupSystemHealthHourly:
 
     def test_update_existing_hourly_record(self, device):
         """Rollup lại cùng giờ → update_or_create (không tạo duplicate)."""
-        ts = _hours_ago(HOURLY_BUFFER_HOURS + 1)
+        # Ghim phút=10 để các mẫu cùng giờ luôn rơi cùng 1 bucket (tránh flaky đầu giờ).
+        ts = _hours_ago(HOURLY_BUFFER_HOURS + 1).replace(minute=10, second=0, microsecond=0)
         SystemHealth.objects.create(
             device=device, timestamp=ts,
             cpu_percent=50.0, mem_percent=60.0,
@@ -108,7 +111,8 @@ class TestRollupInterfaceStatsHourly:
         return Interface.objects.create(device=device, if_index=1, name="Gi0/1")
 
     def test_creates_hourly_from_raw(self, iface):
-        ts = _hours_ago(HOURLY_BUFFER_HOURS + 1)
+        # Ghim phút=10 để 2 mẫu cách 5 phút luôn cùng 1 bucket TruncHour (tránh flaky đầu giờ).
+        ts = _hours_ago(HOURLY_BUFFER_HOURS + 1).replace(minute=10, second=0, microsecond=0)
         InterfaceStats.objects.create(
             interface=iface, timestamp=ts, status="up",
             in_mbps=10.5, out_mbps=5.2, in_errors=2, out_errors=1,
@@ -144,7 +148,8 @@ class TestRollupDaily:
 
     def test_system_health_daily_from_hourly(self, device):
         """Hourly data cũ hơn buffer → rollup thành daily."""
-        ts = _days_ago(3)
+        # Ghim giờ=10 để 2 mốc cách 1h luôn cùng 1 ngày (tránh flaky khi chạy gần nửa đêm).
+        ts = _days_ago(3).replace(hour=10, minute=0, second=0, microsecond=0)
         SystemHealthHourly.objects.create(
             device=device, hour=ts,
             cpu_avg=40.0, cpu_max=60.0,
@@ -166,7 +171,8 @@ class TestRollupDaily:
         assert daily.sample_count == 24
 
     def test_interface_stats_daily_from_hourly(self, iface):
-        ts = _days_ago(3)
+        # Ghim giờ=10 để 2 mốc cách 1h luôn cùng 1 ngày (tránh flaky khi chạy gần nửa đêm).
+        ts = _days_ago(3).replace(hour=10, minute=0, second=0, microsecond=0)
         InterfaceStatsHourly.objects.create(
             interface=iface, hour=ts,
             in_mbps_avg=10.0, in_mbps_max=15.0,

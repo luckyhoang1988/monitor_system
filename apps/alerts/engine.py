@@ -9,7 +9,7 @@ from .models import AlertRule, Alert, AlertNotification
 logger = logging.getLogger(__name__)
 
 # Metric nhị phân (0/1) — không áp dụng vùng đệm hysteresis.
-BINARY_METRICS = {"if_status"}
+BINARY_METRICS = {"if_status", "device_online"}
 
 CONDITION_FN = {
     "gt":  lambda v, t: v > t,
@@ -29,6 +29,8 @@ METRIC_GETTERS = {
     "fw_session_count":    lambda device, since: _fw_session_count(device, since),
     "vm_count_running":  lambda device, since: _count_vms_running(device, since),
     "vm_repl_unhealthy": lambda device, since: _count_vms_repl_unhealthy(device, since),
+    "device_online":     lambda device, since: _device_online(device),
+    "wifi_client_count": lambda device, since: _wifi_client_count(device, since),
 }
 
 SUSTAINABLE_METRICS = {"cpu_percent", "mem_percent"}
@@ -330,6 +332,28 @@ def _count_vms_repl_unhealthy(device: Device, since) -> float | None:
     ).exclude(repl_health__in=_HEALTHY).count())
 
 
+def _device_online(device: Device) -> float:
+    """1.0 nếu thiết bị online (theo last_seen + grace), 0.0 nếu offline.
+
+    Dùng chung công thức grace với Device.is_online để dashboard và alert nhất quán.
+    Phù hợp cho AP (protocol=ping) — phát hiện AP offline.
+    """
+    return 1.0 if device.is_online else 0.0
+
+
+def _wifi_client_count(device: Device, since) -> float | None:
+    """Tổng số client WiFi ở snapshot mới nhất của WLAN controller."""
+    from apps.metrics.models import WifiClientStats
+    latest_ts = (WifiClientStats.objects
+                 .filter(device=device, timestamp__gte=since)
+                 .order_by("-timestamp")
+                 .values_list("timestamp", flat=True)
+                 .first())
+    if latest_ts is None:
+        return None
+    return float(WifiClientStats.objects.filter(device=device, timestamp=latest_ts).count())
+
+
 def _recovered(rule: AlertRule, value: float) -> bool:
     """True nếu value đã ra khỏi vùng đệm hysteresis (đủ điều kiện phục hồi).
 
@@ -424,10 +448,12 @@ def _fire_alert(device: Device, rule: AlertRule, value: float) -> None:
             return f"{v:.3f} Mbps"
         if metric == "fw_session_count":
             return f"{v:.0f}"
-        if metric in ("vm_count_running", "vm_repl_unhealthy"):
+        if metric in ("vm_count_running", "vm_repl_unhealthy", "wifi_client_count"):
             return f"{v:.0f}"
         if metric == "if_status":
             return "DOWN" if v == 0 else "UP"
+        if metric == "device_online":
+            return "OFFLINE" if v == 0 else "ONLINE"
         return f"{v:.2f}"
 
     metric_value_str = _fmt_metric(rule.metric, float(value))

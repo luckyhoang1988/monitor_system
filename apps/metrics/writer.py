@@ -5,7 +5,7 @@ from django.conf import settings
 from django.utils import timezone
 from apps.collectors.base import NormalizedData, InterfaceData
 from apps.devices.models import Device, Interface
-from .models import InterfaceStats, SystemHealth, VMStats
+from .models import InterfaceStats, SystemHealth, VMStats, WifiApStats, WifiClientStats
 
 logger = logging.getLogger(__name__)
 
@@ -37,17 +37,24 @@ TRUNK_DESC_KEYWORDS = (
 )
 
 
+_EXTRA_SKIP_KEYS = ("vms", "wifi_aps", "wifi_clients")
+
+
 def save_metrics(device: Device, data: NormalizedData) -> None:
     _save_system_health(device, data)
     if data.interfaces:
         _save_interface_stats(device, data)
     if data.extra.get("vms"):
         _save_vm_stats(device, data)
+    if data.extra.get("wifi_aps"):
+        _save_wifi_ap_stats(device, data)
+    if data.extra.get("wifi_clients"):
+        _save_wifi_client_stats(device, data)
 
 
 def _save_system_health(device: Device, data: NormalizedData) -> None:
-    # Lưu extra vendor-specific (bỏ qua key "vms" vì đã xử lý riêng)
-    extra = {k: v for k, v in data.extra.items() if k != "vms"}
+    # Lưu extra vendor-specific (bỏ các key list lớn đã xử lý riêng).
+    extra = {k: v for k, v in data.extra.items() if k not in _EXTRA_SKIP_KEYS}
     SystemHealth.objects.create(
         device=device,
         timestamp=data.timestamp,
@@ -86,22 +93,32 @@ def _is_trunk_interface(device: Device, iface_data: InterfaceData) -> bool:
     return False
 
 
+def _iface_key(name: str | None) -> str:
+    """Khoá định danh interface — theo TÊN (ổn định cho cả SNMP & SSH).
+
+    SSH collector sinh if_index theo vị trí block CLI nên không ổn định giữa các poll;
+    tên cổng mới là định danh bền vững. Chuẩn hoá strip + casefold để tránh lệch hoa/thường.
+    """
+    return (name or "").strip().casefold()
+
+
 def _save_interface_stats(device: Device, data: NormalizedData) -> None:
-    # 1. Đồng bộ Interface list (giảm N get_or_create thành bulk)
-    existing_ifaces = {i.if_index: i for i in Interface.objects.filter(device=device)}
+    # 1. Đồng bộ Interface list (giảm N get_or_create thành bulk) — khớp theo TÊN.
+    existing_ifaces = {_iface_key(i.name): i for i in Interface.objects.filter(device=device)}
     new_ifaces = []
     update_ifaces = []
 
     for iface_data in data.interfaces:
-        if iface_data.if_index in existing_ifaces:
-            iface = existing_ifaces[iface_data.if_index]
+        key = _iface_key(iface_data.name)
+        if key in existing_ifaces:
+            iface = existing_ifaces[key]
             next_is_uplink = _is_trunk_interface(device, iface_data)
             if (
-                iface.name != iface_data.name
+                iface.if_index != iface_data.if_index
                 or iface.description != iface_data.description
                 or iface.is_uplink != next_is_uplink
             ):
-                iface.name = iface_data.name
+                iface.if_index = iface_data.if_index
                 iface.description = iface_data.description
                 iface.is_uplink = next_is_uplink
                 update_ifaces.append(iface)
@@ -118,10 +135,10 @@ def _save_interface_stats(device: Device, data: NormalizedData) -> None:
         # bulk_create trả về objects đã có ID (nếu Postgres) hoặc không. Để an toàn, fetch lại:
         Interface.objects.bulk_create(new_ifaces)
         # Fetch lại để có PK
-        existing_ifaces = {i.if_index: i for i in Interface.objects.filter(device=device)}
-    
+        existing_ifaces = {_iface_key(i.name): i for i in Interface.objects.filter(device=device)}
+
     if update_ifaces:
-        Interface.objects.bulk_update(update_ifaces, ["name", "description", "is_uplink"])
+        Interface.objects.bulk_update(update_ifaces, ["if_index", "description", "is_uplink"])
 
     # 2. Fetch "previous stats" cho tất cả interface bằng 1 query.
     # Cửa sổ tìm prev phải đủ rộng: nhịp poll thực do Celery beat quyết định (vd 300s)
@@ -146,7 +163,7 @@ def _save_interface_stats(device: Device, data: NormalizedData) -> None:
     # 3. Tính toán và bulk_create
     stats_to_create = []
     for iface_data in data.interfaces:
-        iface = existing_ifaces.get(iface_data.if_index)
+        iface = existing_ifaces.get(_iface_key(iface_data.name))
         if not iface:
             continue
 
@@ -246,3 +263,48 @@ def _save_vm_stats(device: Device, data: NormalizedData) -> None:
                            device.name, vm.get("name"), exc)
     if vms_to_create:
         VMStats.objects.bulk_create(vms_to_create)
+
+
+def _save_wifi_ap_stats(device: Device, data: NormalizedData) -> None:
+    aps_to_create = []
+    for ap in data.extra.get("wifi_aps", []):
+        try:
+            aps_to_create.append(WifiApStats(
+                device=device,
+                timestamp=data.timestamp,
+                ap_name=str(ap.get("name") or "")[:200],
+                ap_mac=str(ap.get("mac") or "")[:32],
+                ap_ip=str(ap.get("ip") or "")[:64],
+                ap_group=str(ap.get("group") or "")[:128],
+                is_online=bool(ap.get("is_online")),
+                run_state=str(ap.get("run_state") or "")[:32],
+                client_count=int(ap.get("client_count") or 0),
+            ))
+        except (TypeError, ValueError) as exc:
+            logger.warning("Device %s: skip AP %r — bad data: %s",
+                           device.name, ap.get("name"), exc)
+    if aps_to_create:
+        WifiApStats.objects.bulk_create(aps_to_create)
+
+
+def _save_wifi_client_stats(device: Device, data: NormalizedData) -> None:
+    clients_to_create = []
+    for c in data.extra.get("wifi_clients", []):
+        try:
+            rssi = c.get("rssi")
+            clients_to_create.append(WifiClientStats(
+                device=device,
+                timestamp=data.timestamp,
+                mac=str(c.get("mac") or "")[:32],
+                ip=str(c.get("ip") or "")[:64],
+                ssid=str(c.get("ssid") or "")[:128],
+                ap_name=str(c.get("ap_name") or "")[:200],
+                radio=str(c.get("radio") or "")[:32],
+                rssi=int(rssi) if rssi not in (None, "") else None,
+                online_secs=int(c.get("online_secs") or 0),
+            ))
+        except (TypeError, ValueError) as exc:
+            logger.warning("Device %s: skip WiFi client %r — bad data: %s",
+                           device.name, c.get("mac"), exc)
+    if clients_to_create:
+        WifiClientStats.objects.bulk_create(clients_to_create)

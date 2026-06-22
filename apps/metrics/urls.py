@@ -7,4 +7,5 @@ urlpatterns = [
     path("metrics/<int:device_id>/", api.device_metrics, name="device_metrics"),
     path("metrics/<int:device_id>/status/", api.device_status_timeline, name="device_status_timeline"),
     path("metrics/<int:device_id>/interfaces/", api.interface_metrics, name="interface_metrics"),
+    path("metrics/<int:device_id>/wifi/", api.wifi_metrics, name="wifi_metrics"),
 ]

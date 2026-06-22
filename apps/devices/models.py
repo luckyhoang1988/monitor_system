@@ -5,11 +5,13 @@ from .fields import EncryptedCharField
 
 class Device(models.Model):
     DEVICE_TYPES = [
-        ("switch",   "Switch"),
-        ("router",   "Router"),
-        ("firewall", "Firewall"),
-        ("nas",      "NAS"),
-        ("hyperv",   "HyperV Host"),
+        ("switch",          "Switch"),
+        ("router",          "Router"),
+        ("firewall",        "Firewall"),
+        ("nas",             "NAS"),
+        ("hyperv",          "HyperV Host"),
+        ("wlan_controller", "WLAN Controller (AC)"),
+        ("ap",              "Access Point"),
     ]
     VENDORS = [
         ("cisco",    "Cisco"),
@@ -91,7 +93,9 @@ class Interface(models.Model):
     is_uplink   = models.BooleanField(default=False, verbose_name="Là uplink/trunk")
 
     class Meta:
-        unique_together = ("device", "if_index")
+        # Định danh interface theo TÊN (ổn định cho cả SNMP & SSH). if_index vẫn lưu
+        # nhưng SSH sinh theo vị trí block CLI nên không dùng làm khoá duy nhất.
+        unique_together = ("device", "name")
         verbose_name = "Interface"
         ordering = ["if_index"]
 

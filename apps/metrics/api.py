@@ -12,6 +12,7 @@ from .models import (
     SystemHealth, InterfaceStats,
     SystemHealthHourly, SystemHealthDaily,
     InterfaceStatsHourly, InterfaceStatsDaily,
+    WifiApStats, WifiClientStats,
 )
 from apps.devices.models import Device, Interface
 
@@ -296,6 +297,80 @@ def _interface_metrics_hourly(iface_qs, since) -> JsonResponse:
             "current_status": iface.latest_raw_status or "unknown",
         })
     return JsonResponse({"interfaces": results, "source": "hourly"})
+
+
+@login_required
+def wifi_metrics(request, device_id: int) -> JsonResponse:
+    """Trả về snapshot WiFi mới nhất của 1 WLAN controller cho UI.
+
+    Gồm: danh sách AP (online/offline + số client) và danh sách client đang kết nối.
+    Lọc tùy chọn theo ?ap=<ap_name> và ?ssid=<ssid>.
+    """
+    device = get_object_or_404(Device, pk=device_id)
+    ap_filter = (request.GET.get("ap") or "").strip()
+    ssid_filter = (request.GET.get("ssid") or "").strip()
+
+    # AP snapshot mới nhất.
+    latest_ap_ts = (WifiApStats.objects
+                    .filter(device=device)
+                    .order_by("-timestamp")
+                    .values_list("timestamp", flat=True)
+                    .first())
+    aps = []
+    if latest_ap_ts:
+        ap_qs = WifiApStats.objects.filter(device=device, timestamp=latest_ap_ts)
+        if ap_filter:
+            ap_qs = ap_qs.filter(ap_name=ap_filter)
+        aps = [
+            {
+                "ap_name": a.ap_name,
+                "ap_mac": a.ap_mac,
+                "ap_ip": a.ap_ip,
+                "ap_group": a.ap_group,
+                "is_online": a.is_online,
+                "run_state": a.run_state,
+                "client_count": a.client_count,
+            }
+            for a in ap_qs.order_by("ap_name")
+        ]
+
+    # Client snapshot mới nhất.
+    latest_cl_ts = (WifiClientStats.objects
+                    .filter(device=device)
+                    .order_by("-timestamp")
+                    .values_list("timestamp", flat=True)
+                    .first())
+    clients = []
+    if latest_cl_ts:
+        cl_qs = WifiClientStats.objects.filter(device=device, timestamp=latest_cl_ts)
+        if ap_filter:
+            cl_qs = cl_qs.filter(ap_name=ap_filter)
+        if ssid_filter:
+            cl_qs = cl_qs.filter(ssid=ssid_filter)
+        clients = [
+            {
+                "mac": c.mac,
+                "ip": c.ip,
+                "ssid": c.ssid,
+                "ap_name": c.ap_name,
+                "radio": c.radio,
+                "rssi": c.rssi,
+                "online_secs": c.online_secs,
+            }
+            for c in cl_qs.order_by("ap_name", "mac")
+        ]
+
+    ap_online = sum(1 for a in aps if a["is_online"])
+    return JsonResponse({
+        "ap_total": len(aps),
+        "ap_online": ap_online,
+        "ap_offline": len(aps) - ap_online,
+        "client_total": len(clients),
+        "aps": aps,
+        "clients": clients,
+        "ap_updated": latest_ap_ts.strftime("%d/%m %H:%M") if latest_ap_ts else None,
+        "client_updated": latest_cl_ts.strftime("%d/%m %H:%M") if latest_cl_ts else None,
+    })
 
 
 def _interface_metrics_daily(iface_qs, since) -> JsonResponse:

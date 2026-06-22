@@ -63,6 +63,8 @@ apps/
 - **CẢNH BÁO**: từng gán nhầm CPU→`.6` (ngưỡng) → mọi switch báo CPU 90-95% giả; Mem→`.5` (CPU). Đã fix.
 - Scalar `.0` thường trống → collector walk table, lấy entity "MPU Board"/mainboard (giá trị > 0).
 - VRP V5 (S5735 V200R021) và YunShan OS (CloudEngine S5735-L-V2 V600R023/024) **dùng chung cấu trúc OID này**.
+- **Firewall USG6525E (USG6500E, VRP V600R007C20SPC600)** — ĐÃ xác minh 2026-06: **dùng chung `hwEntityResourceTable` .5/.7** y hệt switch (entity MPU index 67108873 → CPU/Mem khớp `display cpu-usage`/`display memory-usage`). Collector `huawei_vrp` chạy nguyên không cần OID riêng.
+  - Lưu ý SSH: USG **chỉ cấp exec-channel, từ chối PTY** → netmiko `huawei_vrp` (invoke_shell) fail "Channel closed". Với firewall này phải poll bằng SNMP (hoặc exec-channel paramiko 1 lệnh/phiên, gửi `system-view\n…\nquit` trong 1 lần).
 
 ### Cisco IOS classic (C2960X...) — OK
 - CPU: OLD-CISCO-CPU-MIB `1.3.6.1.4.1.9.2.1.58.0` (5min). Mem: CISCO-MEMORY-POOL-MIB pool `.1`.

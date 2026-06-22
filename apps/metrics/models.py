@@ -51,6 +51,55 @@ class VMStats(models.Model):
         verbose_name = "VM Stats"
 
 
+class WifiApStats(models.Model):
+    """Time-series: snapshot trạng thái AP do WLAN controller (Huawei AC) báo cáo.
+
+    Ghi mỗi poll cycle cho từng AP đang được AC quản lý. Online/offline lấy theo
+    hwWlanApRunState của AC (đáng tin hơn ping cho AP không có IP/không ping được).
+    """
+    device       = models.ForeignKey(Device, on_delete=models.CASCADE, related_name="wifi_ap_stats",
+                                      verbose_name="WLAN Controller")
+    timestamp    = models.DateTimeField(db_index=True)
+    ap_name      = models.CharField(max_length=200)
+    ap_mac       = models.CharField(max_length=32, blank=True)
+    ap_ip        = models.CharField(max_length=64, blank=True)
+    ap_group     = models.CharField(max_length=128, blank=True)
+    is_online    = models.BooleanField(default=False)
+    run_state    = models.CharField(max_length=32, blank=True)
+    client_count = models.IntegerField(default=0)
+
+    class Meta:
+        indexes = [models.Index(fields=["device", "ap_name", "-timestamp"])]
+        ordering = ["-timestamp"]
+        verbose_name = "WiFi AP Stats"
+
+
+class WifiClientStats(models.Model):
+    """Time-series: snapshot client WiFi đang kết nối qua WLAN controller.
+
+    Mỗi poll cycle ghi 1 row/ client (giống pattern VMStats). UI hiển thị snapshot
+    mới nhất theo timestamp gần nhất.
+    """
+    device       = models.ForeignKey(Device, on_delete=models.CASCADE, related_name="wifi_clients",
+                                      verbose_name="WLAN Controller")
+    timestamp    = models.DateTimeField(db_index=True)
+    mac          = models.CharField(max_length=32, db_index=True)
+    ip           = models.CharField(max_length=64, blank=True)
+    ssid         = models.CharField(max_length=128, blank=True)
+    ap_name      = models.CharField(max_length=200, blank=True)
+    radio        = models.CharField(max_length=32, blank=True)   # 2.4G | 5G | ...
+    rssi         = models.IntegerField(null=True, blank=True)    # dBm
+    online_secs  = models.BigIntegerField(default=0)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["device", "-timestamp"]),
+            models.Index(fields=["device", "mac", "-timestamp"]),
+        ]
+        ordering = ["-timestamp"]
+        verbose_name = "WiFi Client Stats"
+
+
 # ---------------------------------------------------------------------------
 # Aggregated models — rollup data theo giờ/ngày cho query nhanh hơn
 # ---------------------------------------------------------------------------

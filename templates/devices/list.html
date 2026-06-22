@@ -77,6 +77,8 @@
               <a href="{% url 'dashboard:firewall_detail' d.pk %}" class="text-decoration-none">{{ d.name }}</a>
             {% elif d.device_type == "hyperv" %}
               <a href="{% url 'dashboard:hyperv_detail' d.pk %}" class="text-decoration-none">{{ d.name }}</a>
+            {% elif d.device_type == "wlan_controller" %}
+              <a href="{% url 'dashboard:wlan_detail' d.pk %}" class="text-decoration-none">{{ d.name }}</a>
             {% else %}
               {{ d.name }}
             {% endif %}
@@ -90,6 +92,10 @@
               <span class="badge bg-danger-subtle text-danger rounded-pill px-2">Firewall</span>
             {% elif d.device_type == "hyperv" %}
               <span class="badge bg-info-subtle text-info rounded-pill px-2">HyperV</span>
+            {% elif d.device_type == "wlan_controller" %}
+              <span class="badge bg-primary-subtle text-primary rounded-pill px-2">WLAN AC</span>
+            {% elif d.device_type == "ap" %}
+              <span class="badge bg-success-subtle text-success rounded-pill px-2">Access Point</span>
             {% else %}
               <span class="badge bg-secondary-subtle text-secondary rounded-pill px-2">{{ d.device_type }}</span>
             {% endif %}
