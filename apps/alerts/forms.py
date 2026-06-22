@@ -10,12 +10,18 @@ METRIC_CHOICES = [
     ("fw_session_count",  "Firewall sessions (Fortinet)"),
     ("vm_count_running",  "Số VM đang chạy"),
     ("vm_repl_unhealthy", "Số VM replication lỗi"),
+    ("device_online",     "Trạng thái online (0=OFFLINE, 1=ONLINE)"),
+    ("wifi_client_count", "Số client WiFi (WLAN controller)"),
 ]
 
 DEVICE_TYPE_CHOICES = [
-    ("all",    "Tất cả"),
-    ("switch", "Switch"),
-    ("hyperv", "HyperV"),
+    ("all",             "Tất cả"),
+    ("switch",          "Switch"),
+    ("router",          "Router"),
+    ("firewall",        "Firewall"),
+    ("hyperv",          "HyperV"),
+    ("wlan_controller", "WLAN Controller (AC)"),
+    ("ap",              "Access Point"),
 ]
 
 

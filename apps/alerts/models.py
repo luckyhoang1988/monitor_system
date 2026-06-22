@@ -13,11 +13,13 @@ class AlertRule(models.Model):
     CONDITION_CHOICES = [("gt", ">"), ("lt", "<"), ("eq", "="), ("ne", "≠"), ("gte", "≥"), ("lte", "≤")]
     SEVERITY_CHOICES  = [("WARNING", "Warning"), ("CRITICAL", "Critical")]
     DEVICE_TYPE_CHOICES = [
-        ("all",      "Tất cả"),
-        ("switch",   "Switch"),
-        ("router",   "Router"),
-        ("firewall", "Firewall"),
-        ("hyperv",   "HyperV Host"),
+        ("all",             "Tất cả"),
+        ("switch",          "Switch"),
+        ("router",          "Router"),
+        ("firewall",        "Firewall"),
+        ("hyperv",          "HyperV Host"),
+        ("wlan_controller", "WLAN Controller (AC)"),
+        ("ap",              "Access Point"),
     ]
 
     name         = models.CharField(max_length=100, unique=True, verbose_name="Tên rule")
@@ -50,6 +52,8 @@ class AlertRule(models.Model):
             "fw_session_count": "Firewall sessions (Fortinet)",
             "vm_count_running": "Số VM đang chạy",
             "vm_repl_unhealthy": "Số VM replication lỗi",
+            "device_online": "Trạng thái online (0=OFFLINE, 1=ONLINE)",
+            "wifi_client_count": "Số client WiFi (WLAN controller)",
         }
         return labels.get(self.metric, self.metric)
 
@@ -62,10 +66,12 @@ class AlertRule(models.Model):
             return f"{t:.1f}%"
         if m in ("uplink_in_mbps_max", "uplink_out_mbps_max"):
             return f"{t:.3f} Mbps"
-        if m in ("vm_count_running", "vm_repl_unhealthy", "fw_session_count"):
+        if m in ("vm_count_running", "vm_repl_unhealthy", "fw_session_count", "wifi_client_count"):
             return f"{t:.0f}"
         if m == "if_status":
             return "DOWN" if t == 0 else "UP"
+        if m == "device_online":
+            return "OFFLINE" if t == 0 else "ONLINE"
         return f"{t:.2f}"
 
 

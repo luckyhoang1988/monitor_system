@@ -5,7 +5,7 @@ from django.conf import settings
 from django.utils import timezone
 from apps.collectors.base import NormalizedData, InterfaceData
 from apps.devices.models import Device, Interface
-from .models import InterfaceStats, SystemHealth, VMStats
+from .models import InterfaceStats, SystemHealth, VMStats, WifiApStats, WifiClientStats
 
 logger = logging.getLogger(__name__)
 
@@ -37,17 +37,24 @@ TRUNK_DESC_KEYWORDS = (
 )
 
 
+_EXTRA_SKIP_KEYS = ("vms", "wifi_aps", "wifi_clients")
+
+
 def save_metrics(device: Device, data: NormalizedData) -> None:
     _save_system_health(device, data)
     if data.interfaces:
         _save_interface_stats(device, data)
     if data.extra.get("vms"):
         _save_vm_stats(device, data)
+    if data.extra.get("wifi_aps"):
+        _save_wifi_ap_stats(device, data)
+    if data.extra.get("wifi_clients"):
+        _save_wifi_client_stats(device, data)
 
 
 def _save_system_health(device: Device, data: NormalizedData) -> None:
-    # Lưu extra vendor-specific (bỏ qua key "vms" vì đã xử lý riêng)
-    extra = {k: v for k, v in data.extra.items() if k != "vms"}
+    # Lưu extra vendor-specific (bỏ các key list lớn đã xử lý riêng).
+    extra = {k: v for k, v in data.extra.items() if k not in _EXTRA_SKIP_KEYS}
     SystemHealth.objects.create(
         device=device,
         timestamp=data.timestamp,
@@ -256,3 +263,48 @@ def _save_vm_stats(device: Device, data: NormalizedData) -> None:
                            device.name, vm.get("name"), exc)
     if vms_to_create:
         VMStats.objects.bulk_create(vms_to_create)
+
+
+def _save_wifi_ap_stats(device: Device, data: NormalizedData) -> None:
+    aps_to_create = []
+    for ap in data.extra.get("wifi_aps", []):
+        try:
+            aps_to_create.append(WifiApStats(
+                device=device,
+                timestamp=data.timestamp,
+                ap_name=str(ap.get("name") or "")[:200],
+                ap_mac=str(ap.get("mac") or "")[:32],
+                ap_ip=str(ap.get("ip") or "")[:64],
+                ap_group=str(ap.get("group") or "")[:128],
+                is_online=bool(ap.get("is_online")),
+                run_state=str(ap.get("run_state") or "")[:32],
+                client_count=int(ap.get("client_count") or 0),
+            ))
+        except (TypeError, ValueError) as exc:
+            logger.warning("Device %s: skip AP %r — bad data: %s",
+                           device.name, ap.get("name"), exc)
+    if aps_to_create:
+        WifiApStats.objects.bulk_create(aps_to_create)
+
+
+def _save_wifi_client_stats(device: Device, data: NormalizedData) -> None:
+    clients_to_create = []
+    for c in data.extra.get("wifi_clients", []):
+        try:
+            rssi = c.get("rssi")
+            clients_to_create.append(WifiClientStats(
+                device=device,
+                timestamp=data.timestamp,
+                mac=str(c.get("mac") or "")[:32],
+                ip=str(c.get("ip") or "")[:64],
+                ssid=str(c.get("ssid") or "")[:128],
+                ap_name=str(c.get("ap_name") or "")[:200],
+                radio=str(c.get("radio") or "")[:32],
+                rssi=int(rssi) if rssi not in (None, "") else None,
+                online_secs=int(c.get("online_secs") or 0),
+            ))
+        except (TypeError, ValueError) as exc:
+            logger.warning("Device %s: skip WiFi client %r — bad data: %s",
+                           device.name, c.get("mac"), exc)
+    if clients_to_create:
+        WifiClientStats.objects.bulk_create(clients_to_create)

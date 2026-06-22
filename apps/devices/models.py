@@ -5,11 +5,13 @@ from .fields import EncryptedCharField
 
 class Device(models.Model):
     DEVICE_TYPES = [
-        ("switch",   "Switch"),
-        ("router",   "Router"),
-        ("firewall", "Firewall"),
-        ("nas",      "NAS"),
-        ("hyperv",   "HyperV Host"),
+        ("switch",          "Switch"),
+        ("router",          "Router"),
+        ("firewall",        "Firewall"),
+        ("nas",             "NAS"),
+        ("hyperv",          "HyperV Host"),
+        ("wlan_controller", "WLAN Controller (AC)"),
+        ("ap",              "Access Point"),
     ]
     VENDORS = [
         ("cisco",    "Cisco"),

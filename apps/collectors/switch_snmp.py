@@ -320,6 +320,139 @@ class SwitchSNMPCollector(BaseCollector):
         mem_val = (used / total * 100.0) if total else 0.0
         return cpu_val, mem_val
 
+    @staticmethod
+    def _index_after(oid: str, prefix: str) -> str:
+        """Phần index phía sau prefix cột (vd '.5.1.0.0.94.x' -> '5.1.0.0.94.x')."""
+        full_prefix = prefix if prefix.endswith(".") else prefix + "."
+        return oid[len(full_prefix):] if oid.startswith(full_prefix) else ""
+
+    @staticmethod
+    def _mac_from_index(index: str) -> str:
+        """Suy MAC từ 6 octet cuối của index (Huawei encode MAC client trong index)."""
+        parts = index.split(".")
+        if len(parts) < 6:
+            return ""
+        tail = parts[-6:]
+        try:
+            octets = [int(p) for p in tail]
+        except ValueError:
+            return ""
+        if any(o < 0 or o > 255 for o in octets):
+            return ""
+        return ":".join(f"{o:02x}" for o in octets)
+
+    @staticmethod
+    def _decode_mac_value(raw: str) -> str:
+        """Chuẩn hoá MAC từ giá trị SNMP (hex-string '0x...' hoặc dạng đã format)."""
+        if not raw:
+            return ""
+        val = raw.strip()
+        if val.lower().startswith("0x"):
+            val = val[2:]
+        hex_only = val.replace(":", "").replace("-", "").replace(" ", "")
+        if len(hex_only) == 12:
+            try:
+                int(hex_only, 16)
+                return ":".join(hex_only[i:i + 2].lower() for i in range(0, 12, 2))
+            except ValueError:
+                pass
+        return raw.strip()
+
+    def _walk_column(self, oid: str | None) -> dict[str, str]:
+        """Walk 1 cột bảng, trả về {index_suffix: value}."""
+        if not oid:
+            return {}
+        result: dict[str, str] = {}
+        for full_oid, value in self._snmp_walk(oid):
+            idx = self._index_after(full_oid, oid)
+            if idx:
+                result[idx] = value
+        return result
+
+    def _collect_wifi(self, oid_profile: dict) -> dict:
+        """Thu thập danh sách AP + client từ Huawei AC qua HUAWEI-WLAN MIB.
+
+        Trả về {"wifi_aps": [...], "wifi_clients": [...]}; rỗng nếu profile thiếu
+        section wlan hoặc thiết bị không trả dữ liệu.
+        """
+        wlan = oid_profile.get("wlan") or {}
+        ap_cols = wlan.get("ap") or {}
+        sta_cols = wlan.get("station") or {}
+        online_states = {str(s) for s in (wlan.get("ap_run_state_online") or [])}
+
+        aps: list[dict] = []
+        ap_name_by_index: dict[str, str] = {}
+        if ap_cols:
+            names = self._walk_column(ap_cols.get("name"))
+            macs = self._walk_column(ap_cols.get("mac"))
+            ips = self._walk_column(ap_cols.get("ip"))
+            groups = self._walk_column(ap_cols.get("group"))
+            states = self._walk_column(ap_cols.get("run_state"))
+            sta_counts = self._walk_column(ap_cols.get("sta_count"))
+            indexes = set().union(names, macs, ips, groups, states, sta_counts)
+            for idx in sorted(indexes):
+                name = (names.get(idx) or "").strip()
+                state_raw = (states.get(idx) or "").strip()
+                if online_states:
+                    is_online = state_raw in online_states
+                else:
+                    is_online = bool(state_raw)
+                mac = self._decode_mac_value(macs.get(idx, "")) or self._mac_from_index(idx)
+                try:
+                    sta_count = int(sta_counts.get(idx, 0) or 0)
+                except ValueError:
+                    sta_count = 0
+                ap = {
+                    "index": idx,
+                    "name": name or mac or idx,
+                    "mac": mac,
+                    "ip": (ips.get(idx) or "").strip(),
+                    "group": (groups.get(idx) or "").strip(),
+                    "run_state": state_raw,
+                    "is_online": is_online,
+                    "client_count": sta_count,
+                }
+                aps.append(ap)
+                if name:
+                    ap_name_by_index[idx] = name
+
+        clients: list[dict] = []
+        if sta_cols:
+            ap_names = self._walk_column(sta_cols.get("ap_name"))
+            ssids = self._walk_column(sta_cols.get("ssid"))
+            ips = self._walk_column(sta_cols.get("ip"))
+            radios = self._walk_column(sta_cols.get("radio_type"))
+            rssis = self._walk_column(sta_cols.get("rssi"))
+            online_times = self._walk_column(sta_cols.get("online_time"))
+            indexes = set().union(ap_names, ssids, ips, radios, rssis, online_times)
+            for idx in sorted(indexes):
+                mac = self._mac_from_index(idx)
+                try:
+                    rssi = int(rssis[idx]) if rssis.get(idx) not in (None, "") else None
+                except ValueError:
+                    rssi = None
+                try:
+                    online_secs = int(online_times.get(idx, 0) or 0)
+                except ValueError:
+                    online_secs = 0
+                clients.append({
+                    "mac": mac or idx,
+                    "ip": (ips.get(idx) or "").strip(),
+                    "ssid": (ssids.get(idx) or "").strip(),
+                    "ap_name": (ap_names.get(idx) or "").strip(),
+                    "radio": (radios.get(idx) or "").strip(),
+                    "rssi": rssi,
+                    "online_secs": online_secs,
+                })
+
+        if not aps and not clients:
+            logger.warning(
+                "WLAN poll trả rỗng trên %s — kiểm tra OID wlan (chạy verify_wlan_oids) "
+                "và SNMP view cho 1.3.6.1.4.1.2011.6.139.*",
+                self.device.name,
+            )
+        return {"wifi_aps": aps, "wifi_clients": clients}
+
     def collect_raw(self) -> dict:
         os_family   = self.detect_os_family()
         oid_profile = _load_oid_profile(os_family)
@@ -365,6 +498,10 @@ class SwitchSNMPCollector(BaseCollector):
                 mem_used = int(self._snmp_get(mem_used_oid) or 0)
                 mem_free = int(self._snmp_get(mem_free_oid) or 1)
             mem_val  = mem_used / (mem_used + mem_free) * 100 if (mem_used + mem_free) else 0
+
+        # WLAN controller (Huawei AC/ACL): bổ sung danh sách AP + client.
+        if self.device.device_type == "wlan_controller":
+            extra.update(self._collect_wifi(oid_profile))
 
         return {
             "os_family":   os_family,

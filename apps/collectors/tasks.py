@@ -6,15 +6,19 @@ from django.utils import timezone
 logger = logging.getLogger(__name__)
 
 
-ICMP_DEVICE_TYPES = ("switch", "router", "firewall", "nas")
+ICMP_DEVICE_TYPES = ("switch", "router", "firewall", "nas", "ap")
 
 
 def _has_valid_data(device, data) -> bool:
     """Dữ liệu SNMP/SSH có 'thật' không (tránh coi poll rỗng là thành công).
 
+    - protocol=ping (AP, ...): online dựa trên kết quả ping của PingCollector
+      (adapt() set cpu=0.0 khi online, -1.0 khi offline).
     - switch/router/firewall: phải có >=1 interface (walk thành công).
-    - thiết bị khác (hyperv...): chỉ cần collect không lỗi.
+    - thiết bị khác (hyperv, wlan_controller...): chỉ cần collect không lỗi.
     """
+    if device.protocol == "ping":
+        return data is not None and data.cpu_percent >= 0
     if device.device_type == "nas":
         # NAS: hợp lệ khi có interface HOẶC đọc được memory (Synology qua UCD-SNMP).
         return len(data.interfaces) > 0 or data.mem_percent > 0
@@ -33,10 +37,12 @@ def _poll_device_once(device_id: int) -> None:
     device = Device.objects.get(pk=device_id)
     collector = CollectorFactory.create(device)
 
-    # ICMP độc lập với SNMP — chỉ áp dụng cho thiết bị mạng (switch/router/firewall).
+    # ICMP độc lập với SNMP — chỉ áp dụng cho thiết bị mạng poll bằng SNMP/SSH.
+    # Thiết bị protocol=ping tự ping trong PingCollector nên không cần lớp ICMP riêng.
     require_icmp = (
         bool(getattr(settings, "ONLINE_REQUIRE_ICMP", True))
         and device.device_type in ICMP_DEVICE_TYPES
+        and device.protocol != "ping"
     )
     icmp_ok, rtt = (None, None)
     if require_icmp:
@@ -102,7 +108,7 @@ def poll_all_network_devices() -> None:
     """Poll thiết bị mạng SNMP/SSH (không bao gồm ping)."""
     from apps.devices.models import Device
     device_ids = list(Device.objects.filter(
-        device_type__in=["switch", "router", "firewall", "nas"],
+        device_type__in=["switch", "router", "firewall", "nas", "wlan_controller"],
         enabled=True,
         protocol__in=["snmp", "ssh"],
     ).values_list('pk', flat=True))
@@ -116,7 +122,7 @@ def poll_all_ping_devices() -> None:
     """Poll thiết bị dùng giao thức ping mỗi 3 phút."""
     from apps.devices.models import Device
     device_ids = list(Device.objects.filter(
-        device_type__in=["switch", "router", "firewall", "nas"],
+        device_type__in=["switch", "router", "firewall", "nas", "ap"],
         enabled=True,
         protocol="ping",
     ).values_list("pk", flat=True))

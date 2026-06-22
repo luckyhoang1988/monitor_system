@@ -1,0 +1,247 @@
+{% extends "base.html" %}
+{% block title %}{{ device.name }}{% endblock %}
+{% block breadcrumb %}
+  <a href="{% url 'dashboard:index' %}" class="text-decoration-none text-muted">Dashboard</a>
+  <span class="mx-2 text-muted">/</span> {{ device.name }}
+{% endblock %}
+
+{% block content %}
+<!-- ===== Controller Header ===== -->
+<div class="row g-3 mb-4">
+  <div class="col-12">
+    <div class="card">
+      <div class="card-body d-flex flex-wrap align-items-center gap-3 py-3">
+        <div class="text-primary" style="font-size:2.5rem; line-height:1;"><i class="bi bi-broadcast-pin"></i></div>
+        <div class="flex-grow-1">
+          <h5 class="mb-0 fw-bold">{{ device.name }}</h5>
+          <div class="text-muted small mt-1">
+            <span class="me-3"><i class="bi bi-geo-alt me-1"></i>{{ device.ip_address }}</span>
+            <span class="me-3"><i class="bi bi-hdd-network me-1"></i>WLAN Controller (AC)</span>
+            {% if device.location %}<span><i class="bi bi-pin-map me-1"></i>{{ device.location }}</span>{% endif %}
+          </div>
+        </div>
+        <div class="d-flex flex-column align-items-end gap-1">
+          {% if device.is_online %}
+            <span class="badge badge-online fs-6 px-3 py-2 rounded-pill">
+              <i class="bi bi-circle-fill me-1" style="font-size:.5rem;"></i>Online
+            </span>
+          {% else %}
+            <span class="badge badge-offline fs-6 px-3 py-2 rounded-pill">Offline</span>
+          {% endif %}
+          {% if device.last_seen %}
+            <span class="text-muted small">Last poll: {{ device.last_seen|date:"d/m H:i" }}</span>
+          {% endif %}
+        </div>
+
+        {% if latest_health %}
+        <div class="d-flex gap-3 border-start ps-3">
+          <div class="text-center">
+            <div class="fs-4 fw-bold {% if latest_health.cpu_percent > 80 %}text-danger{% elif latest_health.cpu_percent > 60 %}text-warning{% else %}text-success{% endif %}">
+              {{ latest_health.cpu_percent|floatformat:1 }}%
+            </div>
+            <div class="text-muted" style="font-size:.7rem;">CPU AC</div>
+          </div>
+          <div class="text-center">
+            <div class="fs-4 fw-bold {% if latest_health.mem_percent > 85 %}text-danger{% elif latest_health.mem_percent > 70 %}text-warning{% else %}text-success{% endif %}">
+              {{ latest_health.mem_percent|floatformat:1 }}%
+            </div>
+            <div class="text-muted" style="font-size:.7rem;">RAM AC</div>
+          </div>
+        </div>
+        {% endif %}
+
+        <div class="d-flex gap-2 border-start ps-3">
+          <div class="text-center">
+            <div class="fs-4 fw-bold text-primary" id="statApTotal">{{ ap_total }}</div>
+            <div class="text-muted" style="font-size:.7rem;">Tổng AP</div>
+          </div>
+          <div class="text-center">
+            <div class="fs-4 fw-bold text-success" id="statApOnline">{{ ap_online }}</div>
+            <div class="text-muted" style="font-size:.7rem;">AP Online</div>
+          </div>
+          <div class="text-center">
+            <div class="fs-4 fw-bold {% if ap_offline %}text-danger{% else %}text-muted{% endif %}" id="statApOffline">{{ ap_offline }}</div>
+            <div class="text-muted" style="font-size:.7rem;">AP Offline</div>
+          </div>
+          <div class="text-center">
+            <div class="fs-4 fw-bold text-info" id="statClientTotal">{{ client_total }}</div>
+            <div class="text-muted" style="font-size:.7rem;">Client</div>
+          </div>
+        </div>
+
+        <a href="{% url 'devices:edit' device.pk %}" class="btn btn-sm btn-outline-secondary">
+          <i class="bi bi-pencil"></i> Sửa
+        </a>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== AP Table ===== -->
+<div class="card mb-4">
+  <div class="card-header bg-white py-2 d-flex align-items-center justify-content-between">
+    <span class="fw-semibold"><i class="bi bi-router me-2 text-primary"></i>Danh sách AP (<span id="apCount">{{ ap_total }}</span>)</span>
+    <span class="text-muted small" id="apUpdated">{% if ap_updated %}Cập nhật: {{ ap_updated|date:"d/m H:i" }}{% endif %}</span>
+  </div>
+  <div class="card-body p-0">
+    <div style="max-height: 22rem; overflow-y: auto;">
+      <table class="table table-hover mb-0">
+        <thead class="table-light" style="position: sticky; top: 0; z-index: 2;">
+          <tr>
+            <th class="ps-3">Tên AP</th>
+            <th>MAC</th>
+            <th>IP</th>
+            <th>Nhóm</th>
+            <th>Trạng thái</th>
+            <th class="text-end pe-3">Client</th>
+          </tr>
+        </thead>
+        <tbody id="apTableBody">
+          {% for ap in aps %}
+          <tr>
+            <td class="ps-3 fw-medium">{{ ap.ap_name }}</td>
+            <td class="font-monospace small text-muted">{{ ap.ap_mac|default:"—" }}</td>
+            <td class="font-monospace small text-muted">{{ ap.ap_ip|default:"—" }}</td>
+            <td class="small">{{ ap.ap_group|default:"—" }}</td>
+            <td>
+              {% if ap.is_online %}
+                <span class="badge badge-online rounded-pill px-2"><i class="bi bi-circle-fill me-1" style="font-size:.5rem;"></i>Online</span>
+              {% else %}
+                <span class="badge badge-offline rounded-pill px-2">Offline</span>
+              {% endif %}
+            </td>
+            <td class="text-end pe-3 font-monospace">{{ ap.client_count }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% if not aps %}
+      <div class="text-center text-muted py-4" id="apEmpty">
+        <i class="bi bi-router fs-2 d-block mb-2"></i>Chưa có dữ liệu AP. Chạy poll SNMP để thu thập.
+      </div>
+    {% endif %}
+  </div>
+</div>
+
+<!-- ===== Client Table ===== -->
+<div class="card">
+  <div class="card-header bg-white py-2 d-flex align-items-center justify-content-between">
+    <span class="fw-semibold"><i class="bi bi-people me-2 text-info"></i>Client đang kết nối (<span id="clientCount">{{ client_total }}</span>)</span>
+    <span class="text-muted small" id="clientUpdated">{% if client_updated %}Cập nhật: {{ client_updated|date:"d/m H:i" }}{% endif %}</span>
+  </div>
+  <div class="card-body p-0">
+    <div style="max-height: 28rem; overflow-y: auto;">
+      <table class="table table-hover mb-0">
+        <thead class="table-light" style="position: sticky; top: 0; z-index: 2;">
+          <tr>
+            <th class="ps-3">MAC</th>
+            <th>IP</th>
+            <th>SSID</th>
+            <th>AP</th>
+            <th>Radio</th>
+            <th class="text-end">RSSI</th>
+            <th class="text-end pe-3">Online</th>
+          </tr>
+        </thead>
+        <tbody id="clientTableBody">
+          {% for c in clients %}
+          <tr>
+            <td class="ps-3 font-monospace small">{{ c.mac }}</td>
+            <td class="font-monospace small text-muted">{{ c.ip|default:"—" }}</td>
+            <td>{{ c.ssid|default:"—" }}</td>
+            <td class="small">{{ c.ap_name|default:"—" }}</td>
+            <td class="small">{{ c.radio|default:"—" }}</td>
+            <td class="text-end font-monospace small">{% if c.rssi != None %}{{ c.rssi }} dBm{% else %}—{% endif %}</td>
+            <td class="text-end pe-3 text-muted small">{{ c.online_secs }}s</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% if not clients %}
+      <div class="text-center text-muted py-4" id="clientEmpty">
+        <i class="bi bi-people fs-2 d-block mb-2"></i>Chưa có client. Chạy poll SNMP để thu thập.
+      </div>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+const DEVICE_ID = {{ device.pk }};
+const API_WIFI = `/api/metrics/${DEVICE_ID}/wifi/`;
+
+function esc(s) {
+  if (s === null || s === undefined) return "—";
+  const str = String(s);
+  if (str === "") return "—";
+  return str.replace(/[&<>"']/g, m => (
+    { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[m]
+  ));
+}
+
+function fmtOnline(secs) {
+  secs = parseInt(secs || 0, 10);
+  if (!secs) return "—";
+  const h = Math.floor(secs / 3600);
+  const m = Math.floor((secs % 3600) / 60);
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m`;
+  return `${secs}s`;
+}
+
+function badge(online) {
+  return online
+    ? '<span class="badge badge-online rounded-pill px-2"><i class="bi bi-circle-fill me-1" style="font-size:.5rem;"></i>Online</span>'
+    : '<span class="badge badge-offline rounded-pill px-2">Offline</span>';
+}
+
+function refreshWifi() {
+  fetch(API_WIFI)
+    .then(r => r.json())
+    .then(d => {
+      document.getElementById("statApTotal").textContent = d.ap_total;
+      document.getElementById("statApOnline").textContent = d.ap_online;
+      document.getElementById("statApOffline").textContent = d.ap_offline;
+      document.getElementById("statClientTotal").textContent = d.client_total;
+      document.getElementById("apCount").textContent = d.ap_total;
+      document.getElementById("clientCount").textContent = d.client_total;
+      if (d.ap_updated) document.getElementById("apUpdated").textContent = "Cập nhật: " + d.ap_updated;
+      if (d.client_updated) document.getElementById("clientUpdated").textContent = "Cập nhật: " + d.client_updated;
+
+      const apBody = document.getElementById("apTableBody");
+      if (apBody && d.aps) {
+        apBody.innerHTML = d.aps.map(a => `
+          <tr>
+            <td class="ps-3 fw-medium">${esc(a.ap_name)}</td>
+            <td class="font-monospace small text-muted">${esc(a.ap_mac)}</td>
+            <td class="font-monospace small text-muted">${esc(a.ap_ip)}</td>
+            <td class="small">${esc(a.ap_group)}</td>
+            <td>${badge(a.is_online)}</td>
+            <td class="text-end pe-3 font-monospace">${a.client_count}</td>
+          </tr>`).join("");
+      }
+
+      const clBody = document.getElementById("clientTableBody");
+      if (clBody && d.clients) {
+        clBody.innerHTML = d.clients.map(c => `
+          <tr>
+            <td class="ps-3 font-monospace small">${esc(c.mac)}</td>
+            <td class="font-monospace small text-muted">${esc(c.ip)}</td>
+            <td>${esc(c.ssid)}</td>
+            <td class="small">${esc(c.ap_name)}</td>
+            <td class="small">${esc(c.radio)}</td>
+            <td class="text-end font-monospace small">${c.rssi !== null && c.rssi !== undefined ? c.rssi + " dBm" : "—"}</td>
+            <td class="text-end pe-3 text-muted small">${fmtOnline(c.online_secs)}</td>
+          </tr>`).join("");
+      }
+    })
+    .catch(() => {});
+}
+
+// Refresh nhẹ mỗi 60s (chỉ cập nhật bảng, không reload trang).
+setInterval(refreshWifi, 60000);
+</script>
+{% endblock %}

@@ -78,6 +78,19 @@ DEFAULT_RULES = [
         "condition": "gt", "threshold": 0.0,
         "severity": "WARNING", "duration_min": 0,
     },
+    # Wireless rules
+    {
+        "name": "AP Offline",
+        "device_type": "ap", "metric": "device_online",
+        "condition": "eq", "threshold": 0.0,
+        "severity": "CRITICAL", "duration_min": 5,
+    },
+    {
+        "name": "WLAN Controller Offline",
+        "device_type": "wlan_controller", "metric": "device_online",
+        "condition": "eq", "threshold": 0.0,
+        "severity": "CRITICAL", "duration_min": 5,
+    },
 ]
 
 

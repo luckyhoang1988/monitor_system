@@ -16,6 +16,7 @@ def cleanup_old_metrics() -> None:
         return
     from .models import (
         InterfaceStats, SystemHealth, VMStats,
+        WifiApStats, WifiClientStats,
         SystemHealthHourly, SystemHealthDaily,
         InterfaceStatsHourly, InterfaceStatsDaily,
     )
@@ -25,6 +26,8 @@ def cleanup_old_metrics() -> None:
     deleted_if, _  = InterfaceStats.objects.filter(timestamp__lt=cutoff).delete()
     deleted_sh, _  = SystemHealth.objects.filter(timestamp__lt=cutoff).delete()
     deleted_vm, _  = VMStats.objects.filter(timestamp__lt=cutoff).delete()
+    deleted_ap, _  = WifiApStats.objects.filter(timestamp__lt=cutoff).delete()
+    deleted_cl, _  = WifiClientStats.objects.filter(timestamp__lt=cutoff).delete()
 
     # Xóa aggregated data cũ hơn 2x retention (hourly/daily giữ lâu hơn raw)
     agg_cutoff = timezone.now() - timedelta(days=retention * 2)
@@ -34,9 +37,10 @@ def cleanup_old_metrics() -> None:
     deleted_if_d, _ = InterfaceStatsDaily.objects.filter(day__lt=agg_cutoff.date()).delete()
 
     logger.info(
-        "Cleanup: xóa %d InterfaceStats, %d SystemHealth, %d VMStats (raw, cũ hơn %d ngày) | "
+        "Cleanup: xóa %d InterfaceStats, %d SystemHealth, %d VMStats, %d WifiApStats, "
+        "%d WifiClientStats (raw, cũ hơn %d ngày) | "
         "Aggregated: %d SH_hourly, %d SH_daily, %d IF_hourly, %d IF_daily (cũ hơn %d ngày)",
-        deleted_if, deleted_sh, deleted_vm, retention,
+        deleted_if, deleted_sh, deleted_vm, deleted_ap, deleted_cl, retention,
         deleted_sh_h, deleted_sh_d, deleted_if_h, deleted_if_d, retention * 2,
     )
 

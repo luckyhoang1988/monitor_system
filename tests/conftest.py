@@ -97,6 +97,23 @@ class FortinetSSHDeviceFactory(DeviceFactory):
     os_family   = "fortinet_fortios"
 
 
+class HuaweiACDeviceFactory(DeviceFactory):
+    name           = factory.Sequence(lambda n: f"ac-test-{n:03d}")
+    device_type    = "wlan_controller"
+    vendor         = "huawei"
+    protocol       = "snmp"
+    os_family      = "huawei_vrp"
+    snmp_community = "public"
+
+
+class ApPingDeviceFactory(DeviceFactory):
+    name        = factory.Sequence(lambda n: f"ap-test-{n:03d}")
+    device_type = "ap"
+    vendor      = "huawei"
+    protocol    = "ping"
+    os_family   = "ping_only"
+
+
 class HyperVDeviceFactory(DeviceFactory):
     name             = factory.Sequence(lambda n: f"hyperv-test-{n:03d}")
     device_type      = "hyperv"
@@ -178,3 +195,13 @@ def fortinet_snmp_device(db):
 @pytest.fixture
 def fortinet_ssh_device(db):
     return FortinetSSHDeviceFactory()
+
+
+@pytest.fixture
+def huawei_ac_device(db):
+    return HuaweiACDeviceFactory()
+
+
+@pytest.fixture
+def ap_ping_device(db):
+    return ApPingDeviceFactory()
