@@ -361,11 +361,14 @@ def wifi_metrics(request, device_id: int) -> JsonResponse:
         ]
 
     ap_online = sum(1 for a in aps if a["is_online"])
+    # AC6508 không liệt kê từng client qua SNMP — tổng client = tổng client_count
+    # trên các AP. Dùng len(clients) nếu sau này có bảng station thật.
+    client_total = len(clients) if clients else sum(a["client_count"] for a in aps)
     return JsonResponse({
         "ap_total": len(aps),
         "ap_online": ap_online,
         "ap_offline": len(aps) - ap_online,
-        "client_total": len(clients),
+        "client_total": client_total,
         "aps": aps,
         "clients": clients,
         "ap_updated": latest_ap_ts.strftime("%d/%m %H:%M") if latest_ap_ts else None,

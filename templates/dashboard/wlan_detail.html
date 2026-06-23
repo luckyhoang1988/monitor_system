@@ -161,7 +161,8 @@
     </div>
     {% if not clients %}
       <div class="text-center text-muted py-4" id="clientEmpty">
-        <i class="bi bi-people fs-2 d-block mb-2"></i>Chưa có client. Chạy poll SNMP để thu thập.
+        <i class="bi bi-people fs-2 d-block mb-2"></i>
+        AC này không liệt kê từng client qua SNMP — xem <strong>số client trên mỗi AP</strong> ở cột "Client" của bảng AP phía trên (tổng: {{ client_total }}).
       </div>
     {% endif %}
   </div>

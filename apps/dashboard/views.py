@@ -276,6 +276,10 @@ def wlan_detail(request, pk):
                    .order_by("ap_name", "mac")) if latest_cl_ts else []
 
     ap_online = sum(1 for a in aps if a.is_online)
+    # AC6508 không liệt kê từng client qua SNMP — tổng client lấy bằng tổng số
+    # client đang kết nối trên các AP (WifiApStats.client_count). Nếu sau này có
+    # bảng station thật thì ưu tiên đếm theo danh sách client.
+    client_total = len(clients) if clients else sum(a.client_count for a in aps)
     return render(request, "dashboard/wlan_detail.html", {
         "device":        device,
         "latest_health": latest_health,
@@ -284,7 +288,7 @@ def wlan_detail(request, pk):
         "ap_total":      len(aps),
         "ap_online":     ap_online,
         "ap_offline":    len(aps) - ap_online,
-        "client_total":  len(clients),
+        "client_total":  client_total,
         "ap_updated":    latest_ap_ts,
         "client_updated": latest_cl_ts,
     })
