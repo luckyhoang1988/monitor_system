@@ -544,51 +544,6 @@
         </div>
       </div>
     </div>
-
-    <!-- Access Point -->
-    <div class="col-xl-6">
-      <div class="card panel-card accent-teal h-100">
-        <div class="panel-header">
-          <span class="panel-title">
-            <span class="icon-chip"><i class="bi bi-wifi"></i></span>
-            Access Point <span class="panel-count">{{ access_points|length }}</span>
-          </span>
-          <a href="{% url 'devices:add' %}" class="panel-add" title="Thêm thiết bị"><i class="bi bi-plus-lg"></i></a>
-        </div>
-        <div class="device-scroll">
-          {% if access_points %}
-          <table class="table table-hover table-compact mb-0">
-            <thead class="table-light">
-              <tr>
-                <th class="ps-2">Tên</th>
-                <th>IP</th>
-                <th>TT</th>
-                <th>Last Seen</th>
-              </tr>
-            </thead>
-            <tbody>
-              {% for ap in access_points %}
-              <tr>
-                <td class="ps-2 fw-medium" title="{{ ap.name }}">{{ ap.name }}</td>
-                <td class="text-muted font-monospace">{{ ap.ip_address }}</td>
-                <td>
-                  {% if ap.is_online %}
-                    <span class="badge badge-online status-dot rounded-pill px-2">On</span>
-                  {% else %}
-                    <span class="badge badge-offline status-dot rounded-pill px-2">Off</span>
-                  {% endif %}
-                </td>
-                <td class="text-muted small">{{ ap.last_seen|date:"d/m H:i"|default:"—" }}</td>
-              </tr>
-              {% endfor %}
-            </tbody>
-          </table>
-          {% else %}
-            <div class="text-center text-muted py-3 small">Chưa có Access Point.</div>
-          {% endif %}
-        </div>
-      </div>
-    </div>
   </div>
 
   <!-- Active Alerts -->

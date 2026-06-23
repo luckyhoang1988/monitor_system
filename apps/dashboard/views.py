@@ -59,7 +59,6 @@ def index(request):
     nas_list  = by_type["nas"]
     hyperv    = by_type["hyperv"]
     wlan_controllers = by_type["wlan_controller"]
-    access_points    = by_type["ap"]
 
     # AP không đăng ký như Device — chúng nằm trong WifiApStats dưới AC. Gộp snapshot
     # mới nhất của từng wlan_controller để card "Access Point" phản ánh AP thật.
@@ -115,7 +114,6 @@ def index(request):
         "nas_devices":    nas_list,
         "hyperv_hosts":   hyperv,
         "wlan_controllers": wlan_controllers,
-        "access_points":  access_points,
         "active_alerts":  active_alerts,
         "device_type_stats": device_type_stats,
         "total_devices":  len(all_devices),
