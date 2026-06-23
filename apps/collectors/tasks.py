@@ -50,6 +50,14 @@ def _poll_device_once(device_id: int) -> None:
             device.ip_address,
             timeout_secs=int(getattr(settings, "PING_TIMEOUT_SECS", 1)),
         )
+        # ICMP fail ⇒ thiết bị mạng chắc chắn offline (online = snmp_valid AND icmp_ok).
+        # Bỏ qua collect SNMP đắt đỏ để 1 thiết bị chết không treo worker tới ~240s.
+        if not icmp_ok:
+            logger.info(
+                "Polled %s — online=False (icmp down, bỏ qua SNMP collect)",
+                device.name,
+            )
+            return
 
     data = None
     snmp_valid = False

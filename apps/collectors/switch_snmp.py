@@ -71,6 +71,8 @@ class SwitchSNMPCollector(BaseCollector):
         self.__session = None
 
     def _build_snmp_kwargs(self) -> dict:
+        from django.conf import settings
+
         version_map = {"v1": 1, "v2c": 2, "v3": 3}
         effective_version = version_map.get(self.device.snmp_version)
         if effective_version is None:
@@ -79,8 +81,8 @@ class SwitchSNMPCollector(BaseCollector):
         kwargs = {
             "hostname": self.device.ip_address,
             "version": effective_version,
-            "timeout": 10,
-            "retries": 2,
+            "timeout": int(getattr(settings, "SNMP_TIMEOUT_SECS", 5)),
+            "retries": int(getattr(settings, "SNMP_RETRIES", 1)),
         }
         if effective_version in (1, 2):
             kwargs["community"] = self.device.snmp_community

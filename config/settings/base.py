@@ -103,22 +103,29 @@ CELERY_TIMEZONE = TIME_ZONE
 CELERY_BEAT_SCHEDULER = "django_celery_beat.schedulers:DatabaseScheduler"
 
 from celery.schedules import crontab  # noqa: E402
+
+# Chu kỳ poll (giây) — override qua .env nếu cần. Mọi mục 120s trừ HyperV.
+POLL_NETWORK_INTERVAL_SECS = env.int("POLL_NETWORK_INTERVAL_SECS", default=120)
+POLL_PING_INTERVAL_SECS    = env.int("POLL_PING_INTERVAL_SECS", default=120)
+POLL_HYPERV_INTERVAL_SECS  = env.int("POLL_HYPERV_INTERVAL_SECS", default=300)
+ALERT_EVAL_INTERVAL_SECS   = env.int("ALERT_EVAL_INTERVAL_SECS", default=120)
+
 CELERY_BEAT_SCHEDULE = {
     "poll-all-network-devices": {
         "task": "apps.collectors.tasks.poll_all_network_devices",
-        "schedule": 120,  # mỗi 120s — switch, router, firewall (SNMP/SSH)
+        "schedule": POLL_NETWORK_INTERVAL_SECS,  # switch, router, firewall (SNMP/SSH)
     },
     "poll-all-ping-devices": {
         "task": "apps.collectors.tasks.poll_all_ping_devices",
-        "schedule": 180,  # every 3 min — devices using ping/icmp
+        "schedule": POLL_PING_INTERVAL_SECS,  # devices using ping/icmp
     },
     "poll-all-hyperv": {
         "task": "apps.collectors.tasks.poll_all_hyperv",
-        "schedule": 300,
+        "schedule": POLL_HYPERV_INTERVAL_SECS,
     },
     "evaluate-alert-rules": {
         "task": "apps.alerts.tasks.evaluate_alert_rules",
-        "schedule": 300,
+        "schedule": ALERT_EVAL_INTERVAL_SECS,
     },
     "cleanup-old-metrics": {
         "task": "apps.metrics.tasks.cleanup_old_metrics",
@@ -189,6 +196,11 @@ DISCOVERY_SNMP_WORKERS  = 80    # thread pool size for SNMP probe
 ONLINE_REQUIRE_ICMP = env.bool("ONLINE_REQUIRE_ICMP", default=True)
 PING_TIMEOUT_SECS   = env.int("PING_TIMEOUT_SECS", default=1)
 
+# SNMP request timeout/retries (collector). Giữ nhỏ để thiết bị offline không treo
+# worker khi chu kỳ poll ngắn (120s). 1 walk chết ≈ timeout×(retries+1).
+SNMP_TIMEOUT_SECS = env.int("SNMP_TIMEOUT_SECS", default=5)
+SNMP_RETRIES      = env.int("SNMP_RETRIES", default=1)
+
 # Alert engine
 ALERT_GRACE_PERIOD_SECS    = 120  # min seconds before "no data" is treated as offline
 ALERT_EVAL_WINDOW_MINUTES  = 10   # look-back window for alert task
@@ -209,6 +221,6 @@ HOURLY_ROLLUP_BUFFER_HOURS = 2
 DAILY_ROLLUP_BUFFER_DAYS   = 1
 
 # Cửa sổ (giây) tìm mẫu InterfaceStats trước để tính delta Mbps.
-# Phải ≥ nhịp poll thực của Celery beat (poll-all-network-devices = 300s) để
+# Phải ≥ nhịp poll thực của Celery beat (poll-all-network-devices = 120s) để
 # không bỏ lỡ mẫu trước khi device.collect_interval bị đặt nhỏ hơn nhịp poll.
 METRIC_PREV_LOOKBACK_SECS = env.int("METRIC_PREV_LOOKBACK_SECS", default=900)

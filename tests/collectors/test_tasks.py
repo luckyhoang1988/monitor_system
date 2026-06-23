@@ -56,11 +56,30 @@ class TestPollDevice:
         mock_collector.collect.return_value = data
         mocker.patch("apps.collectors.factory.CollectorFactory.create", return_value=mock_collector)
         mocker.patch("apps.metrics.writer.save_metrics")
+        # Switch mạng cần ICMP thông mới chạy collect (offline ⇒ short-circuit, bỏ collect).
+        mocker.patch("apps.collectors.ping_util.icmp_ping", return_value=(True, 1.0))
 
         poll_device.run(device.pk)
 
         device.refresh_from_db()
         assert device.os_family == "cisco_iosxe"
+
+    def test_poll_device_skips_collect_when_icmp_down(self, mocker):
+        # Thiết bị mạng ICMP fail ⇒ chắc chắn offline ⇒ bỏ qua collect SNMP đắt đỏ
+        # (tránh treo worker ~240s/thiết bị chết khi chu kỳ poll 120s).
+        device = CiscoSNMPDeviceFactory(os_family="cisco_ios")
+
+        mock_collector = MagicMock()
+        mocker.patch("apps.collectors.factory.CollectorFactory.create", return_value=mock_collector)
+        mock_save = mocker.patch("apps.metrics.writer.save_metrics")
+        mocker.patch("apps.collectors.ping_util.icmp_ping", return_value=(False, None))
+
+        poll_device.run(device.pk)
+
+        mock_collector.collect.assert_not_called()
+        mock_save.assert_not_called()
+        device.refresh_from_db()
+        assert device.last_seen is None
 
     def test_poll_device_does_not_retry_on_device_not_found(self, mocker):
         mock_retry = mocker.patch.object(poll_device, "retry")
