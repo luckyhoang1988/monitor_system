@@ -42,13 +42,13 @@ def index(request):
         "ap": "Access Point",
     }
     device_type_meta = [
-        ("switch", "Switch", "bi-hdd-network", "text-primary"),
-        ("router", "Router", "bi-router", "text-warning"),
-        ("firewall", "Firewall", "bi-shield-fill-check", "text-danger"),
-        ("nas", "NAS", "bi-hdd-stack", "text-success"),
-        ("hyperv", "HyperV Host", "bi-server", "text-info"),
-        ("wlan_controller", "WLAN AC", "bi-broadcast-pin", "text-primary"),
-        ("ap", "Access Point", "bi-wifi", "text-success"),
+        ("switch", "Switch", "bi-hdd-network", "text-primary", "#2563eb"),
+        ("router", "Router", "bi-router", "text-warning", "#d97706"),
+        ("firewall", "Firewall", "bi-shield-fill-check", "text-danger", "#dc2626"),
+        ("nas", "NAS", "bi-hdd-stack", "text-success", "#16a34a"),
+        ("hyperv", "HyperV Host", "bi-server", "text-info", "#0891b2"),
+        ("wlan_controller", "WLAN AC", "bi-broadcast-pin", "text-primary", "#6366f1"),
+        ("ap", "Access Point", "bi-wifi", "text-success", "#0d9488"),
     ]
     by_type: dict[str, list] = defaultdict(list)
     for d in all_devices:
@@ -77,7 +77,7 @@ def index(request):
         ap_online += snapshot.filter(is_online=True).count()
 
     device_type_stats = []
-    for dtype, label, icon, color_class in device_type_meta:
+    for dtype, label, icon, color_class, color in device_type_meta:
         if dtype == "ap":
             total, online = ap_total, ap_online
         else:
@@ -89,6 +89,7 @@ def index(request):
             "label": label,
             "icon": icon,
             "color_class": color_class,
+            "color": color,
             "total": total,
             "online": online,
             "offline": total - online,

@@ -205,6 +205,19 @@
     overflow-y: auto;
   }
 
+  /* ===== Stat cards per-type (gọn, viền màu trái) ===== */
+  .dashboard-stats .stat-card {
+    border-left: 4px solid var(--c, #cbd5e1);
+    gap: .75rem;
+  }
+  .dashboard-stats .stat-card .stat-icon {
+    width: 42px; height: 42px; border-radius: 10px;
+    display: inline-flex; align-items: center; justify-content: center;
+    background: var(--c-soft, #f1f5f9);
+    color: var(--c, #64748b);
+    font-size: 1.35rem;
+  }
+
   @media (max-width: 1199.98px) {
     .dashboard-panels { grid-template-columns: 1fr; }
   }
@@ -226,11 +239,11 @@
   <!-- Stat Cards -->
   <div class="row g-2 dashboard-stats">
     {% for stat in device_type_stats %}
-    <div class="col-6 col-xl-2">
-      <div class="stat-card">
-        <div class="stat-icon {{ stat.color_class }}"><i class="bi {{ stat.icon }}"></i></div>
+    <div class="col-6 col-md-4 col-xl-2">
+      <div class="stat-card" style="--c: {{ stat.color }}; --c-soft: {{ stat.color }}1f;">
+        <div class="stat-icon"><i class="bi {{ stat.icon }}"></i></div>
         <div>
-          <div class="text-muted small">{{ stat.label }}</div>
+          <div class="text-muted small fw-semibold">{{ stat.label }}</div>
           <div class="fs-3 fw-bold lh-1">{{ stat.total }}</div>
           <div class="small mt-1">
             <span class="text-success fw-bold">{{ stat.online }} on</span>
@@ -243,22 +256,21 @@
       </div>
     </div>
     {% endfor %}
-    <div class="col-6 col-xl-2">
-      <div class="stat-card {% if offline_count %}stat-offline-alarm{% endif %}">
-        <div class="stat-icon text-danger"><i class="bi bi-x-circle-fill"></i></div>
+    <div class="col-6 col-md-4 col-xl-2">
+      <div class="stat-card {% if offline_count %}stat-offline-alarm{% endif %}"
+           style="--c: #dc2626; --c-soft: #dc26261f;">
+        <div class="stat-icon"><i class="bi bi-x-circle-fill"></i></div>
         <div>
           <div class="text-muted small fw-semibold">Offline</div>
           <div class="fs-3 fw-bold lh-1 {% if offline_count %}text-danger{% endif %}">{{ offline_count }}</div>
         </div>
       </div>
     </div>
-    <div class="col-6 col-xl-2">
-      <div class="stat-card">
-        <div class="stat-icon {% if alert_count %}text-danger{% else %}text-secondary{% endif %}">
-          <i class="bi bi-bell{% if alert_count %}-fill{% endif %}"></i>
-        </div>
+    <div class="col-6 col-md-4 col-xl-2">
+      <div class="stat-card" style="--c: {% if alert_count %}#dc2626{% else %}#64748b{% endif %}; --c-soft: {% if alert_count %}#dc26261f{% else %}#64748b1f{% endif %};">
+        <div class="stat-icon"><i class="bi bi-bell{% if alert_count %}-fill{% endif %}"></i></div>
         <div>
-          <div class="text-muted small">Alerts</div>
+          <div class="text-muted small fw-semibold">Alerts</div>
           <div class="fs-3 fw-bold lh-1 {% if alert_count %}text-danger{% endif %}">{{ alert_count }}</div>
         </div>
       </div>
