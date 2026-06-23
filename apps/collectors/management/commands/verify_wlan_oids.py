@@ -6,6 +6,7 @@ Dùng để chốt đúng cột bảng AP/STA trước khi tin số liệu của
 Usage:
     python manage.py verify_wlan_oids <device_id>
     python manage.py verify_wlan_oids --ip 10.0.198.199 --community public
+    python manage.py verify_wlan_oids --ip 10.0.198.199 --community public --snmp-version 2
     python manage.py verify_wlan_oids 5 --limit 30
 """
 from pathlib import Path
@@ -26,7 +27,7 @@ class Command(BaseCommand):
         parser.add_argument("--ip", help="IP thiết bị (nếu không dùng device_id).")
         parser.add_argument("--community", default="public",
                             help="SNMP community (chỉ dùng khi truyền --ip).")
-        parser.add_argument("--version", type=int, default=2, choices=[1, 2],
+        parser.add_argument("--snmp-version", type=int, default=2, choices=[1, 2],
                             help="SNMP version khi dùng --ip (1 hoặc 2c).")
         parser.add_argument("--parent", default=None,
                             help="OID parent để walk (mặc định lấy từ profile wlan).")
@@ -62,7 +63,7 @@ class Command(BaseCommand):
         elif ip:
             snmp_kwargs = {
                 "hostname": ip,
-                "version": opts["version"],
+                "version": opts["snmp_version"],
                 "community": opts["community"],
                 "timeout": 10,
                 "retries": 2,
@@ -72,6 +73,8 @@ class Command(BaseCommand):
             raise CommandError("Cần truyền device_id hoặc --ip.")
 
         parent = opts.get("parent")
+        parent_was_explicit = bool(parent)
+        profile = {}
         if not parent:
             profile_path = OID_DIR / "huawei_vrp.yaml"
             if profile_path.exists():
@@ -87,6 +90,26 @@ class Command(BaseCommand):
         ))
 
         session = create_snmp_session(snmp_kwargs, backend=backend)
+        wlan_profile = (profile.get("wlan") or {}) if not parent_was_explicit else {}
+        configured_columns = []
+        for section_name in ("ap", "station"):
+            for field_name, oid in (wlan_profile.get(section_name) or {}).items():
+                if oid:
+                    configured_columns.append((f"{section_name}.{field_name}", oid))
+
+        if configured_columns:
+            self.stdout.write(self.style.NOTICE(
+                "Không truyền --parent: chỉ walk các cột WLAN đã cấu hình để tránh quét cả subtree lớn."
+            ))
+            for label, oid in configured_columns:
+                rows = snmp_walk_pairs(session, oid)
+                self.stdout.write(self.style.SUCCESS(f"\n{label} | {oid} | {len(rows)} dòng"))
+                for full_oid, value in rows[:limit]:
+                    self.stdout.write(f"  {full_oid} = {ascii(str(value))}")
+                if len(rows) > limit:
+                    self.stdout.write(self.style.WARNING(f"  ... còn {len(rows) - limit} dòng"))
+            return
+
         rows = snmp_walk_pairs(session, parent)
         if not rows:
             self.stdout.write(self.style.ERROR(

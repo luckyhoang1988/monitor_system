@@ -16,8 +16,8 @@ WLAN_PROFILE = {
             "name":      f"{AP}.4",
             "mac":       f"{AP}.2",
             "ip":        f"{AP}.30",
-            "group":     f"{AP}.6",
-            "run_state": f"{AP}.13",
+            "group":     f"{AP}.5",
+            "run_state": f"{AP}.6",
             "sta_count": f"{AP}.40",
         },
         "station": {
@@ -64,8 +64,8 @@ class TestCollectWifi:
             f"{AP}.4": [("1", "AP-Floor1"), ("2", "AP-Floor2")],
             f"{AP}.2": [("1", "0x00112233aa01"), ("2", "0x00112233aa02")],
             f"{AP}.30": [("1", "10.0.50.11"), ("2", "10.0.50.12")],
-            f"{AP}.6": [("1", "GroupA"), ("2", "GroupA")],
-            f"{AP}.13": [("1", "8"), ("2", "4")],   # 8=online, 4=offline
+            f"{AP}.5": [("1", "GroupA"), ("2", "GroupA")],
+            f"{AP}.6": [("1", "8"), ("2", "4")],   # 8=online, 4=offline
             f"{AP}.40": [("1", "12"), ("2", "0")],
         }))
         result = collector._collect_wifi(WLAN_PROFILE)
@@ -77,6 +77,18 @@ class TestCollectWifi:
         assert ap1["mac"] == "00:11:22:33:aa:01"
         ap2 = next(a for a in aps if a["name"] == "AP-Floor2")
         assert ap2["is_online"] is False
+
+    def test_prefers_index_mac_when_ap_mac_column_is_serial(self, mocker, collector):
+        idx = "8.158.132.234.224.48"
+        mocker.patch.object(collector, "_snmp_walk", side_effect=_walk_mock({
+            f"{AP}.4": [(idx, "AP-QC")],
+            f"{AP}.2": [(idx, "2102353VUR10QB105516")],
+            f"{AP}.5": [(idx, "PFVN-ALL")],
+            f"{AP}.6": [(idx, "8")],
+        }))
+        result = collector._collect_wifi(WLAN_PROFILE)
+        assert result["wifi_aps"][0]["mac"] == "08:9e:84:ea:e0:30"
+        assert result["wifi_aps"][0]["is_online"] is True
 
     def test_parses_clients_with_mac_from_index(self, mocker, collector):
         idx = "0.17.34.51.68.85"  # MAC 00:11:22:33:44:55

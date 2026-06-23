@@ -397,7 +397,11 @@ class SwitchSNMPCollector(BaseCollector):
                     is_online = state_raw in online_states
                 else:
                     is_online = bool(state_raw)
-                mac = self._decode_mac_value(macs.get(idx, "")) or self._mac_from_index(idx)
+                decoded_mac = self._decode_mac_value(macs.get(idx, ""))
+                index_mac = self._mac_from_index(idx)
+                # Huawei AC6508 returns AP serial in the documented "mac" column;
+                # the stable AP MAC is encoded in the table index.
+                mac = decoded_mac if ":" in decoded_mac else (index_mac or decoded_mac)
                 try:
                     sta_count = int(sta_counts.get(idx, 0) or 0)
                 except ValueError:
