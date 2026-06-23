@@ -58,11 +58,12 @@ class TestDashboardViews:
         response = logged_in_client.get(reverse("dashboard:index"))
         assert response.status_code == 200
         content = response.content.decode("utf-8")
-        assert "Switch (" in content
-        assert "Router (" in content
-        assert "Firewall (" in content
-        assert "NAS (" in content
-        assert "HyperV (" in content
+        assert "Switch" in content
+        assert "Router" in content
+        assert "Firewall" in content
+        assert "NAS" in content
+        assert "HyperV" in content
+        assert "panel-count" in content
         assert "dashboard-panels" in content
         assert "grid-template-columns: repeat(2" in content
 

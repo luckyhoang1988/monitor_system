@@ -11,11 +11,20 @@
   .dashboard-screen {
     display: flex;
     flex-direction: column;
-    gap: .75rem;
+    gap: .85rem;
   }
   .dashboard-heading { margin-bottom: 0 !important; }
 
-  .dashboard-stats .stat-card { padding: .75rem .95rem; }
+  /* ===== Stat cards ===== */
+  .dashboard-stats .stat-card {
+    padding: .75rem .95rem;
+    border: 1px solid #eef1f5;
+    transition: transform .15s ease, box-shadow .15s ease;
+  }
+  .dashboard-stats .stat-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 6px 18px rgba(16,30,54,.12);
+  }
   .dashboard-stats .stat-icon { font-size: 1.6rem; }
   .dashboard-stats .fs-3 { font-size: 1.4rem !important; }
 
@@ -27,10 +36,11 @@
     padding-bottom: .4rem !important;
   }
 
+  /* ===== Grid panel ===== */
   .dashboard-panels {
     display: grid !important;
     grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: .75rem;
+    gap: .85rem;
     margin: 0;
     --bs-gutter-x: 0;
     --bs-gutter-y: 0;
@@ -41,7 +51,76 @@
     flex: none;
     padding: 0;
   }
-  .dashboard-panels .card { width: 100%; }
+
+  /* ===== Panel card (nổi bật + đồng bộ) ===== */
+  .panel-card {
+    --accent: #0d6efd;
+    --accent-soft: rgba(13,110,253,.12);
+    width: 100%;
+    overflow: hidden;
+    border: 1px solid #eaeef3;
+    border-radius: 12px;
+    transition: transform .15s ease, box-shadow .15s ease, border-color .15s ease;
+  }
+  .panel-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 8px 24px rgba(16,30,54,.13);
+    border-color: var(--accent);
+  }
+  /* màu nhận diện theo loại thiết bị */
+  .panel-card.accent-blue   { --accent:#0d6efd; --accent-soft:rgba(13,110,253,.12); }
+  .panel-card.accent-amber  { --accent:#f59e0b; --accent-soft:rgba(245,158,11,.15); }
+  .panel-card.accent-red    { --accent:#dc2626; --accent-soft:rgba(220,38,38,.12); }
+  .panel-card.accent-green  { --accent:#16a34a; --accent-soft:rgba(22,163,74,.13); }
+  .panel-card.accent-cyan   { --accent:#0891b2; --accent-soft:rgba(8,145,178,.13); }
+  .panel-card.accent-indigo { --accent:#6366f1; --accent-soft:rgba(99,102,241,.13); }
+  .panel-card.accent-teal   { --accent:#0d9488; --accent-soft:rgba(13,148,136,.13); }
+
+  .panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: .55rem .8rem;
+    background: #fff;
+    border-top: 3px solid var(--accent);
+    border-bottom: 1px solid #eef1f5;
+  }
+  .panel-title {
+    display: flex;
+    align-items: center;
+    gap: .55rem;
+    font-weight: 700;
+    font-size: .92rem;
+    color: #1e2a3a;
+    letter-spacing: .01em;
+  }
+  .icon-chip {
+    width: 30px; height: 30px;
+    display: inline-flex; align-items: center; justify-content: center;
+    border-radius: 9px;
+    background: var(--accent-soft);
+    color: var(--accent);
+    font-size: 1rem;
+    flex: none;
+  }
+  .panel-count {
+    display: inline-flex; align-items: center;
+    min-width: 1.4rem; height: 1.4rem; padding: 0 .45rem;
+    border-radius: 999px;
+    background: var(--accent-soft);
+    color: var(--accent);
+    font-size: .75rem; font-weight: 700; line-height: 1;
+  }
+  .panel-add {
+    width: 28px; height: 28px;
+    display: inline-flex; align-items: center; justify-content: center;
+    border-radius: 8px;
+    border: 1px solid var(--accent-soft);
+    color: var(--accent);
+    background: #fff;
+    transition: background .12s ease, color .12s ease;
+  }
+  .panel-add:hover { background: var(--accent); color: #fff; }
 
   /* Vùng cuộn của mỗi panel: hiển thị 5 dòng + header, dư thì cuộn dọc */
   .device-scroll {
@@ -59,14 +138,29 @@
   }
   .table-compact th,
   .table-compact td {
-    padding: .35rem .45rem;
+    padding: .4rem .55rem;
     font-size: .8125rem;
     white-space: nowrap;
+    vertical-align: middle;
   }
+  .table-compact tbody tr { transition: background .1s ease; }
   .table-compact td:first-child {
     max-width: 13rem;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+  .table-compact .row-action {
+    width: 28px; height: 26px;
+    display: inline-flex; align-items: center; justify-content: center;
+    border-radius: 7px;
+  }
+
+  /* badge trạng thái có chấm tròn cho rõ */
+  .status-dot::before {
+    content: ""; display: inline-block;
+    width: 6px; height: 6px; border-radius: 50%;
+    margin-right: .35rem; vertical-align: middle;
+    background: currentColor;
   }
 
   /* Active Alerts: cũng 5 dòng rồi cuộn */
@@ -149,10 +243,13 @@
   <div class="row g-2 dashboard-panels">
     <!-- Switch -->
     <div class="col-xl-6">
-      <div class="card h-100">
-        <div class="card-header bg-white d-flex align-items-center justify-content-between py-1 px-3">
-          <span class="fw-semibold small"><i class="bi bi-hdd-network me-2 text-primary"></i>Switch ({{ switches|length }})</span>
-          <a href="{% url 'devices:add' %}" class="btn btn-sm btn-outline-primary py-0 px-2"><i class="bi bi-plus"></i></a>
+      <div class="card panel-card accent-blue h-100">
+        <div class="panel-header">
+          <span class="panel-title">
+            <span class="icon-chip"><i class="bi bi-hdd-network"></i></span>
+            Switch <span class="panel-count">{{ switches|length }}</span>
+          </span>
+          <a href="{% url 'devices:add' %}" class="panel-add" title="Thêm thiết bị"><i class="bi bi-plus-lg"></i></a>
         </div>
         <div class="device-scroll">
           {% if switches %}
@@ -174,13 +271,13 @@
                 <td>{{ sw.get_vendor_display }}</td>
                 <td>
                   {% if sw.is_online %}
-                    <span class="badge badge-online rounded-pill px-2">On</span>
+                    <span class="badge badge-online status-dot rounded-pill px-2">On</span>
                   {% else %}
-                    <span class="badge badge-offline rounded-pill px-2">Off</span>
+                    <span class="badge badge-offline status-dot rounded-pill px-2">Off</span>
                   {% endif %}
                 </td>
                 <td>
-                  <a href="{% url 'dashboard:switch_detail' sw.pk %}" class="btn btn-sm btn-outline-secondary py-0 px-1">
+                  <a href="{% url 'dashboard:switch_detail' sw.pk %}" class="btn btn-sm btn-outline-secondary row-action p-0">
                     <i class="bi bi-graph-up"></i>
                   </a>
                 </td>
@@ -197,10 +294,13 @@
 
     <!-- Router -->
     <div class="col-xl-6">
-      <div class="card h-100">
-        <div class="card-header bg-white d-flex align-items-center justify-content-between py-1 px-3">
-          <span class="fw-semibold small"><i class="bi bi-router me-2 text-warning"></i>Router ({{ routers|length }})</span>
-          <a href="{% url 'devices:add' %}" class="btn btn-sm btn-outline-primary py-0 px-2"><i class="bi bi-plus"></i></a>
+      <div class="card panel-card accent-amber h-100">
+        <div class="panel-header">
+          <span class="panel-title">
+            <span class="icon-chip"><i class="bi bi-router"></i></span>
+            Router <span class="panel-count">{{ routers|length }}</span>
+          </span>
+          <a href="{% url 'devices:add' %}" class="panel-add" title="Thêm thiết bị"><i class="bi bi-plus-lg"></i></a>
         </div>
         <div class="device-scroll">
           {% if routers %}
@@ -222,13 +322,13 @@
                 <td>{{ rt.get_vendor_display }}</td>
                 <td>
                   {% if rt.is_online %}
-                    <span class="badge badge-online rounded-pill px-2">On</span>
+                    <span class="badge badge-online status-dot rounded-pill px-2">On</span>
                   {% else %}
-                    <span class="badge badge-offline rounded-pill px-2">Off</span>
+                    <span class="badge badge-offline status-dot rounded-pill px-2">Off</span>
                   {% endif %}
                 </td>
                 <td>
-                  <a href="{% url 'dashboard:router_detail' rt.pk %}" class="btn btn-sm btn-outline-secondary py-0 px-1">
+                  <a href="{% url 'dashboard:router_detail' rt.pk %}" class="btn btn-sm btn-outline-secondary row-action p-0">
                     <i class="bi bi-graph-up"></i>
                   </a>
                 </td>
@@ -245,10 +345,13 @@
 
     <!-- Firewall -->
     <div class="col-xl-6">
-      <div class="card h-100">
-        <div class="card-header bg-white d-flex align-items-center justify-content-between py-1 px-3">
-          <span class="fw-semibold small"><i class="bi bi-shield-fill-check me-2 text-danger"></i>Firewall ({{ firewalls|length }})</span>
-          <a href="{% url 'devices:add' %}" class="btn btn-sm btn-outline-primary py-0 px-2"><i class="bi bi-plus"></i></a>
+      <div class="card panel-card accent-red h-100">
+        <div class="panel-header">
+          <span class="panel-title">
+            <span class="icon-chip"><i class="bi bi-shield-fill-check"></i></span>
+            Firewall <span class="panel-count">{{ firewalls|length }}</span>
+          </span>
+          <a href="{% url 'devices:add' %}" class="panel-add" title="Thêm thiết bị"><i class="bi bi-plus-lg"></i></a>
         </div>
         <div class="device-scroll">
           {% if firewalls %}
@@ -270,13 +373,13 @@
                 <td>{{ fw.get_vendor_display }}</td>
                 <td>
                   {% if fw.is_online %}
-                    <span class="badge badge-online rounded-pill px-2">On</span>
+                    <span class="badge badge-online status-dot rounded-pill px-2">On</span>
                   {% else %}
-                    <span class="badge badge-offline rounded-pill px-2">Off</span>
+                    <span class="badge badge-offline status-dot rounded-pill px-2">Off</span>
                   {% endif %}
                 </td>
                 <td>
-                  <a href="{% url 'dashboard:firewall_detail' fw.pk %}" class="btn btn-sm btn-outline-secondary py-0 px-1">
+                  <a href="{% url 'dashboard:firewall_detail' fw.pk %}" class="btn btn-sm btn-outline-secondary row-action p-0">
                     <i class="bi bi-graph-up"></i>
                   </a>
                 </td>
@@ -293,10 +396,13 @@
 
     <!-- NAS -->
     <div class="col-xl-6">
-      <div class="card h-100">
-        <div class="card-header bg-white d-flex align-items-center justify-content-between py-1 px-3">
-          <span class="fw-semibold small"><i class="bi bi-hdd-stack me-2 text-success"></i>NAS ({{ nas_devices|length }})</span>
-          <a href="{% url 'devices:add' %}" class="btn btn-sm btn-outline-primary py-0 px-2"><i class="bi bi-plus"></i></a>
+      <div class="card panel-card accent-green h-100">
+        <div class="panel-header">
+          <span class="panel-title">
+            <span class="icon-chip"><i class="bi bi-hdd-stack"></i></span>
+            NAS <span class="panel-count">{{ nas_devices|length }}</span>
+          </span>
+          <a href="{% url 'devices:add' %}" class="panel-add" title="Thêm thiết bị"><i class="bi bi-plus-lg"></i></a>
         </div>
         <div class="device-scroll">
           {% if nas_devices %}
@@ -318,13 +424,13 @@
                 <td>{{ nas.get_vendor_display }}</td>
                 <td>
                   {% if nas.is_online %}
-                    <span class="badge badge-online rounded-pill px-2">On</span>
+                    <span class="badge badge-online status-dot rounded-pill px-2">On</span>
                   {% else %}
-                    <span class="badge badge-offline rounded-pill px-2">Off</span>
+                    <span class="badge badge-offline status-dot rounded-pill px-2">Off</span>
                   {% endif %}
                 </td>
                 <td>
-                  <a href="{% url 'dashboard:nas_detail' nas.pk %}" class="btn btn-sm btn-outline-secondary py-0 px-1">
+                  <a href="{% url 'dashboard:nas_detail' nas.pk %}" class="btn btn-sm btn-outline-secondary row-action p-0">
                     <i class="bi bi-graph-up"></i>
                   </a>
                 </td>
@@ -341,10 +447,13 @@
 
     <!-- HyperV -->
     <div class="col-xl-6">
-      <div class="card h-100">
-        <div class="card-header bg-white d-flex align-items-center justify-content-between py-1 px-3">
-          <span class="fw-semibold small"><i class="bi bi-server me-2 text-info"></i>HyperV ({{ hyperv_hosts|length }})</span>
-          <a href="{% url 'devices:add' %}" class="btn btn-sm btn-outline-primary py-0 px-2"><i class="bi bi-plus"></i></a>
+      <div class="card panel-card accent-cyan h-100">
+        <div class="panel-header">
+          <span class="panel-title">
+            <span class="icon-chip"><i class="bi bi-server"></i></span>
+            HyperV <span class="panel-count">{{ hyperv_hosts|length }}</span>
+          </span>
+          <a href="{% url 'devices:add' %}" class="panel-add" title="Thêm thiết bị"><i class="bi bi-plus-lg"></i></a>
         </div>
         <div class="device-scroll">
           {% if hyperv_hosts %}
@@ -364,13 +473,13 @@
                 <td class="text-muted font-monospace">{{ hv.ip_address }}</td>
                 <td>
                   {% if hv.is_online %}
-                    <span class="badge badge-online rounded-pill px-2">On</span>
+                    <span class="badge badge-online status-dot rounded-pill px-2">On</span>
                   {% else %}
-                    <span class="badge badge-offline rounded-pill px-2">Off</span>
+                    <span class="badge badge-offline status-dot rounded-pill px-2">Off</span>
                   {% endif %}
                 </td>
                 <td>
-                  <a href="{% url 'dashboard:hyperv_detail' hv.pk %}" class="btn btn-sm btn-outline-secondary py-0 px-1">
+                  <a href="{% url 'dashboard:hyperv_detail' hv.pk %}" class="btn btn-sm btn-outline-secondary row-action p-0">
                     <i class="bi bi-graph-up"></i>
                   </a>
                 </td>
@@ -387,10 +496,13 @@
 
     <!-- WLAN Controller (AC) -->
     <div class="col-xl-6">
-      <div class="card h-100">
-        <div class="card-header bg-white d-flex align-items-center justify-content-between py-1 px-3">
-          <span class="fw-semibold small"><i class="bi bi-broadcast-pin me-2 text-primary"></i>WLAN Controller ({{ wlan_controllers|length }})</span>
-          <a href="{% url 'devices:add' %}" class="btn btn-sm btn-outline-primary py-0 px-2"><i class="bi bi-plus"></i></a>
+      <div class="card panel-card accent-indigo h-100">
+        <div class="panel-header">
+          <span class="panel-title">
+            <span class="icon-chip"><i class="bi bi-broadcast-pin"></i></span>
+            WLAN Controller <span class="panel-count">{{ wlan_controllers|length }}</span>
+          </span>
+          <a href="{% url 'devices:add' %}" class="panel-add" title="Thêm thiết bị"><i class="bi bi-plus-lg"></i></a>
         </div>
         <div class="device-scroll">
           {% if wlan_controllers %}
@@ -412,13 +524,13 @@
                 <td>{{ ac.get_vendor_display }}</td>
                 <td>
                   {% if ac.is_online %}
-                    <span class="badge badge-online rounded-pill px-2">On</span>
+                    <span class="badge badge-online status-dot rounded-pill px-2">On</span>
                   {% else %}
-                    <span class="badge badge-offline rounded-pill px-2">Off</span>
+                    <span class="badge badge-offline status-dot rounded-pill px-2">Off</span>
                   {% endif %}
                 </td>
                 <td>
-                  <a href="{% url 'dashboard:wlan_detail' ac.pk %}" class="btn btn-sm btn-outline-secondary py-0 px-1">
+                  <a href="{% url 'dashboard:wlan_detail' ac.pk %}" class="btn btn-sm btn-outline-secondary row-action p-0">
                     <i class="bi bi-wifi"></i>
                   </a>
                 </td>
@@ -435,10 +547,13 @@
 
     <!-- Access Point -->
     <div class="col-xl-6">
-      <div class="card h-100">
-        <div class="card-header bg-white d-flex align-items-center justify-content-between py-1 px-3">
-          <span class="fw-semibold small"><i class="bi bi-wifi me-2 text-success"></i>Access Point ({{ access_points|length }})</span>
-          <a href="{% url 'devices:add' %}" class="btn btn-sm btn-outline-primary py-0 px-2"><i class="bi bi-plus"></i></a>
+      <div class="card panel-card accent-teal h-100">
+        <div class="panel-header">
+          <span class="panel-title">
+            <span class="icon-chip"><i class="bi bi-wifi"></i></span>
+            Access Point <span class="panel-count">{{ access_points|length }}</span>
+          </span>
+          <a href="{% url 'devices:add' %}" class="panel-add" title="Thêm thiết bị"><i class="bi bi-plus-lg"></i></a>
         </div>
         <div class="device-scroll">
           {% if access_points %}
@@ -458,9 +573,9 @@
                 <td class="text-muted font-monospace">{{ ap.ip_address }}</td>
                 <td>
                   {% if ap.is_online %}
-                    <span class="badge badge-online rounded-pill px-2">On</span>
+                    <span class="badge badge-online status-dot rounded-pill px-2">On</span>
                   {% else %}
-                    <span class="badge badge-offline rounded-pill px-2">Off</span>
+                    <span class="badge badge-offline status-dot rounded-pill px-2">Off</span>
                   {% endif %}
                 </td>
                 <td class="text-muted small">{{ ap.last_seen|date:"d/m H:i"|default:"—" }}</td>
@@ -478,12 +593,12 @@
 
   <!-- Active Alerts -->
   <div class="dashboard-alerts">
-    <div class="card mb-0">
-      <div class="card-header bg-white d-flex align-items-center justify-content-between py-1 px-3">
-        <span class="fw-semibold small">
-          <i class="bi bi-bell me-2 {% if alert_count %}text-danger{% else %}text-secondary{% endif %}"></i>
+    <div class="card panel-card accent-red mb-0">
+      <div class="panel-header">
+        <span class="panel-title">
+          <span class="icon-chip"><i class="bi bi-bell-fill"></i></span>
           Active Alerts
-          {% if alert_count %}<span class="badge bg-danger ms-1">{{ alert_count }}</span>{% endif %}
+          {% if alert_count %}<span class="panel-count">{{ alert_count }}</span>{% endif %}
         </span>
         <a href="{% url 'alerts:list' %}" class="btn btn-sm btn-outline-secondary py-0 px-2">Xem tất cả</a>
       </div>
