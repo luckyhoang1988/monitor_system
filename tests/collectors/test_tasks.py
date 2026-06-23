@@ -151,25 +151,27 @@ class TestPollAllNetworkDevices:
         MikroTikSNMPDeviceFactory(device_type="router",   enabled=True)
         FortinetSNMPDeviceFactory(device_type="firewall", enabled=True)
 
-        mock_delay = mocker.patch("apps.collectors.tasks.poll_device.delay")
+        mock_dispatch = mocker.patch("apps.collectors.tasks.poll_device.apply_async")
         from apps.collectors.tasks import poll_all_network_devices
         poll_all_network_devices.run()
 
-        assert mock_delay.call_count == 3  # 1 switch + 1 router + 1 firewall
+        assert mock_dispatch.call_count == 3  # 1 switch + 1 router + 1 firewall
+        # mỗi dispatch phải kèm expires để task cũ tự rớt (chống snowball)
+        assert all("expires" in c.kwargs for c in mock_dispatch.call_args_list)
 
     def test_excludes_ping_protocol_devices(self, mocker):
         CiscoSNMPDeviceFactory(device_type="switch", enabled=True, protocol="snmp")
         CiscoSNMPDeviceFactory(device_type="switch", enabled=True, protocol="ping")
-        mock_delay = mocker.patch("apps.collectors.tasks.poll_device.delay")
+        mock_dispatch = mocker.patch("apps.collectors.tasks.poll_device.apply_async")
         from apps.collectors.tasks import poll_all_network_devices
         poll_all_network_devices.run()
-        assert mock_delay.call_count == 1
+        assert mock_dispatch.call_count == 1
 
     def test_dispatches_zero_when_no_network_devices(self, mocker):
-        mock_delay = mocker.patch("apps.collectors.tasks.poll_device.delay")
+        mock_dispatch = mocker.patch("apps.collectors.tasks.poll_device.apply_async")
         from apps.collectors.tasks import poll_all_network_devices
         poll_all_network_devices.run()
-        mock_delay.assert_not_called()
+        mock_dispatch.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -210,6 +212,7 @@ class TestPollAllPingDevices:
         CiscoSNMPDeviceFactory(device_type="switch", enabled=True, protocol="ping")
         CiscoSNMPDeviceFactory(device_type="switch", enabled=True, protocol="snmp")
         CiscoSNMPDeviceFactory(device_type="switch", enabled=False, protocol="ping")
-        mock_delay = mocker.patch("apps.collectors.tasks.poll_device.delay")
+        mock_dispatch = mocker.patch("apps.collectors.tasks.poll_device.apply_async")
         poll_all_ping_devices.run()
-        assert mock_delay.call_count == 1
+        assert mock_dispatch.call_count == 1
+        assert "expires" in mock_dispatch.call_args.kwargs

@@ -110,22 +110,28 @@ POLL_PING_INTERVAL_SECS    = env.int("POLL_PING_INTERVAL_SECS", default=120)
 POLL_HYPERV_INTERVAL_SECS  = env.int("POLL_HYPERV_INTERVAL_SECS", default=300)
 ALERT_EVAL_INTERVAL_SECS   = env.int("ALERT_EVAL_INTERVAL_SECS", default=120)
 
+# options.expires: bản điều phối tồn quá 1 chu kỳ trong queue sẽ tự rớt,
+# tránh tích nhiều bản trùng (snowball) khi worker bị dồn.
 CELERY_BEAT_SCHEDULE = {
     "poll-all-network-devices": {
         "task": "apps.collectors.tasks.poll_all_network_devices",
         "schedule": POLL_NETWORK_INTERVAL_SECS,  # switch, router, firewall (SNMP/SSH)
+        "options": {"expires": POLL_NETWORK_INTERVAL_SECS},
     },
     "poll-all-ping-devices": {
         "task": "apps.collectors.tasks.poll_all_ping_devices",
         "schedule": POLL_PING_INTERVAL_SECS,  # devices using ping/icmp
+        "options": {"expires": POLL_PING_INTERVAL_SECS},
     },
     "poll-all-hyperv": {
         "task": "apps.collectors.tasks.poll_all_hyperv",
         "schedule": POLL_HYPERV_INTERVAL_SECS,
+        "options": {"expires": POLL_HYPERV_INTERVAL_SECS},
     },
     "evaluate-alert-rules": {
         "task": "apps.alerts.tasks.evaluate_alert_rules",
         "schedule": ALERT_EVAL_INTERVAL_SECS,
+        "options": {"expires": ALERT_EVAL_INTERVAL_SECS},
     },
     "cleanup-old-metrics": {
         "task": "apps.metrics.tasks.cleanup_old_metrics",

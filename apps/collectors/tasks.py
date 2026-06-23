@@ -1,9 +1,15 @@
 """Celery tasks — polling định kỳ và lưu metrics vào DB."""
 import logging
 from celery import shared_task
+from celery.exceptions import SoftTimeLimitExceeded
 from django.utils import timezone
 
 logger = logging.getLogger(__name__)
+
+# Trần thời gian cho 1 lần poll_device — chặn 1 thiết bị chậm/SNMP treo
+# ngốn worker hàng trăm giây (từng thấy ~151s) làm nghẽn cả queue.
+POLL_DEVICE_SOFT_LIMIT = 45   # raise SoftTimeLimitExceeded để task tự dừng "mềm"
+POLL_DEVICE_HARD_LIMIT = 60   # bị kill cứng nếu soft limit không kịp dừng
 
 
 ICMP_DEVICE_TYPES = ("switch", "router", "firewall", "nas", "ap")
@@ -91,7 +97,13 @@ def _poll_device_once(device_id: int) -> None:
     )
 
 
-@shared_task(bind=True, max_retries=3, default_retry_delay=30)
+@shared_task(
+    bind=True,
+    max_retries=1,
+    default_retry_delay=30,
+    soft_time_limit=POLL_DEVICE_SOFT_LIMIT,
+    time_limit=POLL_DEVICE_HARD_LIMIT,
+)
 def poll_device(self, device_id: int) -> None:
     from apps.devices.models import Device
 
@@ -99,6 +111,13 @@ def poll_device(self, device_id: int) -> None:
         _poll_device_once(device_id)
     except Device.DoesNotExist:
         logger.error("Device id=%d không tồn tại", device_id)
+    except SoftTimeLimitExceeded:
+        # Thiết bị quá chậm (>%ds) — coi như offline lần này. KHÔNG retry để
+        # tránh khuếch đại backlog; vòng poll kế tiếp sẽ thử lại.
+        logger.warning(
+            "Poll device id=%d vượt soft_time_limit %ds — bỏ qua, không retry",
+            device_id, POLL_DEVICE_SOFT_LIMIT,
+        )
     except Exception as exc:
         logger.warning("Poll failed %s (attempt %d): %s",
                        device_id, self.request.retries + 1, exc)
@@ -114,28 +133,34 @@ def poll_all_switches() -> None:
 @shared_task
 def poll_all_network_devices() -> None:
     """Poll thiết bị mạng SNMP/SSH (không bao gồm ping)."""
+    from django.conf import settings
     from apps.devices.models import Device
     device_ids = list(Device.objects.filter(
         device_type__in=["switch", "router", "firewall", "nas", "wlan_controller"],
         enabled=True,
         protocol__in=["snmp", "ssh"],
     ).values_list('pk', flat=True))
+    # expires = 1 chu kỳ: task chưa chạy kịp trước vòng kế thì tự rớt,
+    # tránh đùn đống poll_device cũ làm nghẽn queue (snowball).
+    expires = int(getattr(settings, "POLL_NETWORK_INTERVAL_SECS", 120))
     for pk in device_ids:
-        poll_device.delay(pk)
+        poll_device.apply_async(args=[pk], expires=expires)
     logger.info("Dispatched poll tasks for %d network devices (snmp/ssh)", len(device_ids))
 
 
 @shared_task
 def poll_all_ping_devices() -> None:
     """Poll thiết bị dùng giao thức ping mỗi 3 phút."""
+    from django.conf import settings
     from apps.devices.models import Device
     device_ids = list(Device.objects.filter(
         device_type__in=["switch", "router", "firewall", "nas", "ap"],
         enabled=True,
         protocol="ping",
     ).values_list("pk", flat=True))
+    expires = int(getattr(settings, "POLL_PING_INTERVAL_SECS", 120))
     for pk in device_ids:
-        poll_device.delay(pk)
+        poll_device.apply_async(args=[pk], expires=expires)
     logger.info("Dispatched poll tasks for %d ping devices", len(device_ids))
 
 
