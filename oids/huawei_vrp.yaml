@@ -63,11 +63,12 @@ wlan:
     ip:        ""  # AC6508 trả IPv6 all-zero ở .30; chưa có IPv4 AP đáng tin qua table này.
     group:     "1.3.6.1.4.1.2011.6.139.13.3.3.1.5"
     run_state: "1.3.6.1.4.1.2011.6.139.13.3.3.1.6"
-    # Số client ĐANG kết nối trên AP (cột .41). Đã xác minh runtime AC6508
-    # AirEngine V200R022C00SPC100 (2026-06): poll 2 lần cách 75s thấy giá trị
-    # dao động lên/xuống đúng kiểu số STA hiện tại (tổng ~209, max ~27/AP).
-    # Phân biệt với cột .33/.34 (bất biến = ngưỡng max-sta) và .44 (throughput).
-    sta_count: "1.3.6.1.4.1.2011.6.139.13.3.3.1.41"
+    # Số client ĐANG kết nối trên AP (cột .44). Đã đối chiếu Web UI AC6508
+    # AirEngine V200R022C00SPC100 (2026-06): TỔNG cột .44 = 591 ≈ Total 586 trên
+    # Web UI ("Access User Quantity") → đây là số STA hiện tại/AP (cả 2 band).
+    # LƯU Ý: cột .41 (tổng ~210) KHÔNG phải tổng user — đã từng gán nhầm.
+    # Cột .17 = 512 và .33/.34 bất biến là ngưỡng/cấu hình, không phải user.
+    sta_count: "1.3.6.1.4.1.2011.6.139.13.3.3.1.44"
 
   # Bảng client/station chi tiết — KHÔNG khả dụng qua SNMP trên AC6508 V200R022:
   #   - hwWlanStaInfoTable (.13.3.6) không trả dữ liệu.
