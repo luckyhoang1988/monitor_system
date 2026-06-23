@@ -27,6 +27,7 @@ INSTALLED_APPS = [
     "apps.metrics",
     "apps.alerts",
     "apps.dashboard",
+    "apps.accounts",
 ]
 
 REST_FRAMEWORK = {
@@ -65,6 +66,7 @@ TEMPLATES = [
                 "django.template.context_processors.request",
                 "django.contrib.auth.context_processors.auth",
                 "django.contrib.messages.context_processors.messages",
+                "apps.accounts.context_processors.user_role",
             ],
         },
     },

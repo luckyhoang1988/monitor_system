@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}Xóa người dùng{% endblock %}
+{% block breadcrumb %}
+  <a href="{% url 'accounts:list' %}" class="text-decoration-none text-muted">Người dùng</a>
+  <span class="mx-2 text-muted">/</span> Xóa
+{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+  <div class="col-xl-5 col-lg-7">
+    <div class="card border-danger">
+      <div class="card-header bg-white py-3">
+        <h5 class="mb-0 fw-bold text-danger"><i class="bi bi-exclamation-triangle me-2"></i>Xác nhận xóa</h5>
+      </div>
+      <div class="card-body p-4">
+        <p>Bạn có chắc muốn xóa người dùng
+          <strong>{{ user_obj.username }}</strong>{% if user_obj.email %} ({{ user_obj.email }}){% endif %}?
+          Hành động này không thể hoàn tác.</p>
+        <form method="post">
+          {% csrf_token %}
+          <div class="d-flex gap-2">
+            <button type="submit" class="btn btn-danger"><i class="bi bi-trash me-1"></i> Xóa</button>
+            <a href="{% url 'accounts:list' %}" class="btn btn-outline-secondary">Hủy</a>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

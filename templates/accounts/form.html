@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% block title %}{{ title }}{% endblock %}
+{% block breadcrumb %}
+  <a href="{% url 'accounts:list' %}" class="text-decoration-none text-muted">Người dùng</a>
+  <span class="mx-2 text-muted">/</span> {{ title }}
+{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+  <div class="col-xl-7 col-lg-9">
+    <div class="card">
+      <div class="card-header bg-white py-3">
+        <h5 class="mb-0 fw-bold"><i class="bi bi-person-gear me-2 text-primary"></i>{{ title }}</h5>
+      </div>
+      <div class="card-body p-4">
+        <form method="post" novalidate>
+          {% csrf_token %}
+          {% if form.errors %}
+            <div class="alert alert-danger py-2">
+              <ul class="mb-0">
+                {% for field in form %}
+                  {% if field.errors %}<li><strong>{{ field.label }}:</strong> {{ field.errors|striptags }}</li>{% endif %}
+                {% endfor %}
+                {% for error in form.non_field_errors %}<li>{{ error }}</li>{% endfor %}
+              </ul>
+            </div>
+          {% endif %}
+
+          {% for field in form %}
+            <div class="mb-3 {% if field.name == 'is_active' %}form-check ps-0{% endif %}">
+              {% if field.name == 'is_active' %}
+                <div class="form-check">
+                  {{ field }}
+                  <label class="form-check-label" for="{{ field.id_for_label }}">{{ field.label }}</label>
+                </div>
+              {% else %}
+                <label for="{{ field.id_for_label }}" class="form-label fw-medium">{{ field.label }}</label>
+                {{ field }}
+              {% endif %}
+              {% if field.help_text %}<div class="form-text">{{ field.help_text }}</div>{% endif %}
+            </div>
+          {% endfor %}
+
+          <div class="d-flex gap-2 mt-4">
+            <button type="submit" class="btn btn-primary"><i class="bi bi-check-lg me-1"></i> Lưu</button>
+            <a href="{% url 'accounts:list' %}" class="btn btn-outline-secondary">Hủy</a>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_css %}
+<style>
+  form input[type=text], form input[type=email], form input[type=password], form select {
+    display: block; width: 100%; padding: .45rem .75rem; border: 1px solid #ced4da;
+    border-radius: .375rem; font-size: .95rem;
+  }
+  form input[type=checkbox] { width: auto; }
+</style>
+{% endblock %}

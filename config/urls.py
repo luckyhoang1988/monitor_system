@@ -19,7 +19,8 @@ urlpatterns = [
     path("", include("apps.dashboard.urls")),
     path("devices/", include("apps.devices.urls")),
     path("alerts/", include("apps.alerts.urls")),
-    
+    path("users/", include("apps.accounts.urls")),
+
     # API Router chính (DRF)
     path("api/v1/", include(api_router.urls)),
     

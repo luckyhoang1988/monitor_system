@@ -102,12 +102,14 @@
         <i class="bi bi-hdd-network"></i> Danh sách thiết bị
       </a>
     </li>
+    {% if is_admin_user %}
     <li>
       <a href="{% url 'devices:add' %}"
          class="nav-link {% if request.resolver_match.namespace == 'devices' and request.resolver_match.url_name == 'add' %}active{% endif %}">
         <i class="bi bi-plus-circle"></i> Thêm thiết bị
       </a>
     </li>
+    {% endif %}
 
     <li><span class="sidebar-section">Cảnh báo</span></li>
     <li>
@@ -128,6 +130,22 @@
         <i class="bi bi-hdd"></i> Dung lượng
       </a>
     </li>
+
+    <li><span class="sidebar-section">Hệ thống</span></li>
+    {% if is_admin_user %}
+    <li>
+      <a href="{% url 'accounts:list' %}"
+         class="nav-link {% if request.resolver_match.namespace == 'accounts' and request.resolver_match.url_name != 'password_change' %}active{% endif %}">
+        <i class="bi bi-people"></i> Người dùng
+      </a>
+    </li>
+    {% endif %}
+    <li>
+      <a href="{% url 'accounts:password_change' %}"
+         class="nav-link {% if request.resolver_match.namespace == 'accounts' and request.resolver_match.url_name == 'password_change' %}active{% endif %}">
+        <i class="bi bi-key"></i> Đổi mật khẩu
+      </a>
+    </li>
   </ul>
 </nav>
 
@@ -137,7 +155,14 @@
   <div id="topbar">
     <span class="text-muted small fw-semibold">{% block breadcrumb %}Monitor System{% endblock %}</span>
     <div class="d-flex align-items-center gap-3">
-      <span class="text-muted small"><i class="bi bi-person-circle me-1"></i>{{ request.user.username }}</span>
+      <span class="text-muted small">
+        <i class="bi bi-person-circle me-1"></i>{{ request.user.username }}
+        {% if user_role == "admin" %}
+          <span class="badge bg-primary-subtle text-primary-emphasis border ms-1">Admin</span>
+        {% elif user_role == "review" %}
+          <span class="badge bg-secondary-subtle text-secondary-emphasis border ms-1">Review</span>
+        {% endif %}
+      </span>
       <form method="post" action="{% url 'logout' %}" class="m-0">
         {% csrf_token %}
         <button class="btn btn-sm btn-outline-secondary py-0 px-2">

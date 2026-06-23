@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% block title %}Người dùng{% endblock %}
+{% block breadcrumb %}Hệ thống <span class="mx-2 text-muted">/</span> Người dùng{% endblock %}
+
+{% block content %}
+<div class="card">
+  <div class="card-header bg-white py-3 d-flex justify-content-between align-items-center">
+    <h5 class="mb-0 fw-bold">
+      <i class="bi bi-people me-2 text-primary"></i>Người dùng
+      <span class="badge bg-secondary ms-1">{{ total }}</span>
+    </h5>
+    <a href="{% url 'accounts:add' %}" class="btn btn-sm btn-primary">
+      <i class="bi bi-person-plus me-1"></i> Thêm người dùng
+    </a>
+  </div>
+  <div class="card-body p-0">
+    <table class="table table-hover align-middle mb-0">
+      <thead class="table-light">
+        <tr>
+          <th class="ps-3">Tên đăng nhập</th>
+          <th>Email</th>
+          <th>Phân quyền</th>
+          <th>Trạng thái</th>
+          <th class="text-end pe-3">Thao tác</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for u in users %}
+        <tr>
+          <td class="ps-3 fw-medium">
+            <i class="bi bi-person-circle me-1 text-muted"></i>{{ u.username }}
+            {% if u.pk == request.user.pk %}<span class="badge bg-light text-muted border ms-1">bạn</span>{% endif %}
+            {% if u.is_superuser %}<span class="badge bg-warning-subtle text-warning-emphasis border ms-1" title="Django superuser">superuser</span>{% endif %}
+          </td>
+          <td class="text-muted">{{ u.email|default:"—" }}</td>
+          <td>
+            {% if u.role_code == "admin" %}
+              <span class="badge bg-primary-subtle text-primary-emphasis border"><i class="bi bi-shield-lock me-1"></i>{{ u.role_label }}</span>
+            {% else %}
+              <span class="badge bg-secondary-subtle text-secondary-emphasis border"><i class="bi bi-eye me-1"></i>{{ u.role_label }}</span>
+            {% endif %}
+          </td>
+          <td>
+            {% if u.is_active %}
+              <span class="badge badge-online status-dot rounded-pill px-2">Hoạt động</span>
+            {% else %}
+              <span class="badge badge-offline status-dot rounded-pill px-2">Đã khóa</span>
+            {% endif %}
+          </td>
+          <td class="text-end pe-3">
+            <a href="{% url 'accounts:edit' u.pk %}" class="btn btn-sm btn-outline-secondary py-0 px-2" title="Sửa">
+              <i class="bi bi-pencil"></i>
+            </a>
+            {% if u.pk != request.user.pk %}
+            <a href="{% url 'accounts:delete' u.pk %}" class="btn btn-sm btn-outline-danger py-0 px-2" title="Xóa">
+              <i class="bi bi-trash"></i>
+            </a>
+            {% endif %}
+          </td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="5" class="text-center text-muted py-4">Chưa có người dùng.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
