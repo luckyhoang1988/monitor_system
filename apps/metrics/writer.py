@@ -113,14 +113,22 @@ def _save_interface_stats(device: Device, data: NormalizedData) -> None:
         if key in existing_ifaces:
             iface = existing_ifaces[key]
             next_is_uplink = _is_trunk_interface(device, iface_data)
+            # Không ghi đè VLAN bằng None khi nguồn (vd SSH) không thu được VLAN.
+            next_access_vlan = (
+                iface_data.access_vlan
+                if iface_data.access_vlan is not None
+                else iface.access_vlan
+            )
             if (
                 iface.if_index != iface_data.if_index
                 or iface.description != iface_data.description
                 or iface.is_uplink != next_is_uplink
+                or iface.access_vlan != next_access_vlan
             ):
                 iface.if_index = iface_data.if_index
                 iface.description = iface_data.description
                 iface.is_uplink = next_is_uplink
+                iface.access_vlan = next_access_vlan
                 update_ifaces.append(iface)
         else:
             new_ifaces.append(Interface(
@@ -129,6 +137,7 @@ def _save_interface_stats(device: Device, data: NormalizedData) -> None:
                 name=iface_data.name,
                 description=iface_data.description,
                 is_uplink=_is_trunk_interface(device, iface_data),
+                access_vlan=iface_data.access_vlan,
             ))
 
     if new_ifaces:
@@ -138,7 +147,7 @@ def _save_interface_stats(device: Device, data: NormalizedData) -> None:
         existing_ifaces = {_iface_key(i.name): i for i in Interface.objects.filter(device=device)}
 
     if update_ifaces:
-        Interface.objects.bulk_update(update_ifaces, ["if_index", "description", "is_uplink"])
+        Interface.objects.bulk_update(update_ifaces, ["if_index", "description", "is_uplink", "access_vlan"])
 
     # 2. Fetch "previous stats" cho tất cả interface bằng 1 query.
     # Cửa sổ tìm prev phải đủ rộng: nhịp poll thực do Celery beat quyết định (vd 300s)

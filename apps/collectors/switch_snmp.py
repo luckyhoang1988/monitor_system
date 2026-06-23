@@ -224,6 +224,55 @@ class SwitchSNMPCollector(BaseCollector):
             ))
         return interfaces
 
+    def _collect_access_vlans(self, oid_profile: dict) -> dict[int, int]:
+        """Trả về {ifIndex: access_vlan} (PVID).
+
+        Cisco: vmVlan (CISCO-VLAN-MEMBERSHIP-MIB) index TRỰC TIẾP theo ifIndex,
+        chỉ access port có entry (trunk không xuất hiện → đúng ý).
+        Fallback/Huawei: dot1qPvid (Q-BRIDGE-MIB) index theo dot1dBasePort →
+        cần map qua dot1dBasePortIfIndex để ra ifIndex.
+        """
+        vlan_oids = oid_profile.get("vlan", {})
+        if not vlan_oids:
+            return {}
+
+        # 1. Cisco vmVlan — index = ifIndex
+        vm_vlan_oid = vlan_oids.get("vm_vlan")
+        if vm_vlan_oid:
+            result: dict[int, int] = {}
+            for oid, val in self._snmp_walk(vm_vlan_oid):
+                try:
+                    result[int(oid.split(".")[-1])] = int(val)
+                except (ValueError, TypeError):
+                    continue
+            if result:
+                return result
+
+        # 2. Fallback chuẩn — dot1qPvid (index = dot1dBasePort) + map ra ifIndex
+        pvid_oid = vlan_oids.get("dot1q_pvid")
+        baseport_oid = vlan_oids.get("dot1d_baseport_ifindex")
+        if not pvid_oid or not baseport_oid:
+            return {}
+
+        baseport_to_ifindex: dict[str, int] = {}
+        for oid, val in self._snmp_walk(baseport_oid):
+            try:
+                baseport_to_ifindex[oid.split(".")[-1]] = int(val)
+            except (ValueError, TypeError):
+                continue
+
+        result = {}
+        for oid, val in self._snmp_walk(pvid_oid):
+            base_port = oid.split(".")[-1]
+            if_index = baseport_to_ifindex.get(base_port)
+            if if_index is None:
+                continue
+            try:
+                result[if_index] = int(val)
+            except (ValueError, TypeError):
+                continue
+        return result
+
     def _collect_cpu_mem_mikrotik(self, oid_profile: dict) -> tuple[float, float]:
         """CPU và Memory cho MikroTik RouterOS."""
         cpu_table_oid = oid_profile.get("cpu", {}).get("processor_table")
@@ -519,12 +568,19 @@ class SwitchSNMPCollector(BaseCollector):
         if self.device.device_type == "wlan_controller":
             extra.update(self._collect_wifi(oid_profile))
 
+        # Gán access VLAN (PVID) cho từng interface theo ifIndex.
+        interfaces = self._collect_interfaces()
+        vlan_map = self._collect_access_vlans(oid_profile)
+        if vlan_map:
+            for iface in interfaces:
+                iface.access_vlan = vlan_map.get(iface.if_index)
+
         return {
             "os_family":   os_family,
             "cpu_percent": round(cpu_val, 1),
             "mem_percent": round(mem_val, 1),
             "uptime_secs": int(uptime_raw or 0) // 100,  # TimeTicks → seconds
-            "interfaces":  self._collect_interfaces(),
+            "interfaces":  interfaces,
             "extra":       extra,
         }
 

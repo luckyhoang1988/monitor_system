@@ -18,6 +18,7 @@ class InterfaceData:
     out_errors: int = 0
     description: str = ""
     speed_mbps: float = 0.0
+    access_vlan: int | None = None  # PVID / access VLAN (SNMP), None nếu trunk/không lấy được
 
 
 @dataclass

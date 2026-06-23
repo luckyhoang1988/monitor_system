@@ -22,3 +22,11 @@ mem_percent_formula: "mem_used / (mem_used + mem_free) * 100"
 # Stack members (Catalyst 9300 stack) — walk để lấy từng member
 stack:
   member_table: "1.3.6.1.4.1.9.9.500.1.2.1"  # CISCO-STACKWISE-MIB
+
+# Access VLAN (PVID) cho từng port
+vlan:
+  # CISCO-VLAN-MEMBERSHIP-MIB::vmVlan — index = ifIndex, chỉ access port có entry
+  vm_vlan: "1.3.6.1.4.1.9.9.68.1.2.2.1.2"
+  # Fallback chuẩn Q-BRIDGE-MIB nếu vmVlan rỗng (index = dot1dBasePort)
+  dot1q_pvid: "1.3.6.1.2.1.17.7.1.4.5.1.1"
+  dot1d_baseport_ifindex: "1.3.6.1.2.1.17.1.4.1.2"

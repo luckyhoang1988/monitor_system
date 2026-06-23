@@ -91,6 +91,7 @@ class Interface(models.Model):
     name        = models.CharField(max_length=100, verbose_name="Tên port")
     description = models.CharField(max_length=200, blank=True, verbose_name="Mô tả")
     is_uplink   = models.BooleanField(default=False, verbose_name="Là uplink/trunk")
+    access_vlan = models.IntegerField(null=True, blank=True, verbose_name="Access VLAN (PVID)")
 
     class Meta:
         # Định danh interface theo TÊN (ổn định cho cả SNMP & SSH). if_index vẫn lưu

@@ -24,3 +24,11 @@ ssh_commands:
   memory: "show memory statistics"
   interface: "show interfaces"
   version: "show version"
+
+# Access VLAN (PVID) cho từng port
+vlan:
+  # C1200/C1300/CBS thường KHÔNG expose vmVlan (enterprise) → để rỗng, dùng dot1q chuẩn.
+  vm_vlan: ""
+  # Q-BRIDGE-MIB::dot1qPvid — index = dot1dBasePort
+  dot1q_pvid: "1.3.6.1.2.1.17.7.1.4.5.1.1"
+  dot1d_baseport_ifindex: "1.3.6.1.2.1.17.1.4.1.2"

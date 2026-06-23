@@ -110,6 +110,7 @@
           <th>Port</th>
           <th>Mô tả</th>
           <th>Loại</th>
+          <th>VLAN</th>
           <th>Trạng thái</th>
           <th class="text-end">In (Mbps)</th>
           <th class="text-end pe-3">Out (Mbps)</th>
@@ -126,6 +127,15 @@
               <span class="badge bg-primary-subtle text-primary rounded-pill px-2">Uplink</span>
             {% else %}
               <span class="badge bg-secondary-subtle text-secondary rounded-pill px-2">Access</span>
+            {% endif %}
+          </td>
+          <td>
+            {% if iface.is_uplink %}
+              <span class="badge bg-info-subtle text-info rounded-pill px-2">Trunk</span>
+            {% elif iface.access_vlan %}
+              <span class="badge bg-success-subtle text-success rounded-pill px-2 font-monospace">VLAN {{ iface.access_vlan }}</span>
+            {% else %}
+              <span class="text-muted">—</span>
             {% endif %}
           </td>
           <td>

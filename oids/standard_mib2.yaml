@@ -30,3 +30,8 @@ if_mib:
   ifHighSpeed:  "1.3.6.1.2.1.31.1.1.1.15"  # speed Mbps (cho GE/10GE)
   ifHCInOctets: "1.3.6.1.2.1.31.1.1.1.6"   # 64-bit in bytes counter (không wrap)
   ifHCOutOctets:"1.3.6.1.2.1.31.1.1.1.10"  # 64-bit out bytes counter
+
+# Access VLAN (PVID) — Q-BRIDGE-MIB chuẩn (IEEE 802.1Q), mọi vendor hỗ trợ
+vlan:
+  dot1q_pvid: "1.3.6.1.2.1.17.7.1.4.5.1.1"        # index = dot1dBasePort
+  dot1d_baseport_ifindex: "1.3.6.1.2.1.17.1.4.1.2"  # map dot1dBasePort → ifIndex
