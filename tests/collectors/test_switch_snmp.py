@@ -272,6 +272,23 @@ class TestAdapt:
 
 
 class TestCollectRawResilience:
+    def test_collect_raw_short_circuits_when_snmp_dead(self, mocker):
+        """SNMP không phản hồi (sysUpTime=None) -> raise ngay, KHÔNG walk interface.
+
+        Chống lặp lại sự cố Firewall_DC (icmp-up/snmp-down) tốn ~150s/poll.
+        """
+        collector = SwitchSNMPCollector(CiscoSNMPDeviceFactory.build())
+        mocker.patch.object(collector, "_snmp_get", return_value=None)
+        detect = mocker.patch.object(collector, "detect_os_family")
+        walk_if = mocker.patch.object(collector, "_collect_interfaces")
+
+        with pytest.raises(ConnectionError):
+            collector.collect_raw()
+
+        # Không được chạm tới detect os-family hay walk bảng interface đắt đỏ.
+        detect.assert_not_called()
+        walk_if.assert_not_called()
+
     def test_collect_raw_cisco_missing_memory_oids_does_not_raise(self, mocker):
         collector = SwitchSNMPCollector(CiscoSNMPDeviceFactory.build())
         mocker.patch.object(collector, "detect_os_family", return_value="cisco_ios")

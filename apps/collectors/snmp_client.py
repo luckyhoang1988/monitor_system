@@ -18,6 +18,19 @@ class SnmpResult:
     value: str
 
 
+def _safe_close(dispatcher) -> None:
+    """Đóng SnmpDispatcher mà không để lỗi cleanup làm hỏng kết quả/che lỗi gốc.
+
+    pysnmp v1arch: nếu còn request đang chờ khi close (vd walk bị hủy/timeout),
+    callback nội bộ ném `TypeError: __callback() missing 'cbCtx'`. Lỗi này nằm
+    trong `finally` nên sẽ che mất exception thật và làm task chết — nuốt nó.
+    """
+    try:
+        dispatcher.close()
+    except Exception as exc:  # noqa: BLE001 — cleanup không bao giờ được phép ném
+        logger.debug("SnmpDispatcher.close() lỗi (bỏ qua): %s", exc)
+
+
 class PySnmpSession:
     """Fallback SNMP session dùng pysnmp cho môi trường không có easysnmp (Windows)."""
 
@@ -67,7 +80,7 @@ class PySnmpSession:
             var_bind = var_binds[0]
             return SnmpResult(oid=str(var_bind[0]), value=str(var_bind[1]))
         finally:
-            dispatcher.close()
+            _safe_close(dispatcher)
 
     def walk(self, oid_prefix: str) -> list[SnmpResult]:
         return asyncio.run(self._walk(oid_prefix))
@@ -111,7 +124,7 @@ class PySnmpSession:
                 current_oid = oid
             return results
         finally:
-            dispatcher.close()
+            _safe_close(dispatcher)
 
 
 def resolve_snmp_backend() -> str:

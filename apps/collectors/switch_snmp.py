@@ -460,9 +460,19 @@ class SwitchSNMPCollector(BaseCollector):
         return {"wifi_aps": aps, "wifi_clients": clients}
 
     def collect_raw(self) -> dict:
+        # Short-circuit SNMP: 1 GET rẻ (sysUpTime) làm probe reachability.
+        # SNMP chết (icmp-up/snmp-down như firewall qua WAN) -> dừng NGAY,
+        # khỏi detect + walk 8 cột bảng interface đắt đỏ (từng tốn ~150s).
+        # Analog của ICMP short-circuit trong tasks._poll_device_once.
+        uptime_raw = self._snmp_get(OID_SYS_UPTIME)
+        if uptime_raw is None:
+            raise ConnectionError(
+                f"SNMP không phản hồi từ {self.device.ip_address} "
+                f"(sysUpTime) — bỏ qua collect"
+            )
+
         os_family   = self.detect_os_family()
         oid_profile = _load_oid_profile(os_family)
-        uptime_raw  = self._snmp_get(OID_SYS_UPTIME) or 0
         extra: dict = {}
 
         if os_family == "mikrotik_routeros":
@@ -513,7 +523,7 @@ class SwitchSNMPCollector(BaseCollector):
             "os_family":   os_family,
             "cpu_percent": round(cpu_val, 1),
             "mem_percent": round(mem_val, 1),
-            "uptime_secs": int(uptime_raw) // 100,  # TimeTicks → seconds
+            "uptime_secs": int(uptime_raw or 0) // 100,  # TimeTicks → seconds
             "interfaces":  self._collect_interfaces(),
             "extra":       extra,
         }
