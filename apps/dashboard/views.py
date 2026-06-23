@@ -107,6 +107,9 @@ def index(request):
     active_alerts = list(Alert.objects.filter(is_active=True)
                          .select_related("device", "rule")
                          .order_by("-triggered_at")[:20])
+    def _offline(devices):
+        return sum(1 for d in devices if not d.is_online)
+
     context = {
         "switches":       switches,
         "routers":        routers,
@@ -114,6 +117,12 @@ def index(request):
         "nas_devices":    nas_list,
         "hyperv_hosts":   hyperv,
         "wlan_controllers": wlan_controllers,
+        "switches_off":   _offline(switches),
+        "routers_off":    _offline(routers),
+        "firewalls_off":  _offline(firewalls),
+        "nas_off":        _offline(nas_list),
+        "hyperv_off":     _offline(hyperv),
+        "wlan_off":       _offline(wlan_controllers),
         "active_alerts":  active_alerts,
         "device_type_stats": device_type_stats,
         "total_devices":  len(all_devices),
