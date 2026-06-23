@@ -9,9 +9,23 @@ logger = logging.getLogger(__name__)
 TELEGRAM_API = "https://api.telegram.org/bot{token}/sendMessage"
 
 
+def _resolve_chat_id() -> str:
+    """Chat ID nhận cảnh báo: ưu tiên AlertConfig (UI), fallback .env."""
+    try:
+        from apps.alerts.models import AlertConfig
+        cfg = AlertConfig.load()
+        if not cfg.telegram_enabled:
+            return ""
+        if cfg.telegram_chat_id.strip():
+            return cfg.telegram_chat_id.strip()
+    except Exception:
+        logger.exception("Đọc AlertConfig lỗi — fallback .env")
+    return getattr(settings, "TELEGRAM_CHAT_ID", "")
+
+
 def send_telegram_alert(alert) -> None:
     token   = getattr(settings, "TELEGRAM_BOT_TOKEN", "")
-    chat_id = getattr(settings, "TELEGRAM_CHAT_ID", "")
+    chat_id = _resolve_chat_id()
 
     if not token or not chat_id:
         logger.warning("TELEGRAM_BOT_TOKEN hoặc TELEGRAM_CHAT_ID chưa cấu hình")
@@ -42,7 +56,7 @@ def send_telegram_alert(alert) -> None:
 
 def send_telegram_recovery(alert) -> None:
     token   = getattr(settings, "TELEGRAM_BOT_TOKEN", "")
-    chat_id = getattr(settings, "TELEGRAM_CHAT_ID", "")
+    chat_id = _resolve_chat_id()
     if not token or not chat_id:
         return
 

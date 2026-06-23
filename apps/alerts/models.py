@@ -95,6 +95,31 @@ class Alert(models.Model):
         return f"{self.severity}: {self.device.name} — {self.rule.name}"
 
 
+class AlertConfig(models.Model):
+    """Singleton (pk=1): cấu hình kênh thông báo chỉnh qua UI."""
+    telegram_enabled = models.BooleanField(default=True, verbose_name="Bật gửi Telegram")
+    telegram_chat_id = models.CharField(
+        max_length=64, blank=True, default="",
+        verbose_name="Telegram Chat ID",
+        help_text="Chat/group ID nhận cảnh báo (vd -100123456789). Để trống = dùng giá trị trong .env.")
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Cấu hình cảnh báo"
+
+    def __str__(self) -> str:
+        return "Cấu hình cảnh báo"
+
+    def save(self, *args, **kwargs):
+        self.pk = 1
+        super().save(*args, **kwargs)
+
+    @classmethod
+    def load(cls):
+        obj, _ = cls.objects.get_or_create(pk=1)
+        return obj
+
+
 class AlertNotification(models.Model):
     alert    = models.ForeignKey(Alert, on_delete=models.CASCADE, related_name="notifications")
     channel  = models.CharField(max_length=20)   # email | telegram

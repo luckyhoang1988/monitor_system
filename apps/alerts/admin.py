@@ -1,5 +1,10 @@
 from django.contrib import admin
-from .models import AlertRule, Alert, AlertNotification
+from .models import AlertRule, Alert, AlertNotification, AlertConfig
+
+
+@admin.register(AlertConfig)
+class AlertConfigAdmin(admin.ModelAdmin):
+    list_display = ("telegram_enabled", "telegram_chat_id", "updated_at")
 
 
 @admin.register(AlertRule)

@@ -9,8 +9,8 @@ from django.http import HttpResponseForbidden
 from django.conf import settings
 from django.db import connection
 from django.utils import timezone
-from .models import Alert, AlertRule
-from .forms import AlertRuleForm
+from .models import Alert, AlertRule, AlertConfig
+from .forms import AlertRuleForm, AlertConfigForm
 
 
 def _db_size_bytes() -> int:
@@ -174,6 +174,20 @@ def rule_edit(request, pk):
         form.save()
         return redirect("alerts:rule_list")
     return render(request, "alerts/rules/form.html", {"form": form, "title": f"Sửa: {rule.name}"})
+
+
+@login_required
+def notification_config(request):
+    """Cấu hình kênh Telegram nhận cảnh báo (singleton, admin-only)."""
+    if not _can_write(request):
+        return HttpResponseForbidden("Bạn không có quyền thực hiện thao tác này.")
+    cfg = AlertConfig.load()
+    form = AlertConfigForm(request.POST or None, instance=cfg)
+    if request.method == "POST" and form.is_valid():
+        form.save()
+        messages.success(request, "Đã lưu cấu hình Telegram.")
+        return redirect("alerts:config")
+    return render(request, "alerts/config.html", {"form": form})
 
 
 @login_required

@@ -1,5 +1,5 @@
 from django import forms
-from .models import AlertRule, CHANNEL_CHOICES
+from .models import AlertRule, AlertConfig, CHANNEL_CHOICES
 
 METRIC_CHOICES = [
     ("cpu_percent",       "CPU (%)"),
@@ -57,3 +57,17 @@ class AlertRuleForm(forms.ModelForm):
 
     def clean_channels(self):
         return list(self.cleaned_data.get("channels", []))
+
+
+class AlertConfigForm(forms.ModelForm):
+    class Meta:
+        model  = AlertConfig
+        fields = ["telegram_enabled", "telegram_chat_id"]
+        widgets = {
+            "telegram_enabled": forms.CheckboxInput(attrs={"class": "form-check-input"}),
+            "telegram_chat_id": forms.TextInput(attrs={"class": "form-control",
+                                                       "placeholder": "vd -100123456789"}),
+        }
+
+    def clean_telegram_chat_id(self):
+        return (self.cleaned_data.get("telegram_chat_id") or "").strip()

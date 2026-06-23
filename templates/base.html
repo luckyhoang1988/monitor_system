@@ -130,6 +130,14 @@
         <i class="bi bi-hdd"></i> Dung lượng
       </a>
     </li>
+    {% if is_admin_user %}
+    <li>
+      <a href="{% url 'alerts:config' %}"
+         class="nav-link {% if request.resolver_match.namespace == 'alerts' and request.resolver_match.url_name == 'config' %}active{% endif %}">
+        <i class="bi bi-telegram"></i> Cấu hình Telegram
+      </a>
+    </li>
+    {% endif %}
 
     <li><span class="sidebar-section">Hệ thống</span></li>
     {% if is_admin_user %}
