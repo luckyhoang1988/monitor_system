@@ -4,57 +4,53 @@
 
 {% block extra_css %}
 <style>
+  /* Mỗi dòng table-compact ~ 1.95rem; 5 dòng + header (sticky) ~ 11.7rem.
+     Đặt biến để mọi vùng cuộn dùng chung 1 giá trị, dễ chỉnh. */
+  :root { --panel-rows-height: 11.7rem; }
+
   .dashboard-screen {
-    height: calc(100vh - 7.5rem);
     display: flex;
     flex-direction: column;
-    gap: .65rem;
-    overflow: hidden;
+    gap: .75rem;
   }
-  .dashboard-screen .dashboard-heading { flex-shrink: 0; margin-bottom: 0 !important; }
-  .dashboard-stats { flex-shrink: 0; }
-  .dashboard-stats .stat-card { padding: .65rem .85rem; }
-  .dashboard-stats .stat-icon { font-size: 1.5rem; }
-  .dashboard-stats .fs-3 { font-size: 1.35rem !important; }
+  .dashboard-heading { margin-bottom: 0 !important; }
 
-  .dashboard-offline {
-    flex-shrink: 0;
-    max-height: 4.5rem;
+  .dashboard-stats .stat-card { padding: .75rem .95rem; }
+  .dashboard-stats .stat-icon { font-size: 1.6rem; }
+  .dashboard-stats .fs-3 { font-size: 1.4rem !important; }
+
+  /* Khối "Thiết bị Offline": dòng dạng div nhỏ hơn -> ~5 dòng rồi cuộn */
+  .dashboard-offline .card-body {
+    max-height: 7.5rem;
     overflow-y: auto;
+    padding-top: .4rem !important;
+    padding-bottom: .4rem !important;
   }
-  .dashboard-offline .card-body { padding-top: .35rem !important; padding-bottom: .35rem !important; }
 
   .dashboard-panels {
     display: grid !important;
     grid-template-columns: repeat(2, minmax(0, 1fr));
-    grid-auto-rows: min-content;
-    gap: .5rem;
+    gap: .75rem;
     margin: 0;
     --bs-gutter-x: 0;
     --bs-gutter-y: 0;
   }
   .dashboard-panels > [class*="col-"] {
-    display: flex;
-    min-height: 0;
-    height: 100%;
     width: 100%;
     max-width: 100%;
     flex: none;
     padding: 0;
   }
-  .dashboard-panels .card {
-    width: 100%;
-    min-height: 0;
-    display: flex;
-    flex-direction: column;
-  }
+  .dashboard-panels .card { width: 100%; }
+
+  /* Vùng cuộn của mỗi panel: hiển thị 5 dòng + header, dư thì cuộn dọc */
   .device-scroll {
-    /* Hiển thị tối đa ~5 dòng + header; nhiều hơn thì cuộn dọc. */
-    max-height: 12rem;
+    max-height: var(--panel-rows-height);
     overflow-y: auto;
     overflow-x: auto;
   }
-  .device-scroll thead th {
+  .device-scroll thead th,
+  .alert-scroll thead th {
     position: sticky;
     top: 0;
     z-index: 2;
@@ -63,35 +59,24 @@
   }
   .table-compact th,
   .table-compact td {
-    padding: .3rem .45rem;
+    padding: .35rem .45rem;
     font-size: .8125rem;
     white-space: nowrap;
   }
   .table-compact td:first-child {
-    max-width: 11rem;
+    max-width: 13rem;
     overflow: hidden;
     text-overflow: ellipsis;
   }
 
-  .dashboard-alerts {
-    flex-shrink: 0;
-    max-height: 6rem;
-  }
-  .dashboard-alerts .card {
-    display: flex;
-    flex-direction: column;
-    max-height: 6rem;
-  }
-  .dashboard-alerts .alert-scroll {
-    flex: 1;
-    min-height: 0;
+  /* Active Alerts: cũng 5 dòng rồi cuộn */
+  .alert-scroll {
+    max-height: var(--panel-rows-height);
     overflow-y: auto;
   }
-  .dashboard-alerts thead th {
-    position: sticky;
-    top: 0;
-    z-index: 2;
-    background: #f8f9fa;
+
+  @media (max-width: 1199.98px) {
+    .dashboard-panels { grid-template-columns: 1fr; }
   }
 </style>
 {% endblock %}
