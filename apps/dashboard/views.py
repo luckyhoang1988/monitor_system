@@ -60,11 +60,31 @@ def index(request):
     hyperv    = by_type["hyperv"]
     wlan_controllers = by_type["wlan_controller"]
     access_points    = by_type["ap"]
+
+    # AP không đăng ký như Device — chúng nằm trong WifiApStats dưới AC. Gộp snapshot
+    # mới nhất của từng wlan_controller để card "Access Point" phản ánh AP thật.
+    from apps.metrics.models import WifiApStats
+    ap_total = ap_online = 0
+    for ac in wlan_controllers:
+        latest_ts = (WifiApStats.objects
+                     .filter(device=ac)
+                     .order_by("-timestamp")
+                     .values_list("timestamp", flat=True)
+                     .first())
+        if not latest_ts:
+            continue
+        snapshot = WifiApStats.objects.filter(device=ac, timestamp=latest_ts)
+        ap_total += snapshot.count()
+        ap_online += snapshot.filter(is_online=True).count()
+
     device_type_stats = []
     for dtype, label, icon, color_class in device_type_meta:
-        devices = by_type.get(dtype, [])
-        online = sum(1 for d in devices if d.is_online)
-        total = len(devices)
+        if dtype == "ap":
+            total, online = ap_total, ap_online
+        else:
+            devices = by_type.get(dtype, [])
+            online = sum(1 for d in devices if d.is_online)
+            total = len(devices)
         device_type_stats.append({
             "type": dtype,
             "label": label,
