@@ -34,7 +34,8 @@ apps/
 ├── collectors/   # SNMP/SSH/WinRM collector + adapter Cisco/Huawei + tasks
 ├── metrics/      # InterfaceStats, SystemHealth, VMStats + writer + Chart.js API
 ├── alerts/       # AlertRule CRUD + engine + dedup + Email/Telegram
-└── dashboard/    # Dashboard index, switch_detail, hyperv_detail
+├── dashboard/    # Dashboard index, switch/hyperv/wlan/firewall_detail
+└── accounts/     # RBAC 2 cấp (Admin/Review) + UI quản lý user (không có model)
 ```
 
 ## Nguyên tắc thiết kế
@@ -78,6 +79,33 @@ apps/
 ### Interface (mọi vendor) — MIB-II standard, OK
 - Dùng 64-bit HC counters (`ifHCInOctets/Out` = `.31.1.1.1.6/.10`). Fleet hiện tại đều hỗ trợ HC.
 
+### Huawei WLAN / AC — AC6508 (AirEngine, VRP V200R022C00SPC100)
+> `device_type = wlan_controller`. HUAWEI-WLAN MIB dưới `1.3.6.1.4.1.2011.6.139`.
+> Đã đối chiếu Web UI thật (2026-06). OID đầy đủ trong [oids/huawei_vrp.yaml](oids/huawei_vrp.yaml) `wlan:`.
+
+Bảng AP `hwWlanApInfoTable` = `1.3.6.1.4.1.2011.6.139.13.3.3.1.X` (index = MAC AP):
+
+| Cột | Ý nghĩa | Dùng |
+|---|---|---|
+| `.4` | tên AP | ✅ name |
+| `.5` | AP group | ✅ group |
+| `.6` | run_state (`8` = online) | ✅ trạng thái |
+| `.44` | **số client ĐANG kết nối/AP** (cả 2 band; TỔNG = 588 ≈ Total 586 Web UI) | ✅ client_count |
+| `.41` | KHÔNG phải số user (tổng ~210) — **TỪNG GÁN NHẦM** | ❌ |
+| `.17` / `.33` / `.34` | bất biến = ngưỡng/max-sta config | ❌ |
+| `.13` / `.39` | IP (4 byte hex) / MAC (6 byte) AP — chưa dùng (collector suy MAC từ index) | — |
+
+- **CẢNH BÁO**: client/AP đúng là `.44`, KHÔNG phải `.41`. Cách dò: poll 2 lần (lọc cột dao động lên/xuống) + đối chiếu Total trên Web UI (xem `/research-oids`).
+- **Bảng STA chi tiết KHÔNG expose** qua SNMP (`.13.3.6` rỗng; `.13.3.5` là counter per-radio) → chỉ lấy được **số lượng** client/AP, không liệt kê từng client/MAC.
+- Số client có thể lệch nhẹ so với Web UI từng thời điểm (đọc lệch vài giây + client vào/ra liên tục) — bình thường.
+- Tool dò: `python manage.py verify_wlan_oids <device_id> --parent <oid>`.
+
+## RBAC — 2 cấp tài khoản (app `apps.accounts`)
+- **Admin** = group `Network Admins` (hoặc superuser): full quyền + quản lý user.
+- **Review** = group `Read-Only Operators`: chỉ xem; write bị chặn 403.
+- Nguồn sự thật: [apps/accounts/roles.py](apps/accounts/roles.py) (`is_admin/get_role/set_role`) — dùng chung với `_can_write` (devices/alerts) và `IsAdminOrReadOnly` (DRF API).
+- UI quản lý user: `/users/` (admin-only); đổi mật khẩu: `/users/password/` (mọi user). Group tạo sẵn ở migration `devices/0007_create_rbac_groups`.
+
 ## Chạy dev
 ```bash
 cp .env.example .env          # điền giá trị
@@ -98,14 +126,15 @@ celery -A config beat -l info
 | 3 | Celery automation + HyperV WinRM | ✅ |
 | 4 | Django dashboard + Chart.js + login/logout | ✅ |
 | 5 | Alert engine + Email + Telegram + Rule CRUD UI | ✅ |
-| 6 | Docker Compose + Production deploy | ⏳ chưa làm |
+| 6 | Docker Compose + Production deploy | ✅ |
+| 7 | RBAC 2 cấp (Admin/Review) + UI quản lý người dùng | ✅ |
 
-### Phase 6 — việc cần làm
-- `Dockerfile` cho Django app (gunicorn + whitenoise)
-- `docker-compose.yml`: app + postgres + redis + celery worker + celery beat
-- `nginx/nginx.conf`: reverse proxy + static files
-- `.env.production`: template đầy đủ cho prod
-- `entrypoint.sh`: migrate + collectstatic + start gunicorn
+### Production deploy (đang chạy)
+- Server `monitorsrv` = `10.0.193.234` (SSH config sẵn, user `monitorsys`). App ở `/home/monitorsys/monitor_system`.
+- Docker Compose: `app` (gunicorn) + `worker` + `beat` + `db` (postgres16) + `redis` + `nginx`. Code **build vào image** (`build: .`, không bind-mount) → đổi code phải rebuild.
+- Quy trình deploy: commit/push → trên server `git pull && docker compose build app worker && docker compose up -d`.
+  - Collector chạy trong `worker` → đổi OID/collector phải rebuild `worker`.
+  - Nếu Docker Hub không vào được (không pull base image): tạm `docker cp` file vào container + `docker compose restart` (lưu ý: chưa nung vào image, recreate sẽ mất → rebuild lại khi registry hồi).
 
 ## File quan trọng
 | File | Mô tả |
