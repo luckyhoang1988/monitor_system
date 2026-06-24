@@ -12,6 +12,7 @@ METRIC_CHOICES = [
     ("vm_repl_unhealthy", "Số VM replication lỗi"),
     ("device_online",     "Trạng thái online (0=OFFLINE, 1=ONLINE)"),
     ("wifi_client_count", "Số client WiFi (WLAN controller)"),
+    ("wifi_ap_offline",   "Số AP offline (WLAN controller)"),
 ]
 
 DEVICE_TYPE_CHOICES = [

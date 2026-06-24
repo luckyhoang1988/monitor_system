@@ -682,5 +682,8 @@
     localStorage.setItem('dashboardAlarm', on ? 'on' : 'off');
   });
 })();
+
+// Tự reload dashboard mỗi 120s để cảnh báo/offline đã hết tự biến mất (không cần F5).
+setTimeout(function () { location.reload(); }, 120000);
 </script>
 {% endblock %}

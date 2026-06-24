@@ -91,6 +91,12 @@ DEFAULT_RULES = [
         "condition": "eq", "threshold": 0.0,
         "severity": "CRITICAL", "duration_min": 5,
     },
+    {
+        "name": "AP offline (dưới WLAN AC)",
+        "device_type": "wlan_controller", "metric": "wifi_ap_offline",
+        "condition": "gt", "threshold": 0.0,
+        "severity": "WARNING", "duration_min": 0,
+    },
 ]
 
 

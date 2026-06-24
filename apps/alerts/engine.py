@@ -10,6 +10,9 @@ logger = logging.getLogger(__name__)
 
 # Metric nhị phân (0/1) — không áp dụng vùng đệm hysteresis.
 BINARY_METRICS = {"if_status", "device_online"}
+# Metric miễn trừ hysteresis: phục hồi ngay khi điều kiện hết đúng. Ngoài metric
+# nhị phân còn có wifi_ap_offline (count, ngưỡng 0 → công thức hysteresis vô nghĩa).
+NO_HYSTERESIS_METRICS = BINARY_METRICS | {"wifi_ap_offline"}
 
 CONDITION_FN = {
     "gt":  lambda v, t: v > t,
@@ -31,6 +34,7 @@ METRIC_GETTERS = {
     "vm_repl_unhealthy": lambda device, since: _count_vms_repl_unhealthy(device, since),
     "device_online":     lambda device, since: _device_online(device),
     "wifi_client_count": lambda device, since: _wifi_client_count(device, since),
+    "wifi_ap_offline":   lambda device, since: _wifi_ap_offline_count(device, since),
 }
 
 SUSTAINABLE_METRICS = {"cpu_percent", "mem_percent"}
@@ -354,6 +358,39 @@ def _wifi_client_count(device: Device, since) -> float | None:
     return float(WifiClientStats.objects.filter(device=device, timestamp=latest_ts).count())
 
 
+def _wifi_ap_offline_count(device: Device, since) -> float | None:
+    """Số AP offline ở snapshot WifiApStats mới nhất của WLAN controller.
+
+    Lọc theo `since` để khi AC mất kết nối (không có snapshot mới) → trả None
+    (bỏ qua), tránh báo AP offline giả khi chính AC đang down (AC down đã có
+    rule device_online riêng).
+    """
+    from apps.metrics.models import WifiApStats
+    latest_ts = (WifiApStats.objects
+                 .filter(device=device, timestamp__gte=since)
+                 .order_by("-timestamp")
+                 .values_list("timestamp", flat=True).first())
+    if latest_ts is None:
+        return None
+    return float(WifiApStats.objects.filter(
+        device=device, timestamp=latest_ts, is_online=False).count())
+
+
+def _wifi_offline_ap_names(device: Device) -> list[str]:
+    """Tên các AP đang offline ở snapshot WifiApStats mới nhất (cho message cảnh báo)."""
+    from apps.metrics.models import WifiApStats
+    latest_ts = (WifiApStats.objects
+                 .filter(device=device)
+                 .order_by("-timestamp")
+                 .values_list("timestamp", flat=True).first())
+    if latest_ts is None:
+        return []
+    return list(WifiApStats.objects
+                .filter(device=device, timestamp=latest_ts, is_online=False)
+                .order_by("ap_name")
+                .values_list("ap_name", flat=True))
+
+
 def _recovered(rule: AlertRule, value: float) -> bool:
     """True nếu value đã ra khỏi vùng đệm hysteresis (đủ điều kiện phục hồi).
 
@@ -361,7 +398,7 @@ def _recovered(rule: AlertRule, value: float) -> bool:
     - gt/gte: phục hồi khi value < threshold * (1 - pct).
     - lt/lte: phục hồi khi value > threshold * (1 + pct).
     """
-    if rule.metric in BINARY_METRICS or rule.condition in ("eq", "ne"):
+    if rule.metric in NO_HYSTERESIS_METRICS or rule.condition in ("eq", "ne"):
         return True
     pct = float(getattr(settings, "ALERT_HYSTERESIS_PCT", 0.1) or 0)
     t = float(rule.threshold)
@@ -450,6 +487,8 @@ def _fire_alert(device: Device, rule: AlertRule, value: float) -> None:
             return f"{v:.0f}"
         if metric in ("vm_count_running", "vm_repl_unhealthy", "wifi_client_count"):
             return f"{v:.0f}"
+        if metric == "wifi_ap_offline":
+            return f"{v:.0f} AP"
         if metric == "if_status":
             return "DOWN" if v == 0 else "UP"
         if metric == "device_online":
@@ -459,11 +498,19 @@ def _fire_alert(device: Device, rule: AlertRule, value: float) -> None:
     metric_value_str = _fmt_metric(rule.metric, float(value))
     threshold_str = _fmt_metric(rule.metric, float(rule.threshold))
 
+    if rule.metric == "wifi_ap_offline":
+        names = _wifi_offline_ap_names(device)
+        suffix = f" ({', '.join(names)})" if names else ""
+        message = f"{device.name}: {metric_value_str} offline{suffix}"
+    else:
+        message = (f"{device.name}: {rule.metric} = {metric_value_str} "
+                   f"(ngưỡng {rule.condition} {threshold_str})")
+
     alert = Alert.objects.create(
         device=device,
         rule=rule,
         severity=rule.severity,
-        message=f"{device.name}: {rule.metric} = {metric_value_str} (ngưỡng {rule.condition} {threshold_str})",
+        message=message,
         metric_value=float(value),
         is_active=True,
     )

@@ -54,6 +54,7 @@ class AlertRule(models.Model):
             "vm_repl_unhealthy": "Số VM replication lỗi",
             "device_online": "Trạng thái online (0=OFFLINE, 1=ONLINE)",
             "wifi_client_count": "Số client WiFi (WLAN controller)",
+            "wifi_ap_offline": "Số AP offline (WLAN controller)",
         }
         return labels.get(self.metric, self.metric)
 
@@ -66,7 +67,8 @@ class AlertRule(models.Model):
             return f"{t:.1f}%"
         if m in ("uplink_in_mbps_max", "uplink_out_mbps_max"):
             return f"{t:.3f} Mbps"
-        if m in ("vm_count_running", "vm_repl_unhealthy", "fw_session_count", "wifi_client_count"):
+        if m in ("vm_count_running", "vm_repl_unhealthy", "fw_session_count",
+                 "wifi_client_count", "wifi_ap_offline"):
             return f"{t:.0f}"
         if m == "if_status":
             return "DOWN" if t == 0 else "UP"
