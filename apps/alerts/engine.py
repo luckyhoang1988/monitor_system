@@ -627,11 +627,15 @@ def _resolve_alert(device: Device, rule: AlertRule) -> None:
     alerts_to_resolve = list(Alert.objects.filter(device=device, rule=rule, is_active=True))
     if not alerts_to_resolve:
         return
+    resolved_at = timezone.now()
     for alert in alerts_to_resolve:
+        # Gán resolved_at lên object TRƯỚC khi gửi để tin RECOVERED có ngày giờ
+        # (trước đây gửi trước update → alert.resolved_at=None → hiện "N/A").
+        alert.resolved_at = resolved_at
         _send_recovery_notifications(alert, rule.channels)
     Alert.objects.filter(pk__in=[a.pk for a in alerts_to_resolve]).update(
         is_active=False,
-        resolved_at=timezone.now(),
+        resolved_at=resolved_at,
     )
     logger.info("ALERT resolved: %s — %s", device.name, rule.name)
 
