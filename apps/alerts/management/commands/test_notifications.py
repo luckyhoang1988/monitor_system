@@ -44,10 +44,14 @@ class Command(BaseCommand):
             self.stderr.write(self.style.ERROR(f"Email FAILED: {exc}"))
 
     def _test_telegram(self, fake_alert):
+        # Dùng đúng đường resolve của alert thật: chat_id ưu tiên AlertConfig (UI),
+        # fallback .env — tránh báo "chưa cấu hình" giả khi chỉ set qua UI.
+        from apps.alerts.channels.telegram import _resolve_chat_id
         token   = getattr(settings, "TELEGRAM_BOT_TOKEN", "")
-        chat_id = getattr(settings, "TELEGRAM_CHAT_ID", "")
+        chat_id = _resolve_chat_id()
         if not token or not chat_id:
-            self.stderr.write("TELEGRAM_BOT_TOKEN hoặc TELEGRAM_CHAT_ID chưa cấu hình")
+            self.stderr.write("TELEGRAM_BOT_TOKEN chưa cấu hình, hoặc Telegram đang tắt / "
+                              "chat_id rỗng (kiểm tra /alerts/config/ và .env)")
             return
         try:
             from apps.alerts.channels.telegram import send_telegram_alert
