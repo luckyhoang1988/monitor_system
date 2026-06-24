@@ -1,4 +1,5 @@
 """Gửi alert qua Telegram Bot API."""
+import html
 import logging
 import requests
 from django.conf import settings
@@ -7,6 +8,16 @@ from django.utils import timezone
 logger = logging.getLogger(__name__)
 
 TELEGRAM_API = "https://api.telegram.org/bot{token}/sendMessage"
+
+
+def _esc(value) -> str:
+    """HTML-escape giá trị động (tên thiết bị/AP/rule có thể chứa _ * ` [ <).
+
+    Dùng parse_mode=HTML thay vì Markdown legacy: Markdown vỡ khi text có số
+    ký tự _ hoặc * lẻ (vd 'ACL_Wlan: ... (X2_GiuaX2_ITRoom)') → 400 Bad Request
+    và alert không bao giờ gửi được.
+    """
+    return html.escape(str(value), quote=False)
 
 
 def _resolve_chat_id() -> str:
@@ -38,18 +49,18 @@ def send_telegram_alert(alert) -> None:
     device_url = f"{base}{device_path}" if base else device_path
     alerts_url = f"{base}/alerts/" if base else "/alerts/"
     text = (
-        f"{emoji} *{alert.severity}*\n"
-        f"*Thiết bị:* `{alert.device.name}` ({alert.device.ip_address})\n"
-        f"*Rule:* {alert.rule.name}\n"
-        f"*Chi tiết:* {alert.message}\n"
-        f"*Thời gian:* {triggered_local.strftime('%H:%M:%S %d/%m/%Y')} ({settings.TIME_ZONE})\n"
-        f"*Link:* {device_url}\n"
-        f"*Alerts:* {alerts_url}"
+        f"{emoji} <b>{_esc(alert.severity)}</b>\n"
+        f"<b>Thiết bị:</b> <code>{_esc(alert.device.name)}</code> ({_esc(alert.device.ip_address)})\n"
+        f"<b>Rule:</b> {_esc(alert.rule.name)}\n"
+        f"<b>Chi tiết:</b> {_esc(alert.message)}\n"
+        f"<b>Thời gian:</b> {triggered_local.strftime('%H:%M:%S %d/%m/%Y')} ({_esc(settings.TIME_ZONE)})\n"
+        f"<b>Link:</b> {_esc(device_url)}\n"
+        f"<b>Alerts:</b> {_esc(alerts_url)}"
     )
 
     url  = TELEGRAM_API.format(token=token)
     resp = requests.post(url, json={"chat_id": chat_id, "text": text,
-                                    "parse_mode": "Markdown"}, timeout=10)
+                                    "parse_mode": "HTML"}, timeout=10)
     resp.raise_for_status()
     logger.info("Telegram alert sent (chat_id=%s)", chat_id)
 
@@ -66,14 +77,14 @@ def send_telegram_recovery(alert) -> None:
     base = getattr(settings, "SITE_URL", "") or ""
     device_url = f"{base}{device_path}" if base else device_path
     text = (
-        f"✅ *RECOVERED*\n"
-        f"*Thiết bị:* `{alert.device.name}` ({alert.device.ip_address})\n"
-        f"*Rule:* {alert.rule.name}\n"
-        f"*Recovered lúc:* {resolved_str} ({settings.TIME_ZONE})\n"
-        f"*Link:* {device_url}"
+        f"✅ <b>RECOVERED</b>\n"
+        f"<b>Thiết bị:</b> <code>{_esc(alert.device.name)}</code> ({_esc(alert.device.ip_address)})\n"
+        f"<b>Rule:</b> {_esc(alert.rule.name)}\n"
+        f"<b>Recovered lúc:</b> {resolved_str} ({_esc(settings.TIME_ZONE)})\n"
+        f"<b>Link:</b> {_esc(device_url)}"
     )
     url  = TELEGRAM_API.format(token=token)
     resp = requests.post(url, json={"chat_id": chat_id, "text": text,
-                                    "parse_mode": "Markdown"}, timeout=10)
+                                    "parse_mode": "HTML"}, timeout=10)
     resp.raise_for_status()
     logger.info("Recovery telegram sent (chat_id=%s)", chat_id)
