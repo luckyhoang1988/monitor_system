@@ -70,8 +70,10 @@ class _FakeAlert:
     resolved_at  = None
 
     class device:
-        name       = "TEST-DEVICE"
-        ip_address = "127.0.0.1"
+        name        = "TEST-DEVICE"
+        ip_address  = "127.0.0.1"
+        device_type = "switch"
+        pk          = 0
 
     class rule:
         name = "Test Notification Rule"
