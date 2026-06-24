@@ -38,10 +38,10 @@ class TestDeviceOnlineMetric:
 
     def test_fires_alert_when_ap_offline(self, db):
         ap = ApPingDeviceFactory(last_seen=None)
-        make_ap_offline_rule()
+        rule = make_ap_offline_rule()
         check_device_alerts(ap, since())
-        assert Alert.objects.filter(device=ap, is_active=True).count() == 1
-        alert = Alert.objects.get(device=ap)
+        assert Alert.objects.filter(device=ap, rule=rule, is_active=True).count() == 1
+        alert = Alert.objects.get(device=ap, rule=rule)
         assert "OFFLINE" in alert.message
 
     def test_no_alert_when_ap_online(self, db):
@@ -54,7 +54,7 @@ class TestDeviceOnlineMetric:
         ap = ApPingDeviceFactory(last_seen=None)
         rule = make_ap_offline_rule()
         check_device_alerts(ap, since())
-        assert Alert.objects.filter(device=ap, is_active=True).count() == 1
+        assert Alert.objects.filter(device=ap, rule=rule, is_active=True).count() == 1
         # AP trở lại online → alert tự resolve.
         ap.last_seen = dj_tz.now()
         ap.save(update_fields=["last_seen"])

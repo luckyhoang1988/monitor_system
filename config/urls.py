@@ -1,5 +1,6 @@
 from django.contrib import admin
 from django.urls import path, include
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.routers import DefaultRouter
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView, SpectacularRedocView
 
@@ -27,7 +28,7 @@ urlpatterns = [
     # API cũ cho Metrics (Chart.js)
     path("api/", include("apps.metrics.urls")),
     
-    # OpenAPI 3 Schema & Swagger UI
-    path("api/schema/", SpectacularAPIView.as_view(), name="schema"),
-    path("api/docs/", SpectacularSwaggerView.as_view(url_name="schema"), name="swagger-ui"),
+    # OpenAPI 3 Schema & Swagger UI (yêu cầu đăng nhập)
+    path("api/schema/", SpectacularAPIView.as_view(permission_classes=[IsAuthenticated]), name="schema"),
+    path("api/docs/", SpectacularSwaggerView.as_view(url_name="schema", permission_classes=[IsAuthenticated]), name="swagger-ui"),
 ]

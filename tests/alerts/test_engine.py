@@ -1,6 +1,7 @@
 """Tests cho Alert engine — check_device_alerts, deduplication, notification."""
 import pytest
 from datetime import datetime, timezone, timedelta
+from django.utils import timezone as dj_tz
 from apps.alerts.engine import check_device_alerts, CONDITION_FN
 from apps.alerts.models import AlertRule, Alert, AlertNotification
 from apps.metrics.models import SystemHealth, InterfaceStats
@@ -70,7 +71,7 @@ class TestConditionFunctions:
 class TestCheckDeviceAlerts:
     @pytest.fixture
     def device(self, db):
-        return CiscoSNMPDeviceFactory()
+        return CiscoSNMPDeviceFactory(last_seen=dj_tz.now())
 
     def test_fires_alert_when_cpu_exceeds_threshold(self, device):
         make_rule(metric="cpu_percent", condition="gt", threshold=90.0)
@@ -164,6 +165,32 @@ class TestCheckDeviceAlerts:
         check_device_alerts(device, since())
         assert Alert.objects.filter(device=device, is_active=True).count() == 1
 
+    def test_if_status_missing_data_does_not_fire(self, device):
+        device.uplink_ports = ["Gi0/1"]
+        device.save()
+        Interface.objects.create(
+            device=device, if_index=1, name="Gi0/1", is_uplink=True,
+        )
+        make_rule(name="Uplink Down", metric="if_status",
+                  condition="lt", threshold=1.0)
+        check_device_alerts(device, since())
+        assert Alert.objects.filter(device=device).count() == 0
+
+    def test_wifi_client_count_from_ap_fallback(self, device):
+        from apps.metrics.models import WifiApStats
+
+        device.device_type = "wlan_controller"
+        device.save()
+        ts = now()
+        WifiApStats.objects.create(
+            device=device, timestamp=ts, ap_name="AP-1", ap_mac="aa:bb:cc:dd:ee:01",
+            is_online=True, client_count=42,
+        )
+        make_rule(name="Many clients", metric="wifi_client_count",
+                  condition="gt", threshold=30.0, device_type="wlan_controller")
+        check_device_alerts(device, since())
+        assert Alert.objects.filter(device=device, is_active=True).count() == 1
+
     def test_skips_disabled_rules(self, device):
         make_rule(metric="cpu_percent", condition="gt",
                   threshold=90.0, enabled=False)
@@ -194,7 +221,7 @@ class TestCheckDeviceAlerts:
 class TestNotifications:
     @pytest.fixture
     def device(self, db):
-        return CiscoSNMPDeviceFactory()
+        return CiscoSNMPDeviceFactory(last_seen=dj_tz.now())
 
     def test_email_notification_sent_on_fire(self, mocker, device):
         # Patch tại source module vì engine dùng lazy import bên trong function

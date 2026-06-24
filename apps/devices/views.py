@@ -7,6 +7,7 @@ from django.conf import settings
 from django.db.models import Count
 from django.shortcuts import render, get_object_or_404, redirect
 from django.contrib.auth.decorators import login_required
+from django.views.decorators.http import require_POST
 from django.http import JsonResponse, Http404, HttpResponse, HttpResponseForbidden
 from django.utils import timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -153,6 +154,7 @@ def device_delete(request, pk):
 
 
 @login_required
+@require_POST
 def device_test_connection(request, pk):
     """AJAX endpoint — test SNMP/SSH kết nối và trả về kết quả JSON."""
     if not _can_write(request):
@@ -294,6 +296,7 @@ def device_backups(request, pk):
 
 
 @login_required
+@require_POST
 def device_run_backup(request, pk):
     if not _can_write(request):
         return _forbidden_json()

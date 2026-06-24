@@ -1,14 +1,15 @@
 from django.contrib import admin
+from apps.accounts.admin_mixins import AdminRBACMixin
 from .models import AlertRule, Alert, AlertNotification, AlertConfig
 
 
 @admin.register(AlertConfig)
-class AlertConfigAdmin(admin.ModelAdmin):
+class AlertConfigAdmin(AdminRBACMixin, admin.ModelAdmin):
     list_display = ("telegram_enabled", "telegram_chat_id", "updated_at")
 
 
 @admin.register(AlertRule)
-class AlertRuleAdmin(admin.ModelAdmin):
+class AlertRuleAdmin(AdminRBACMixin, admin.ModelAdmin):
     list_display = ("name", "device_type", "metric", "condition", "threshold", "severity", "enabled")
     list_filter  = ("severity", "device_type", "enabled")
 
@@ -20,7 +21,7 @@ class AlertNotificationInline(admin.TabularInline):
 
 
 @admin.register(Alert)
-class AlertAdmin(admin.ModelAdmin):
+class AlertAdmin(AdminRBACMixin, admin.ModelAdmin):
     list_display   = ("device", "rule", "severity", "metric_value", "is_active", "triggered_at")
     list_filter    = ("severity", "is_active", "device__device_type")
     search_fields  = ("device__name",)

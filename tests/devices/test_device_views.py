@@ -108,12 +108,19 @@ class TestDeviceViews:
         assert not Device.objects.filter(pk=device.pk).exists()
 
     @patch("apps.collectors.factory.CollectorFactory.create")
+    def test_device_test_connection_rejects_get(self, mock_create, logged_in_client):
+        device = CiscoSNMPDeviceFactory()
+        response = logged_in_client.get(reverse("devices:test", args=[device.pk]))
+        assert response.status_code == 405
+        mock_create.assert_not_called()
+
+    @patch("apps.collectors.factory.CollectorFactory.create")
     def test_device_test_connection_success(self, mock_create, logged_in_client):
         device = CiscoSNMPDeviceFactory()
         mock_collector = mock_create.return_value
         mock_collector.test_connection.return_value = "cisco_ios"
 
-        response = logged_in_client.get(reverse("devices:test", args=[device.pk]))
+        response = logged_in_client.post(reverse("devices:test", args=[device.pk]))
         assert response.status_code == 200
         data = response.json()
         assert data["success"] is True
@@ -126,7 +133,7 @@ class TestDeviceViews:
         mock_collector = mock_create.return_value
         mock_collector.test_connection.side_effect = Exception("SNMP Timeout")
 
-        response = logged_in_client.get(reverse("devices:test", args=[device.pk]))
+        response = logged_in_client.post(reverse("devices:test", args=[device.pk]))
         assert response.status_code == 200
         data = response.json()
         assert data["success"] is False

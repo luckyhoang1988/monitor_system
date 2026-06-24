@@ -165,6 +165,11 @@ class SwitchSNMPCollector(BaseCollector):
         if "2011" in sys_oid or "VRP" in sys_desc:
             return "huawei_vrp"
 
+        # HP/H3C Comware — enterprise prefix 25506; dùng chung profile Huawei entity table
+        if "25506" in sys_oid or "Comware" in sys_desc or "H3C" in sys_desc:
+            logger.info("Device %s: detect HP/H3C Comware — dùng profile huawei_vrp", self.device.name)
+            return "huawei_vrp"
+
         # Synology NAS (DSM) — enterprise prefix 6574 (hiếm khi xuất hiện ở sysObjectID
         # vì DSM dùng net-snmp; giữ lại cho trường hợp firmware báo 6574/descr có "synology")
         if "6574" in sys_oid or "synology" in str(sys_desc).lower():

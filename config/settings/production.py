@@ -1,11 +1,16 @@
 from .base import *
 import environ
+from django.core.exceptions import ImproperlyConfigured
 
 env = environ.Env()
 
 DEBUG = False
 # ALLOWED_HOSTS bắt buộc phải set trong .env — không có default để tránh rủi ro bảo mật
 ALLOWED_HOSTS = env.list("ALLOWED_HOSTS")
+
+SECRET_KEY = env("SECRET_KEY")
+if not SECRET_KEY or SECRET_KEY == "django-insecure-change-me-in-production":
+    raise ImproperlyConfigured("SECRET_KEY phải được set trong .env production (không dùng default)")
 
 DATABASES = {
     "default": {

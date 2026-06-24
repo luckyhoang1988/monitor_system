@@ -2,6 +2,7 @@
 import logging
 from datetime import datetime
 from django.conf import settings
+from django.db import transaction
 from django.utils import timezone
 from apps.collectors.base import NormalizedData, InterfaceData
 from apps.devices.models import Device, Interface
@@ -41,15 +42,16 @@ _EXTRA_SKIP_KEYS = ("vms", "wifi_aps", "wifi_clients")
 
 
 def save_metrics(device: Device, data: NormalizedData) -> None:
-    _save_system_health(device, data)
-    if data.interfaces:
-        _save_interface_stats(device, data)
-    if data.extra.get("vms"):
-        _save_vm_stats(device, data)
-    if data.extra.get("wifi_aps"):
-        _save_wifi_ap_stats(device, data)
-    if data.extra.get("wifi_clients"):
-        _save_wifi_client_stats(device, data)
+    with transaction.atomic():
+        _save_system_health(device, data)
+        if data.interfaces:
+            _save_interface_stats(device, data)
+        if data.extra.get("vms"):
+            _save_vm_stats(device, data)
+        if data.extra.get("wifi_aps"):
+            _save_wifi_ap_stats(device, data)
+        if data.extra.get("wifi_clients"):
+            _save_wifi_client_stats(device, data)
 
 
 def _save_system_health(device: Device, data: NormalizedData) -> None:

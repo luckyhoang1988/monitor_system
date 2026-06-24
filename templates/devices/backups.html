@@ -127,6 +127,13 @@
 
 {% block extra_js %}
 <script>
+function getCsrfToken() {
+  const el = document.querySelector('[name=csrfmiddlewaretoken]');
+  if (el) return el.value;
+  const match = document.cookie.match(/(?:^|;\s*)csrftoken=([^;]+)/);
+  return match ? decodeURIComponent(match[1]) : "";
+}
+
 const toast = new bootstrap.Toast(document.getElementById("backupToast"));
 const toastBody = document.getElementById("backupToastBody");
 const toastTitle = document.getElementById("toastTitle");
@@ -145,7 +152,10 @@ if (btnRunBackup) {
     backupLoading.classList.remove("d-none");
     backupsCard.classList.add("d-none");
     
-    fetch("{% url 'devices:run_backup' device.pk %}")
+    fetch("{% url 'devices:run_backup' device.pk %}", {
+      method: "POST",
+      headers: {"X-CSRFToken": getCsrfToken()},
+    })
       .then(r => r.json())
       .then(d => {
         if (d.success) {

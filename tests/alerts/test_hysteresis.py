@@ -1,6 +1,7 @@
 """Tests cho hysteresis, flapping detection và tối ưu N+1 trong alert engine."""
 import pytest
 from datetime import datetime, timezone, timedelta
+from django.utils import timezone as dj_tz
 
 from apps.alerts.engine import (
     check_device_alerts, _decide_transition, _recovered,
@@ -73,7 +74,7 @@ class TestHysteresisDecision:
 class TestHysteresisEndToEnd:
     @pytest.fixture
     def device(self, db):
-        return CiscoSNMPDeviceFactory()
+        return CiscoSNMPDeviceFactory(last_seen=dj_tz.now())
 
     def test_alert_held_inside_hysteresis_band(self, device, settings):
         settings.ALERT_HYSTERESIS_PCT = 0.1
@@ -109,7 +110,7 @@ class TestHysteresisEndToEnd:
 class TestFlapping:
     @pytest.fixture
     def device(self, db):
-        return CiscoSNMPDeviceFactory()
+        return CiscoSNMPDeviceFactory(last_seen=dj_tz.now())
 
     def test_notification_suppressed_when_flapping(self, mocker, device, settings):
         settings.ALERT_FLAP_THRESHOLD = 4

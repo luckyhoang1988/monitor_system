@@ -24,7 +24,7 @@ class TestConfigBackup:
     def test_run_backup_rejected_for_non_ssh(self, logged_in_client):
         # SNMP device is non-SSH
         device = CiscoSNMPDeviceFactory()
-        response = logged_in_client.get(reverse("devices:run_backup", args=[device.pk]))
+        response = logged_in_client.post(reverse("devices:run_backup", args=[device.pk]))
         assert response.status_code == 200
         data = response.json()
         assert data["success"] is False
@@ -37,7 +37,7 @@ class TestConfigBackup:
         mock_run.return_value = "hostname sw-core-01\ninterface Gi0/1\n!"
         mock_save.return_value = "/mock/path/backups/device_1_20260526_224500.txt"
 
-        response = logged_in_client.get(reverse("devices:run_backup", args=[device.pk]))
+        response = logged_in_client.post(reverse("devices:run_backup", args=[device.pk]))
         assert response.status_code == 200
         data = response.json()
         assert data["success"] is True
@@ -52,7 +52,7 @@ class TestConfigBackup:
         device = CiscoSSHDeviceFactory(ssh_username="admin", ssh_password="password")
         mock_run.side_effect = Exception("Authentication failed")
 
-        response = logged_in_client.get(reverse("devices:run_backup", args=[device.pk]))
+        response = logged_in_client.post(reverse("devices:run_backup", args=[device.pk]))
         assert response.status_code == 200
         data = response.json()
         assert data["success"] is False

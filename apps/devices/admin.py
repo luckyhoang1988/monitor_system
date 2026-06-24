@@ -1,4 +1,5 @@
 from django.contrib import admin
+from apps.accounts.admin_mixins import AdminRBACMixin
 from .models import Device, Interface
 
 
@@ -10,7 +11,7 @@ class InterfaceInline(admin.TabularInline):
 
 
 @admin.register(Device)
-class DeviceAdmin(admin.ModelAdmin):
+class DeviceAdmin(AdminRBACMixin, admin.ModelAdmin):
     list_display  = ("name", "device_type", "ip_address", "vendor", "os_family", "enabled", "last_seen")
     list_filter   = ("device_type", "vendor", "enabled")
     search_fields = ("name", "ip_address", "location")

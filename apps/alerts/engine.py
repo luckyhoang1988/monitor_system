@@ -2,6 +2,7 @@
 import logging
 from datetime import timedelta
 from django.conf import settings
+from django.db import transaction
 from django.utils import timezone
 from apps.devices.models import Device
 from .models import AlertRule, Alert, AlertNotification
@@ -100,7 +101,9 @@ def _check_if_status(device: Device, since) -> float | None:
                  .order_by("-timestamp")
                  .values("status")[:1])
     for uplink in uplinks.annotate(latest_status=Subquery(latest_sq)):
-        if uplink.latest_status is not None and uplink.latest_status != "up":
+        if uplink.latest_status is None:
+            return None
+        if uplink.latest_status != "up":
             return 0.0
     return 1.0
 
@@ -345,17 +348,111 @@ def _device_online(device: Device) -> float:
     return 1.0 if device.is_online else 0.0
 
 
+def _sustained_device_online(device: Device, window_since) -> float | None:
+    """Yêu cầu trạng thái online/offline duy trì trong cửa sổ duration_min."""
+    if not device.last_seen or device.last_seen < window_since:
+        return 0.0
+    if device.is_online:
+        return 1.0
+    return None
+
+
+def _wifi_client_count_at_ts(device: Device, ts) -> float:
+    """Tổng client tại 1 snapshot — fallback sum AP khi không có bảng STA."""
+    from django.db.models import Sum
+    from apps.metrics.models import WifiClientStats, WifiApStats
+
+    cl_count = WifiClientStats.objects.filter(device=device, timestamp=ts).count()
+    if cl_count > 0:
+        return float(cl_count)
+    total = (
+        WifiApStats.objects.filter(device=device, timestamp=ts)
+        .aggregate(s=Sum("client_count"))["s"]
+    )
+    return float(total or 0)
+
+
 def _wifi_client_count(device: Device, since) -> float | None:
     """Tổng số client WiFi ở snapshot mới nhất của WLAN controller."""
-    from apps.metrics.models import WifiClientStats
+    from apps.metrics.models import WifiClientStats, WifiApStats
+
     latest_ts = (WifiClientStats.objects
                  .filter(device=device, timestamp__gte=since)
                  .order_by("-timestamp")
                  .values_list("timestamp", flat=True)
                  .first())
     if latest_ts is None:
+        latest_ts = (WifiApStats.objects
+                     .filter(device=device, timestamp__gte=since)
+                     .order_by("-timestamp")
+                     .values_list("timestamp", flat=True)
+                     .first())
+    if latest_ts is None:
         return None
-    return float(WifiClientStats.objects.filter(device=device, timestamp=latest_ts).count())
+    return _wifi_client_count_at_ts(device, latest_ts)
+
+
+def _sustained_wifi_client_count(device: Device, rule: AlertRule, window_since) -> float | None:
+    from apps.metrics.models import WifiApStats
+
+    timestamps = list(
+        WifiApStats.objects.filter(device=device, timestamp__gte=window_since)
+        .order_by("timestamp")
+        .values_list("timestamp", flat=True)
+        .distinct()
+    )
+    if not timestamps:
+        return None
+
+    values = [_wifi_client_count_at_ts(device, ts) for ts in timestamps]
+    latest = float(values[-1])
+    threshold = float(rule.threshold)
+    cond = rule.condition
+
+    if cond in ("gt", "gte"):
+        ok = (min(values) > threshold) if cond == "gt" else (min(values) >= threshold)
+        return latest if ok else None
+    if cond in ("lt", "lte"):
+        ok = (max(values) < threshold) if cond == "lt" else (max(values) <= threshold)
+        return latest if ok else None
+
+    cond_fn = CONDITION_FN.get(cond)
+    return latest if (cond_fn and cond_fn(latest, threshold)) else None
+
+
+def _wifi_ap_offline_at_ts(device: Device, ts) -> float:
+    from apps.metrics.models import WifiApStats
+    return float(WifiApStats.objects.filter(
+        device=device, timestamp=ts, is_online=False,
+    ).count())
+
+
+def _sustained_wifi_ap_offline_count(device: Device, rule: AlertRule, window_since) -> float | None:
+    from apps.metrics.models import WifiApStats
+
+    timestamps = list(
+        WifiApStats.objects.filter(device=device, timestamp__gte=window_since)
+        .order_by("timestamp")
+        .values_list("timestamp", flat=True)
+        .distinct()
+    )
+    if not timestamps:
+        return None
+
+    values = [_wifi_ap_offline_at_ts(device, ts) for ts in timestamps]
+    latest = float(values[-1])
+    threshold = float(rule.threshold)
+    cond = rule.condition
+
+    if cond in ("gt", "gte"):
+        ok = (min(values) > threshold) if cond == "gt" else (min(values) >= threshold)
+        return latest if ok else None
+    if cond in ("lt", "lte"):
+        ok = (max(values) < threshold) if cond == "lt" else (max(values) <= threshold)
+        return latest if ok else None
+
+    cond_fn = CONDITION_FN.get(cond)
+    return latest if (cond_fn and cond_fn(latest, threshold)) else None
 
 
 def _wifi_ap_offline_count(device: Device, since) -> float | None:
@@ -455,6 +552,12 @@ def check_device_alerts(device: Device, since) -> None:
                 value = _sustained_fw_session_count(device, rule, window_since)
             elif rule.metric in ("vm_count_running", "vm_repl_unhealthy"):
                 value = _sustained_vm_metric(device, rule, window_since)
+            elif rule.metric == "device_online":
+                value = _sustained_device_online(device, window_since)
+            elif rule.metric == "wifi_client_count":
+                value = _sustained_wifi_client_count(device, rule, window_since)
+            elif rule.metric == "wifi_ap_offline":
+                value = _sustained_wifi_ap_offline_count(device, rule, window_since)
             else:
                 value = getter(device, since)
         else:
@@ -473,11 +576,6 @@ def check_device_alerts(device: Device, since) -> None:
 
 
 def _fire_alert(device: Device, rule: AlertRule, value: float) -> None:
-    # Deduplication: không tạo lại nếu alert đang active
-    existing = Alert.objects.filter(device=device, rule=rule, is_active=True).first()
-    if existing:
-        return  # đã có alert, không gửi lại
-
     def _fmt_metric(metric: str, v: float) -> str:
         if metric in ("cpu_percent", "mem_percent"):
             return f"{v:.1f}%"
@@ -506,14 +604,18 @@ def _fire_alert(device: Device, rule: AlertRule, value: float) -> None:
         message = (f"{device.name}: {rule.metric} = {metric_value_str} "
                    f"(ngưỡng {rule.condition} {threshold_str})")
 
-    alert = Alert.objects.create(
-        device=device,
-        rule=rule,
-        severity=rule.severity,
-        message=message,
-        metric_value=float(value),
-        is_active=True,
-    )
+    with transaction.atomic():
+        Device.objects.select_for_update().filter(pk=device.pk).first()
+        if Alert.objects.filter(device=device, rule=rule, is_active=True).exists():
+            return
+        alert = Alert.objects.create(
+            device=device,
+            rule=rule,
+            severity=rule.severity,
+            message=message,
+            metric_value=float(value),
+            is_active=True,
+        )
     if _is_flapping(device, rule):
         logger.warning("ALERT flapping — bỏ qua notification: %s", alert.message)
     else:

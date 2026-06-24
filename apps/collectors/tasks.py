@@ -59,6 +59,8 @@ def _poll_device_once(device_id: int) -> None:
         # ICMP fail ⇒ thiết bị mạng chắc chắn offline (online = snmp_valid AND icmp_ok).
         # Bỏ qua collect SNMP đắt đỏ để 1 thiết bị chết không treo worker tới ~240s.
         if not icmp_ok:
+            device.last_seen = None
+            device.save(update_fields=["last_seen"])
             logger.info(
                 "Polled %s — online=False (icmp down, bỏ qua SNMP collect)",
                 device.name,

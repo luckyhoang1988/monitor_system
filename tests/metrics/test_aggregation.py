@@ -233,6 +233,33 @@ class TestCleanupRolledUpRaw:
         cleanup_rolled_up_raw_data()
         assert SystemHealth.objects.filter(device=device).count() == 1
 
+    def test_does_not_delete_unrolled_device_raw(self, device):
+        """Raw của thiết bị chưa rollup không bị xóa khi thiết bị khác đã có hourly."""
+        from tests.conftest import CiscoSNMPDeviceFactory
+
+        other = CiscoSNMPDeviceFactory(name="switch-other")
+        old_ts = _hours_ago(RAW_RETENTION_HOURS + 1)
+
+        SystemHealth.objects.create(
+            device=device, timestamp=old_ts,
+            cpu_percent=40.0, mem_percent=50.0,
+        )
+        SystemHealth.objects.create(
+            device=other, timestamp=old_ts,
+            cpu_percent=60.0, mem_percent=70.0,
+        )
+        SystemHealthHourly.objects.create(
+            device=other,
+            hour=old_ts.replace(minute=0, second=0, microsecond=0),
+            cpu_avg=60.0, cpu_max=60.0,
+            mem_avg=70.0, mem_max=70.0, sample_count=1,
+        )
+
+        del_sh, _ = cleanup_rolled_up_raw_data()
+        assert del_sh == 1
+        assert SystemHealth.objects.filter(device=other).count() == 0
+        assert SystemHealth.objects.filter(device=device).count() == 1
+
 
 @pytest.mark.django_db
 class TestAPISourceSelection:

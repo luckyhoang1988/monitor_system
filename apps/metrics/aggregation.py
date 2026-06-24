@@ -222,6 +222,20 @@ def rollup_interface_stats_daily() -> int:
     return len(objs)
 
 
+def _delete_raw_for_rolled_hours(model, rolled_pairs: set, cutoff, id_field: str) -> int:
+    """Xóa raw rows cũ hơn cutoff CHỈ khi (entity_id, hour) đã có hourly rollup."""
+    if not rolled_pairs:
+        return 0
+    from django.db.models import Q
+
+    q = Q()
+    for entity_id, hour in rolled_pairs:
+        hour_end = hour + timedelta(hours=1)
+        q |= Q(**{id_field: entity_id, "timestamp__gte": hour, "timestamp__lt": hour_end})
+    del_count, _ = model.objects.filter(timestamp__lt=cutoff).filter(q).delete()
+    return del_count
+
+
 def cleanup_rolled_up_raw_data() -> tuple[int, int]:
     """Xóa raw data đã được rollup (cũ hơn RAW_RETENTION_HOURS).
 
@@ -232,29 +246,23 @@ def cleanup_rolled_up_raw_data() -> tuple[int, int]:
 
     cutoff = timezone.now() - timedelta(hours=RAW_RETENTION_HOURS)
 
-    # Chỉ xóa raw data mà giờ tương ứng đã có hourly rollup
     rolled_hours_health = set(
         SystemHealthHourly.objects
         .filter(hour__lt=cutoff)
         .values_list("device_id", "hour")
     )
-
-    deleted_sh = 0
-    if rolled_hours_health:
-        # Xóa raw SystemHealth cũ hơn cutoff (đã có hourly backup)
-        del_count, _ = SystemHealth.objects.filter(timestamp__lt=cutoff).delete()
-        deleted_sh = del_count
+    deleted_sh = _delete_raw_for_rolled_hours(
+        SystemHealth, rolled_hours_health, cutoff, "device_id",
+    )
 
     rolled_hours_iface = set(
         InterfaceStatsHourly.objects
         .filter(hour__lt=cutoff)
         .values_list("interface_id", "hour")
     )
-
-    deleted_if = 0
-    if rolled_hours_iface:
-        del_count, _ = InterfaceStats.objects.filter(timestamp__lt=cutoff).delete()
-        deleted_if = del_count
+    deleted_if = _delete_raw_for_rolled_hours(
+        InterfaceStats, rolled_hours_iface, cutoff, "interface_id",
+    )
 
     logger.info(
         "Cleanup rolled-up raw data: deleted %d SystemHealth, %d InterfaceStats (cũ hơn %dh)",
