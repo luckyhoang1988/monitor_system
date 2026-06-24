@@ -2,6 +2,7 @@ from collections import defaultdict
 from django.shortcuts import render, get_object_or_404
 from django.contrib.auth.decorators import login_required
 from django.http import JsonResponse
+from django.utils import timezone
 from apps.devices.models import Device
 from apps.alerts.models import Alert
 
@@ -97,6 +98,7 @@ def index(request):
     online_devices = [d for d in all_devices if d.is_online]
     offline_devices = [d for d in all_devices if not d.is_online]
     online_count = len(online_devices)
+    latest_seen = max((d.last_seen for d in all_devices if d.last_seen), default=None)
     offline_notice_rows = [
         {
             "name": d.name,
@@ -131,8 +133,27 @@ def index(request):
         "offline_count":  len(offline_devices),
         "offline_notice_rows": offline_notice_rows,
         "alert_count":    len(active_alerts),
+        # Mốc dữ liệu mới nhất lúc render (epoch) — baseline để JS tự đồng bộ reload.
+        "poll_fresh":     latest_seen.timestamp() if latest_seen else 0,
     }
     return render(request, "dashboard/index.html", context)
+
+
+@login_required
+def poll_status(request):
+    """Mốc dữ liệu mới nhất của fleet (max last_seen, epoch) cho dashboard tự reload.
+
+    Frontend theo dõi giá trị này: mỗi lần tiến lên = có thêm thiết bị vừa poll
+    xong; khi đứng yên 10s (cả fleet đã poll xong) → reload. Thay timer 120s cố
+    định vốn lệch pha với chu kỳ poll.
+    """
+    from django.db.models import Max
+    latest = (Device.objects.filter(enabled=True, last_seen__isnull=False)
+              .aggregate(m=Max("last_seen"))["m"])
+    return JsonResponse({
+        "fresh": latest.timestamp() if latest else 0,
+        "now": timezone.now().timestamp(),
+    })
 
 
 @login_required

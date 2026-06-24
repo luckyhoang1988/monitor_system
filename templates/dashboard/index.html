@@ -683,7 +683,33 @@
   });
 })();
 
-// Tự reload dashboard mỗi 120s để cảnh báo/offline đã hết tự biến mất (không cần F5).
-setTimeout(function () { location.reload(); }, 120000);
+// Reload đồng bộ với chu kỳ poll: theo dõi mốc dữ liệu mới nhất (max last_seen).
+// Mỗi lần mốc tiến lên = có thiết bị vừa poll xong → dời timer; khi đứng yên 10s
+// (cả fleet đã poll xong) thì reload. Thay timer 120s cố định vốn lệch pha poll.
+(function () {
+  var QUIET_MS    = 10000;   // 10s yên lặng sau lần poll cuối → reload
+  var POLL_MS     = 5000;    // tần suất hỏi trạng thái
+  var FALLBACK_MS = 150000;  // trần an toàn: luôn reload nếu mốc không đổi (fleet offline)
+  var STATUS_URL  = "{% url 'dashboard:poll_status' %}";
+  var lastFresh   = {{ poll_fresh }};   // baseline lúc render trang
+  var reloadTimer = null;
+
+  // Luôn reload sau FALLBACK_MS để trang không kẹt vĩnh viễn khi không có dữ liệu mới.
+  setTimeout(function () { location.reload(); }, FALLBACK_MS);
+
+  function tick() {
+    fetch(STATUS_URL, { cache: "no-store" })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (d && d.fresh && d.fresh > lastFresh) {
+          lastFresh = d.fresh;                 // có dữ liệu mới hơn → dời mốc reload
+          if (reloadTimer) clearTimeout(reloadTimer);
+          reloadTimer = setTimeout(function () { location.reload(); }, QUIET_MS);
+        }
+      })
+      .catch(function () { /* lỗi mạng tạm thời — fallback vẫn đảm bảo reload */ });
+  }
+  setInterval(tick, POLL_MS);
+})();
 </script>
 {% endblock %}
