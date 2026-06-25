@@ -640,20 +640,14 @@
   });
 })();
 
-// Realtime: ưu tiên SSE push — cập nhật badge trạng thái thiết bị TẠI CHỖ, không
-// reload. Vẫn giữ 1 lần reload an toàn định kỳ (FALLBACK_MS) để panel cảnh báo /
-// số đếm / thiết bị mới không bị cũ. Nếu SSE hỏng → fallback về poll-status +
-// quiet-reload như cũ (không regression).
+// Realtime: SSE push cập nhật badge On/Off tại chỗ; panel Alerts/đếm do poller
+// alerts_summary ~25s (và debounce sau mỗi SSE event). Nếu SSE hỏng → fallback
+// poll-status + quiet-reload sau khi fleet poll xong.
 (function () {
   var QUIET_MS    = 10000;   // 10s yên lặng sau lần poll cuối → reload (chỉ ở fallback)
   var POLL_MS     = 5000;    // tần suất hỏi trạng thái (chỉ ở fallback)
-  var FALLBACK_MS = 150000;  // refresh toàn trang định kỳ (làm tươi panel/đếm)
   var STATUS_URL  = "{% url 'dashboard:poll_status' %}";
   var lastFresh   = {{ poll_fresh|unlocalize }};   // baseline lúc render trang (unlocalize: tránh dấu phẩy thập phân locale vi làm vỡ JS)
-
-  // Refresh toàn trang định kỳ: SSE chỉ cập nhật badge, phần còn lại (alerts,
-  // offline notice, số đếm, thiết bị mới) được làm tươi nhẹ nhàng mỗi 150s.
-  setTimeout(function () { location.reload(); }, FALLBACK_MS);
 
   var fallbackStarted = false;
   function startPollingFallback() {
@@ -670,7 +664,7 @@
             reloadTimer = setTimeout(function () { location.reload(); }, QUIET_MS);
           }
         })
-        .catch(function () { /* lỗi mạng tạm thời — FALLBACK_MS vẫn đảm bảo reload */ });
+        .catch(function () { /* lỗi mạng tạm thời — thử lại ở lần poll sau */ });
     }
     setInterval(tick, POLL_MS);
   }

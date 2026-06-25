@@ -27,7 +27,7 @@ Bạn là full-stack developer cho dashboard giám sát của dự án này.
 ## Cơ chế cập nhật realtime (đừng phá)
 - **SSE** đẩy badge On/Off + thẻ AP (payload WLAN controller nhúng ap_total/online/offline) tức thì.
 - **Poller `alerts_summary` ~25s** cập nhật panel Active Alerts + card "Thiết bị đang Offline" + thẻ Offline/Alerts/AP tại chỗ (alert sinh từ task eval, KHÔNG qua SSE per-device).
-- **Reload an toàn 150s** + poll-status là lưới đỡ cuối khi SSE hỏng.
+- **poll-status** là lưới đỡ khi SSE hỏng (quiet-reload sau khi fleet poll xong).
 - Partial dùng chung index + endpoint: `_active_alerts_body.html`, `_offline_notice.html` → markup không lệch. Helper chung `_dashboard_counts()` → 1 nguồn số liệu.
 
 ## ⚠️ GOTCHAS bắt buộc nhớ (đã trả giá)
