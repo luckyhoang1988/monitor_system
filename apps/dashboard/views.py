@@ -1,6 +1,7 @@
 from collections import defaultdict
 from django.shortcuts import render, get_object_or_404
 from django.contrib.auth.decorators import login_required
+from django.views.decorators.cache import never_cache
 from django.http import JsonResponse
 from django.utils import timezone
 from apps.devices.models import Device
@@ -106,6 +107,7 @@ def _dashboard_counts(all_devices):
     }
 
 
+@never_cache  # luôn lấy HTML mới — tránh trình duyệt/bfcache hiển thị dashboard cũ
 @login_required
 def index(request):
     # 1 query instead of 4 separate device_type queries

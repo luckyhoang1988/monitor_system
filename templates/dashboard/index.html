@@ -689,9 +689,15 @@
     setInterval(tick, POLL_MS);
   }
 
+  function onFleetEvent(payload) {
+    Realtime.updateFleetRow(payload);
+    // Thiết bị vừa poll (vd WLAN controller) → làm tươi panel Alerts + thẻ AP gần
+    // như tức thì, không chờ vòng poll 25s. AP off sẽ hiện ngay khi AC poll xong.
+    if (window.dashRefreshAlerts) window.dashRefreshAlerts();
+  }
   Realtime.connectSSE(
     "{% url 'realtime:fleet_stream' %}",
-    Realtime.updateFleetRow,
+    onFleetEvent,
     startPollingFallback
   );
 })();
@@ -735,6 +741,15 @@
       })
       .catch(function () { /* lỗi tạm thời — lần poll sau thử lại */ });
   }
+
+  // Cho SSE kích hoạt làm tươi sớm (debounce 1.5s) khi có thiết bị vừa poll.
+  var pending = null;
+  window.dashRefreshAlerts = function () {
+    if (pending) return;
+    pending = setTimeout(function () { pending = null; refreshAlerts(); }, 1500);
+  };
+  // Trang khôi phục từ bfcache (back/forward) → làm tươi ngay, tránh hiển thị cũ.
+  window.addEventListener("pageshow", function (e) { if (e.persisted) refreshAlerts(); });
 
   refreshAlerts();
   setInterval(refreshAlerts, 25000);
