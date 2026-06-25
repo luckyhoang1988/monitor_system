@@ -29,43 +29,41 @@ def health_check(request):
                         status=200 if status == "ok" else 503)
 
 
-@login_required
-def index(request):
-    # 1 query instead of 4 separate device_type queries
-    all_devices = list(Device.objects.filter(enabled=True).order_by("device_type", "name"))
-    group_labels = {
-        "switch": "Switch",
-        "router": "Router",
-        "firewall": "Firewall",
-        "nas": "NAS",
-        "hyperv": "HyperV",
-        "wlan_controller": "WLAN Controller",
-        "ap": "Access Point",
-    }
-    device_type_meta = [
-        ("switch", "Switch", "bi-hdd-network", "text-primary", "#2563eb"),
-        ("router", "Router", "bi-router", "text-warning", "#d97706"),
-        ("firewall", "Firewall", "bi-shield-fill-check", "text-danger", "#dc2626"),
-        ("nas", "NAS", "bi-hdd-stack", "text-success", "#16a34a"),
-        ("hyperv", "HyperV Host", "bi-server", "text-info", "#0891b2"),
-        ("wlan_controller", "WLAN AC", "bi-broadcast-pin", "text-primary", "#6366f1"),
-        ("ap", "Access Point", "bi-wifi", "text-success", "#0d9488"),
-    ]
+GROUP_LABELS = {
+    "switch": "Switch",
+    "router": "Router",
+    "firewall": "Firewall",
+    "nas": "NAS",
+    "hyperv": "HyperV",
+    "wlan_controller": "WLAN Controller",
+    "ap": "Access Point",
+}
+
+DEVICE_TYPE_META = [
+    ("switch", "Switch", "bi-hdd-network", "text-primary", "#2563eb"),
+    ("router", "Router", "bi-router", "text-warning", "#d97706"),
+    ("firewall", "Firewall", "bi-shield-fill-check", "text-danger", "#dc2626"),
+    ("nas", "NAS", "bi-hdd-stack", "text-success", "#16a34a"),
+    ("hyperv", "HyperV Host", "bi-server", "text-info", "#0891b2"),
+    ("wlan_controller", "WLAN AC", "bi-broadcast-pin", "text-primary", "#6366f1"),
+    ("ap", "Access Point", "bi-wifi", "text-success", "#0d9488"),
+]
+
+
+def _dashboard_counts(all_devices):
+    """device_type_stats + offline_count + active_alerts — dùng CHUNG cho index()
+    (render) và alerts_summary() (AJAX cập nhật realtime, không reload). Để 1 nguồn
+    sự thật, tránh lệch số liệu giữa lần render và lần cập nhật.
+    """
+    from apps.metrics.models import WifiApStats
     by_type: dict[str, list] = defaultdict(list)
     for d in all_devices:
         by_type[d.device_type].append(d)
-    switches  = by_type["switch"]
-    routers   = by_type["router"]
-    firewalls = by_type["firewall"]
-    nas_list  = by_type["nas"]
-    hyperv    = by_type["hyperv"]
-    wlan_controllers = by_type["wlan_controller"]
 
-    # AP không đăng ký như Device — chúng nằm trong WifiApStats dưới AC. Gộp snapshot
-    # mới nhất của từng wlan_controller để card "Access Point" phản ánh AP thật.
-    from apps.metrics.models import WifiApStats
+    # AP không đăng ký như Device — nằm trong WifiApStats dưới AC. Gộp snapshot mới
+    # nhất của từng wlan_controller để card "Access Point" phản ánh AP thật.
     ap_total = ap_online = 0
-    for ac in wlan_controllers:
+    for ac in by_type["wlan_controller"]:
         latest_ts = (WifiApStats.objects
                      .filter(device=ac)
                      .order_by("-timestamp")
@@ -78,7 +76,7 @@ def index(request):
         ap_online += snapshot.filter(is_online=True).count()
 
     device_type_stats = []
-    for dtype, label, icon, color_class, color in device_type_meta:
+    for dtype, label, icon, color_class, color in DEVICE_TYPE_META:
         if dtype == "ap":
             total, online = ap_total, ap_online
         else:
@@ -95,21 +93,44 @@ def index(request):
             "online": online,
             "offline": total - online,
         })
-    online_devices = [d for d in all_devices if d.is_online]
+
+    active_alerts = list(Alert.objects.filter(is_active=True)
+                         .select_related("device", "rule")
+                         .order_by("-triggered_at")[:20])
+    return {
+        "by_type": by_type,
+        "device_type_stats": device_type_stats,
+        "offline_count": sum(1 for d in all_devices if not d.is_online),
+        "active_alerts": active_alerts,
+        "alert_count": len(active_alerts),
+    }
+
+
+@login_required
+def index(request):
+    # 1 query instead of 4 separate device_type queries
+    all_devices = list(Device.objects.filter(enabled=True).order_by("device_type", "name"))
+    counts = _dashboard_counts(all_devices)
+    by_type = counts["by_type"]
+    switches  = by_type["switch"]
+    routers   = by_type["router"]
+    firewalls = by_type["firewall"]
+    nas_list  = by_type["nas"]
+    hyperv    = by_type["hyperv"]
+    wlan_controllers = by_type["wlan_controller"]
+
     offline_devices = [d for d in all_devices if not d.is_online]
-    online_count = len(online_devices)
+    online_count = len(all_devices) - len(offline_devices)
     latest_seen = max((d.last_seen for d in all_devices if d.last_seen), default=None)
     offline_notice_rows = [
         {
             "name": d.name,
             "ip_address": d.ip_address,
-            "group_label": group_labels.get(d.device_type, d.device_type.title()),
+            "group_label": GROUP_LABELS.get(d.device_type, d.device_type.title()),
         }
         for d in offline_devices
     ]
-    active_alerts = list(Alert.objects.filter(is_active=True)
-                         .select_related("device", "rule")
-                         .order_by("-triggered_at")[:20])
+
     def _offline(devices):
         return sum(1 for d in devices if not d.is_online)
 
@@ -126,17 +147,45 @@ def index(request):
         "nas_off":        _offline(nas_list),
         "hyperv_off":     _offline(hyperv),
         "wlan_off":       _offline(wlan_controllers),
-        "active_alerts":  active_alerts,
-        "device_type_stats": device_type_stats,
+        "active_alerts":  counts["active_alerts"],
+        "device_type_stats": counts["device_type_stats"],
         "total_devices":  len(all_devices),
         "online_count":   online_count,
-        "offline_count":  len(offline_devices),
+        "offline_count":  counts["offline_count"],
         "offline_notice_rows": offline_notice_rows,
-        "alert_count":    len(active_alerts),
+        "alert_count":    counts["alert_count"],
         # Mốc dữ liệu mới nhất lúc render (epoch) — baseline để JS tự đồng bộ reload.
         "poll_fresh":     latest_seen.timestamp() if latest_seen else 0,
     }
     return render(request, "dashboard/index.html", context)
+
+
+@login_required
+def alerts_summary(request):
+    """JSON tóm tắt cảnh báo + số đếm cho dashboard cập nhật TẠI CHỖ (không reload).
+
+    Alert do task eval (120s) sinh ra, KHÔNG đi qua SSE per-device → dashboard poll
+    nhẹ endpoint này (~25s). Panel Active Alerts render qua cùng partial với index
+    nên markup không lệch.
+    """
+    from django.template.loader import render_to_string
+    all_devices = list(Device.objects.filter(enabled=True))
+    counts = _dashboard_counts(all_devices)
+    alerts_html = render_to_string(
+        "dashboard/_active_alerts_body.html",
+        {"active_alerts": counts["active_alerts"]},
+        request=request,
+    )
+    return JsonResponse({
+        "alert_count":   counts["alert_count"],
+        "offline_count": counts["offline_count"],
+        "stats": [
+            {"type": s["type"], "total": s["total"],
+             "online": s["online"], "offline": s["offline"]}
+            for s in counts["device_type_stats"]
+        ],
+        "alerts_html": alerts_html,
+    })
 
 
 @login_required

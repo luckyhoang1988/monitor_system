@@ -241,12 +241,12 @@
   <div class="row g-2 dashboard-stats">
     {% for stat in device_type_stats %}
     <div class="col-6 col-md-4 col-xl-2">
-      <div class="stat-card" style="--c: {{ stat.color }}; --c-soft: {{ stat.color }}1f;">
+      <div class="stat-card" data-stat-type="{{ stat.type }}" style="--c: {{ stat.color }}; --c-soft: {{ stat.color }}1f;">
         <div class="stat-icon"><i class="bi {{ stat.icon }}"></i></div>
         <div>
           <div class="text-muted small fw-semibold">{{ stat.label }}</div>
-          <div class="fs-3 fw-bold lh-1">{{ stat.total }}</div>
-          <div class="small mt-1">
+          <div class="fs-3 fw-bold lh-1 js-stat-total">{{ stat.total }}</div>
+          <div class="small mt-1 js-stat-line">
             <span class="text-success fw-bold">{{ stat.online }} on</span>
             {% if stat.offline %}
               <span class="text-muted"> · </span>
@@ -258,12 +258,12 @@
     </div>
     {% endfor %}
     <div class="col-6 col-md-4 col-xl-2">
-      <div class="stat-card {% if offline_count %}stat-offline-alarm{% endif %}"
+      <div class="stat-card {% if offline_count %}stat-offline-alarm{% endif %}" id="jsOfflineCard"
            style="--c: #dc2626; --c-soft: #dc26261f;">
         <div class="stat-icon"><i class="bi bi-x-circle-fill"></i></div>
         <div>
           <div class="text-muted small fw-semibold">Offline</div>
-          <div class="fs-3 fw-bold lh-1 {% if offline_count %}text-danger{% endif %}">{{ offline_count }}</div>
+          <div class="fs-3 fw-bold lh-1 {% if offline_count %}text-danger{% endif %}" id="jsOfflineCount">{{ offline_count }}</div>
         </div>
       </div>
     </div>
@@ -272,7 +272,7 @@
         <div class="stat-icon"><i class="bi bi-bell{% if alert_count %}-fill{% endif %}"></i></div>
         <div>
           <div class="text-muted small fw-semibold">Alerts</div>
-          <div class="fs-3 fw-bold lh-1 {% if alert_count %}text-danger{% endif %}">{{ alert_count }}</div>
+          <div class="fs-3 fw-bold lh-1 {% if alert_count %}text-danger{% endif %}" id="jsAlertStat">{{ alert_count }}</div>
         </div>
       </div>
     </div>
@@ -613,43 +613,12 @@
         <span class="panel-title">
           <span class="icon-chip"><i class="bi bi-bell-fill"></i></span>
           Active Alerts
-          {% if alert_count %}<span class="panel-count">{{ alert_count }}</span>{% endif %}
+          <span class="panel-count" id="jsAlertPanelCount"{% if not alert_count %} style="display:none"{% endif %}>{{ alert_count }}</span>
         </span>
         <a href="{% url 'alerts:list' %}" class="btn btn-sm btn-outline-secondary py-0 px-2">Xem tất cả</a>
       </div>
-      <div class="alert-scroll">
-        {% if active_alerts %}
-        <table class="table table-hover table-compact mb-0">
-          <thead class="table-light">
-            <tr>
-              <th class="ps-2">Mức</th>
-              <th>Thiết bị</th>
-              <th>Rule</th>
-              <th>Giá trị</th>
-              <th>Thời gian</th>
-            </tr>
-          </thead>
-          <tbody>
-            {% for alert in active_alerts %}
-            <tr>
-              <td class="ps-2">
-                <span class="badge {% if alert.severity == 'CRITICAL' %}badge-critical{% else %}badge-warning{% endif %} rounded-pill px-2">
-                  {{ alert.severity }}
-                </span>
-              </td>
-              <td class="fw-medium">{{ alert.device.name }}</td>
-              <td class="text-muted">{{ alert.rule.name }}</td>
-              <td class="font-monospace">{{ alert.metric_value|floatformat:1 }}</td>
-              <td class="text-muted small">{{ alert.triggered_at|date:"d/m H:i" }}</td>
-            </tr>
-            {% endfor %}
-          </tbody>
-        </table>
-        {% else %}
-          <div class="text-center text-muted py-2 small">
-            <i class="bi bi-check-circle text-success me-1"></i>Không có alert active.
-          </div>
-        {% endif %}
+      <div class="alert-scroll" id="alertScroll">
+        {% include "dashboard/_active_alerts_body.html" %}
       </div>
     </div>
   </div>
@@ -725,6 +694,50 @@
     Realtime.updateFleetRow,
     startPollingFallback
   );
+})();
+
+// Cảnh báo realtime: cập nhật panel Active Alerts + thẻ Offline/Alerts/AP TẠI CHỖ.
+// Alert sinh từ task eval (120s), KHÔNG đi qua SSE per-device → poll nhẹ JSON ~25s.
+(function () {
+  var URL = "{% url 'dashboard:alerts_summary' %}";
+  function setText(id, v) { var e = document.getElementById(id); if (e) e.textContent = v; }
+  function toggle(id, cls, on) { var e = document.getElementById(id); if (e) e.classList.toggle(cls, !!on); }
+
+  function refreshAlerts() {
+    fetch(URL, { cache: "no-store" })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        // Panel Active Alerts (render từ cùng partial server-side)
+        var scroll = document.getElementById("alertScroll");
+        if (scroll && typeof d.alerts_html === "string") scroll.innerHTML = d.alerts_html;
+        var pc = document.getElementById("jsAlertPanelCount");
+        if (pc) { pc.textContent = d.alert_count; pc.style.display = d.alert_count ? "" : "none"; }
+        // Thẻ Alerts + Offline
+        setText("jsAlertStat", d.alert_count);
+        toggle("jsAlertStat", "text-danger", d.alert_count);
+        setText("jsOfflineCount", d.offline_count);
+        toggle("jsOfflineCount", "text-danger", d.offline_count);
+        toggle("jsOfflineCard", "stat-offline-alarm", d.offline_count);
+        // Thẻ per-type (online/off) — gồm cả Access Point
+        (d.stats || []).forEach(function (s) {
+          var card = document.querySelector('.stat-card[data-stat-type="' + s.type + '"]');
+          if (!card) return;
+          var total = card.querySelector(".js-stat-total");
+          if (total) total.textContent = s.total;
+          var line = card.querySelector(".js-stat-line");
+          if (line) {
+            line.innerHTML = '<span class="text-success fw-bold">' + s.online + ' on</span>'
+              + (s.offline
+                  ? ' <span class="text-muted"> · </span><span class="text-danger fw-bold stat-offline-alarm">' + s.offline + ' off</span>'
+                  : '');
+          }
+        });
+      })
+      .catch(function () { /* lỗi tạm thời — lần poll sau thử lại */ });
+  }
+
+  refreshAlerts();
+  setInterval(refreshAlerts, 25000);
 })();
 </script>
 {% endblock %}

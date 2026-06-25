@@ -5,7 +5,8 @@ app_name = "dashboard"
 
 urlpatterns = [
     path("", views.index, name="index"),
-    path("api/poll-status/",   views.poll_status,     name="poll_status"),
+    path("api/poll-status/",     views.poll_status,     name="poll_status"),
+    path("api/alerts-summary/",  views.alerts_summary,  name="alerts_summary"),
     path("switch/<int:pk>/",   views.switch_detail,   name="switch_detail"),
     path("router/<int:pk>/",   views.router_detail,   name="router_detail"),
     path("firewall/<int:pk>/", views.firewall_detail, name="firewall_detail"),
