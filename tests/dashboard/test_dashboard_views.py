@@ -10,7 +10,7 @@ from tests.conftest import (
     FortinetSNMPDeviceFactory,
 )
 from apps.devices.models import Device, Interface
-from apps.metrics.models import SystemHealth, InterfaceStats, VMStats
+from apps.metrics.models import SystemHealth, InterfaceStats, VMStats, WifiApStats
 from django.utils import timezone
 
 
@@ -82,6 +82,39 @@ class TestDashboardViews:
         assert "hv-offline" in content
         assert "Switch" in content
         assert "HyperV" in content
+
+    def test_alerts_summary_includes_ap_offline_stats_and_offline_notice_html(self, logged_in_client):
+        from tests.conftest import HuaweiACDeviceFactory
+        from django.urls import reverse
+
+        ac = HuaweiACDeviceFactory(name="ac-1")
+        ts = timezone.now()
+        WifiApStats.objects.create(
+            device=ac, timestamp=ts,
+            ap_name="AP-ONLINE", ap_mac="aa:bb:cc:dd:ee:01", ap_ip="10.0.0.11",
+            ap_group="G1", is_online=True, run_state="8", client_count=1,
+        )
+        WifiApStats.objects.create(
+            device=ac, timestamp=ts,
+            ap_name="AP-OFFLINE", ap_mac="aa:bb:cc:dd:ee:02", ap_ip="10.0.0.12",
+            ap_group="G1", is_online=False, run_state="2", client_count=0,
+        )
+
+        response = logged_in_client.get(reverse("dashboard:alerts_summary"))
+        assert response.status_code == 200
+        data = response.json()
+
+        ap_stat = next(s for s in data["stats"] if s["type"] == "ap")
+        assert ap_stat["total"] == 2
+        assert ap_stat["online"] == 1
+        assert ap_stat["offline"] == 1
+        # Factory mặc định last_seen=None → bản thân AC được tính offline như 1 Device.
+        assert data["offline_count"] == 2
+
+        assert "Thiết bị đang Offline" in data["offline_notice_html"]
+        assert "AP-OFFLINE" in data["offline_notice_html"]
+        assert "Access Point" in data["offline_notice_html"]
+        assert "ac-1" in data["offline_notice_html"]
 
     def test_switch_detail_view(self, logged_in_client):
         switch = CiscoSNMPDeviceFactory(name="sw-1", device_type="switch")

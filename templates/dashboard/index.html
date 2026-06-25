@@ -278,21 +278,7 @@
     </div>
   </div>
 
-  {% if offline_notice_rows %}
-  <div class="card border-danger-subtle dashboard-offline mb-0">
-    <div class="card-header bg-danger-subtle text-danger fw-semibold py-1 px-3">
-      <i class="bi bi-exclamation-triangle-fill me-2"></i>Thiết bị đang Offline
-    </div>
-    <div class="card-body py-1 px-3">
-      {% for item in offline_notice_rows %}
-        <div class="small py-0 border-bottom">
-          <span class="fw-semibold">{{ item.name }}</span>
-          <span class="text-muted">— {{ item.group_label }} — {{ item.ip_address }}</span>
-        </div>
-      {% endfor %}
-    </div>
-  </div>
-  {% endif %}
+  <div id="offlineNotice">{% include "dashboard/_offline_notice.html" %}</div>
 
   <div class="row g-2 dashboard-panels">
     <!-- Switch -->
@@ -691,6 +677,9 @@
 
   function onFleetEvent(payload) {
     Realtime.updateFleetRow(payload);
+    if (payload && payload.ap_total != null && payload.ap_online != null && payload.ap_offline != null) {
+      Realtime.updateApStatCard(payload.ap_total, payload.ap_online, payload.ap_offline);
+    }
     // Thiết bị vừa poll (vd WLAN controller) → làm tươi panel Alerts + thẻ AP gần
     // như tức thì, không chờ vòng poll 25s. AP off sẽ hiện ngay khi AC poll xong.
     if (window.dashRefreshAlerts) window.dashRefreshAlerts();
@@ -718,6 +707,9 @@
         if (scroll && typeof d.alerts_html === "string") scroll.innerHTML = d.alerts_html;
         var pc = document.getElementById("jsAlertPanelCount");
         if (pc) { pc.textContent = d.alert_count; pc.style.display = d.alert_count ? "" : "none"; }
+        // Khối "Thiết bị đang Offline"
+        var offlineNotice = document.getElementById("offlineNotice");
+        if (offlineNotice && typeof d.offline_notice_html === "string") offlineNotice.innerHTML = d.offline_notice_html;
         // Thẻ Alerts + Offline
         setText("jsAlertStat", d.alert_count);
         toggle("jsAlertStat", "text-danger", d.alert_count);
@@ -745,7 +737,7 @@
   // Cho SSE kích hoạt làm tươi sớm (debounce 1.5s) khi có thiết bị vừa poll.
   var pending = null;
   window.dashRefreshAlerts = function () {
-    if (pending) return;
+    if (pending) clearTimeout(pending);
     pending = setTimeout(function () { pending = null; refreshAlerts(); }, 1500);
   };
   // Trang khôi phục từ bfcache (back/forward) → làm tươi ngay, tránh hiển thị cũ.

@@ -60,6 +60,17 @@ def build_payload(device: "Device", online: bool, data: "NormalizedData | None")
         payload["mem"] = round(data.mem_percent, 1) if data.mem_percent is not None else None
         payload["if_total"] = len(data.interfaces)
         payload["if_up"] = sum(1 for iface in data.interfaces if iface.status == "up")
+
+        # WLAN Controller: nhúng tổng AP online/offline để dashboard cập nhật thẻ
+        # "Access Point" ngay sau khi AC poll xong, không phải chờ AJAX.
+        if device.device_type == "wlan_controller":
+            aps = data.extra.get("wifi_aps") if getattr(data, "extra", None) else None
+            if isinstance(aps, list):
+                ap_total = len(aps)
+                ap_online = sum(1 for ap in aps if ap and ap.get("is_online"))
+                payload["ap_total"] = ap_total
+                payload["ap_online"] = ap_online
+                payload["ap_offline"] = ap_total - ap_online
     return payload
 
 

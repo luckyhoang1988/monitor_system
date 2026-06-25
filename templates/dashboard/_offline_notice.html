@@ -1,0 +1,15 @@
+{% if offline_notice_rows %}
+<div class="card border-danger-subtle dashboard-offline mb-0">
+  <div class="card-header bg-danger-subtle text-danger fw-semibold py-1 px-3">
+    <i class="bi bi-exclamation-triangle-fill me-2"></i>Thiết bị đang Offline
+  </div>
+  <div class="card-body py-1 px-3">
+    {% for item in offline_notice_rows %}
+      <div class="small py-0 border-bottom">
+        <span class="fw-semibold">{{ item.name }}</span>
+        <span class="text-muted">— {{ item.group_label }} — {{ item.ip_address }}</span>
+      </div>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}

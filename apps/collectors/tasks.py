@@ -97,6 +97,19 @@ def _poll_device_once(device_id: int) -> None:
     # Phát event realtime SAU khi commit (ngoài atomic của save_metrics).
     publish_device_event(device, online, data)
 
+    # Đánh giá alert ngay sau khi poll xong để notification (Telegram/Email) sát dữ liệu
+    # hơn, thay vì đợi task evaluate_alert_rules chạy lệch pha. Beat task vẫn giữ làm safety net.
+    try:
+        from django.utils import timezone as _tz
+        from datetime import timedelta
+        from apps.alerts.engine import check_device_alerts
+
+        window_minutes = getattr(settings, "ALERT_EVAL_WINDOW_MINUTES", 10)
+        since = _tz.now() - timedelta(minutes=int(window_minutes))
+        check_device_alerts(device, since)
+    except Exception as exc:
+        logger.warning("Inline alert eval failed for %s: %s", device.name, exc)
+
     logger.info(
         "Polled %s — online=%s (snmp_valid=%s icmp=%s) ifaces=%s",
         device.name, online, snmp_valid, icmp_ok,

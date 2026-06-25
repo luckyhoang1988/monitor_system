@@ -53,9 +53,31 @@
     if (cell) cell.innerHTML = statusBadge(payload.online);
   }
 
+  function updateApStatCard(ap_total, ap_online, ap_offline) {
+    var card = document.querySelector('.stat-card[data-stat-type="ap"]');
+    if (!card) return;
+
+    var total = card.querySelector(".js-stat-total");
+    if (total && ap_total != null) total.textContent = ap_total;
+
+    var line = card.querySelector(".js-stat-line");
+    if (line && ap_online != null && ap_offline != null) {
+      line.innerHTML =
+        '<span class="text-success fw-bold">' +
+        ap_online +
+        " on</span>" +
+        (ap_offline
+          ? ' <span class="text-muted"> · </span><span class="text-danger fw-bold stat-offline-alarm">' +
+            ap_offline +
+            " off</span>"
+          : "");
+    }
+  }
+
   global.Realtime = {
     connectSSE: connectSSE,
     statusBadge: statusBadge,
     updateFleetRow: updateFleetRow,
+    updateApStatCard: updateApStatCard,
   };
 })(window);

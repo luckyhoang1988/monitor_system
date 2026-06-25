@@ -64,6 +64,7 @@ def _dashboard_counts(all_devices):
     # AP không đăng ký như Device — nằm trong WifiApStats dưới AC. Gộp snapshot mới
     # nhất của từng wlan_controller để card "Access Point" phản ánh AP thật.
     ap_total = ap_online = 0
+    offline_ap_rows = []
     for ac in by_type["wlan_controller"]:
         latest_ts = (WifiApStats.objects
                      .filter(device=ac)
@@ -75,6 +76,13 @@ def _dashboard_counts(all_devices):
         snapshot = WifiApStats.objects.filter(device=ac, timestamp=latest_ts)
         ap_total += snapshot.count()
         ap_online += snapshot.filter(is_online=True).count()
+        # AP đang offline → đưa vào card "Thiết bị đang Offline" (kèm tên AP).
+        for ap in snapshot.filter(is_online=False).order_by("ap_name"):
+            offline_ap_rows.append({
+                "name": ap.ap_name,
+                "ip_address": ap.ap_ip or "—",
+                "group_label": "Access Point · " + ac.name,
+            })
 
     device_type_stats = []
     for dtype, label, icon, color_class, color in DEVICE_TYPE_META:
@@ -95,13 +103,25 @@ def _dashboard_counts(all_devices):
             "offline": total - online,
         })
 
+    # Card "Thiết bị đang Offline": Device offline + AP offline (theo tên).
+    offline_device_rows = [
+        {
+            "name": d.name,
+            "ip_address": d.ip_address,
+            "group_label": GROUP_LABELS.get(d.device_type, d.device_type.title()),
+        }
+        for d in all_devices if not d.is_online
+    ]
+    offline_notice_rows = offline_device_rows + offline_ap_rows
+
     active_alerts = list(Alert.objects.filter(is_active=True)
                          .select_related("device", "rule")
                          .order_by("-triggered_at")[:20])
     return {
         "by_type": by_type,
         "device_type_stats": device_type_stats,
-        "offline_count": sum(1 for d in all_devices if not d.is_online),
+        "offline_count": len(offline_device_rows) + len(offline_ap_rows),
+        "offline_notice_rows": offline_notice_rows,
         "active_alerts": active_alerts,
         "alert_count": len(active_alerts),
     }
@@ -124,14 +144,6 @@ def index(request):
     offline_devices = [d for d in all_devices if not d.is_online]
     online_count = len(all_devices) - len(offline_devices)
     latest_seen = max((d.last_seen for d in all_devices if d.last_seen), default=None)
-    offline_notice_rows = [
-        {
-            "name": d.name,
-            "ip_address": d.ip_address,
-            "group_label": GROUP_LABELS.get(d.device_type, d.device_type.title()),
-        }
-        for d in offline_devices
-    ]
 
     def _offline(devices):
         return sum(1 for d in devices if not d.is_online)
@@ -154,7 +166,7 @@ def index(request):
         "total_devices":  len(all_devices),
         "online_count":   online_count,
         "offline_count":  counts["offline_count"],
-        "offline_notice_rows": offline_notice_rows,
+        "offline_notice_rows": counts["offline_notice_rows"],
         "alert_count":    counts["alert_count"],
         # Mốc dữ liệu mới nhất lúc render (epoch) — baseline để JS tự đồng bộ reload.
         "poll_fresh":     latest_seen.timestamp() if latest_seen else 0,
@@ -162,6 +174,7 @@ def index(request):
     return render(request, "dashboard/index.html", context)
 
 
+@never_cache
 @login_required
 def alerts_summary(request):
     """JSON tóm tắt cảnh báo + số đếm cho dashboard cập nhật TẠI CHỖ (không reload).
@@ -178,6 +191,11 @@ def alerts_summary(request):
         {"active_alerts": counts["active_alerts"]},
         request=request,
     )
+    offline_notice_html = render_to_string(
+        "dashboard/_offline_notice.html",
+        {"offline_notice_rows": counts["offline_notice_rows"]},
+        request=request,
+    )
     return JsonResponse({
         "alert_count":   counts["alert_count"],
         "offline_count": counts["offline_count"],
@@ -187,6 +205,7 @@ def alerts_summary(request):
             for s in counts["device_type_stats"]
         ],
         "alerts_html": alerts_html,
+        "offline_notice_html": offline_notice_html,
     })
 
 
