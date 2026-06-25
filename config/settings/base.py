@@ -28,6 +28,7 @@ INSTALLED_APPS = [
     "apps.alerts",
     "apps.dashboard",
     "apps.accounts",
+    "apps.realtime",
 ]
 
 REST_FRAMEWORK = {
@@ -73,6 +74,7 @@ TEMPLATES = [
 ]
 
 WSGI_APPLICATION = "config.wsgi.application"
+ASGI_APPLICATION = "config.asgi.application"
 
 AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
@@ -99,6 +101,13 @@ LOGOUT_REDIRECT_URL = "/accounts/login/"
 # Celery
 CELERY_BROKER_URL = env("REDIS_URL", default="redis://localhost:6379/0")
 CELERY_RESULT_BACKEND = env("REDIS_URL", default="redis://localhost:6379/0")
+
+# Realtime SSE pub/sub — Redis DB riêng (/2) tách khỏi Celery broker (/0).
+# Mặc định suy từ REDIS_URL (đổi số DB) để dùng đúng host `redis` trong Docker.
+REALTIME_REDIS_URL = env(
+    "REALTIME_REDIS_URL",
+    default=env("REDIS_URL", default="redis://localhost:6379/0").rsplit("/", 1)[0] + "/2",
+)
 CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
 CELERY_TIMEZONE = TIME_ZONE

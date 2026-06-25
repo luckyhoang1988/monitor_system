@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% load static %}
 {% block title %}{{ device.name }}{% endblock %}
 {% block breadcrumb %}
   <a href="{% url 'dashboard:index' %}" class="text-decoration-none text-muted">Dashboard</a>
@@ -170,6 +171,7 @@
 {% endblock %}
 
 {% block extra_js %}
+<script src="{% static 'js/realtime.js' %}"></script>
 <script>
 const DEVICE_ID = {{ device.pk }};
 const API_WIFI = `/api/metrics/${DEVICE_ID}/wifi/`;
@@ -242,7 +244,9 @@ function refreshWifi() {
     .catch(() => {});
 }
 
-// Refresh nhẹ mỗi 60s (chỉ cập nhật bảng, không reload trang).
+// Realtime: refresh bảng ngay khi controller vừa poll xong (SSE); giữ 60s định
+// kỳ làm nền (onFail no-op vì interval dưới đã bao phủ fallback).
+Realtime.connectSSE(`/sse/device/${DEVICE_ID}/`, refreshWifi, function () {});
 setInterval(refreshWifi, 60000);
 </script>
 {% endblock %}

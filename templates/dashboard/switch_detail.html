@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% load static %}
 {% block title %}{{ device.name }}{% endblock %}
 {% block breadcrumb %}
   <a href="{% url 'dashboard:index' %}" class="text-decoration-none text-muted">Dashboard</a>
@@ -169,6 +170,7 @@
 {% endblock %}
 
 {% block extra_js %}
+<script src="{% static 'js/realtime.js' %}"></script>
 <script>
 const DEVICE_ID = {{ device.pk }};
 const API_METRICS = `/api/metrics/${DEVICE_ID}/`;
@@ -265,5 +267,24 @@ document.getElementById("rangeSelect").addEventListener("change", function () {
   loadMetrics(this.value);
   loadTraffic(this.value);
 });
+
+// ===== Realtime: tự vẽ lại chart khi thiết bị này vừa poll xong =====
+// Mỗi event SSE → re-fetch range đang chọn (tái dùng loadMetrics/loadTraffic,
+// giữ đúng downsampling server-side). Range tổng hợp (7d+) đổi rất chậm nên bỏ qua.
+const LIVE_RANGES = ["1h", "6h", "24h"];
+function currentRange() {
+  return document.getElementById("rangeSelect").value;
+}
+function refreshIfLive() {
+  const range = currentRange();
+  if (LIVE_RANGES.indexOf(range) === -1) return;
+  loadMetrics(range);
+  loadTraffic(range);
+}
+function startDetailFallback() {
+  // Trang chi tiết vốn không auto-refresh → fallback 120s là cải thiện thuần.
+  setInterval(refreshIfLive, 120000);
+}
+Realtime.connectSSE(`/sse/device/${DEVICE_ID}/`, refreshIfLive, startDetailFallback);
 </script>
 {% endblock %}

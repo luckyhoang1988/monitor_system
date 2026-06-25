@@ -39,6 +39,7 @@ def _poll_device_once(device_id: int) -> None:
     from apps.collectors.factory import CollectorFactory
     from apps.collectors.ping_util import icmp_ping
     from apps.metrics.writer import save_metrics
+    from apps.realtime.publisher import publish_device_event
 
     device = Device.objects.get(pk=device_id)
     collector = CollectorFactory.create(device)
@@ -61,6 +62,7 @@ def _poll_device_once(device_id: int) -> None:
         if not icmp_ok:
             device.last_seen = None
             device.save(update_fields=["last_seen"])
+            publish_device_event(device, online=False, data=None)
             logger.info(
                 "Polled %s — online=False (icmp down, bỏ qua SNMP collect)",
                 device.name,
@@ -91,6 +93,9 @@ def _poll_device_once(device_id: int) -> None:
         update_fields.append("last_seen")
     if update_fields:
         device.save(update_fields=update_fields)
+
+    # Phát event realtime SAU khi commit (ngoài atomic của save_metrics).
+    publish_device_event(device, online, data)
 
     logger.info(
         "Polled %s — online=%s (snmp_valid=%s icmp=%s) ifaces=%s",

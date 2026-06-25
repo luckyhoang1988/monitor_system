@@ -2,7 +2,8 @@ Django>=5.2
 django-environ>=0.11
 django-celery-beat>=2.6
 celery[redis]>=5.3
-redis>=5.0
+redis>=5.0                     # client sync + redis.asyncio cho SSE pub/sub
+uvicorn[standard]>=0.30       # ASGI server cho async SSE view (realtime push)
 
 # REST API
 djangorestframework>=3.15

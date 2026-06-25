@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% load static %}
 {% block title %}Dashboard{% endblock %}
 {% block breadcrumb %}Dashboard{% endblock %}
 
@@ -319,11 +320,11 @@
             </thead>
             <tbody>
               {% for sw in switches %}
-              <tr>
+              <tr data-device-id="{{ sw.pk }}" class="js-device-row">
                 <td class="ps-2 fw-semibold" title="{{ sw.name }}">{{ sw.name }}</td>
                 <td class="text-muted font-monospace">{{ sw.ip_address }}</td>
                 <td>{{ sw.get_vendor_display }}</td>
-                <td>
+                <td class="js-status-cell">
                   {% if sw.is_online %}
                     <span class="badge badge-online status-dot rounded-pill px-2">On</span>
                   {% else %}
@@ -371,11 +372,11 @@
             </thead>
             <tbody>
               {% for rt in routers %}
-              <tr>
+              <tr data-device-id="{{ rt.pk }}" class="js-device-row">
                 <td class="ps-2 fw-semibold" title="{{ rt.name }}">{{ rt.name }}</td>
                 <td class="text-muted font-monospace">{{ rt.ip_address }}</td>
                 <td>{{ rt.get_vendor_display }}</td>
-                <td>
+                <td class="js-status-cell">
                   {% if rt.is_online %}
                     <span class="badge badge-online status-dot rounded-pill px-2">On</span>
                   {% else %}
@@ -423,11 +424,11 @@
             </thead>
             <tbody>
               {% for fw in firewalls %}
-              <tr>
+              <tr data-device-id="{{ fw.pk }}" class="js-device-row">
                 <td class="ps-2 fw-semibold" title="{{ fw.name }}">{{ fw.name }}</td>
                 <td class="text-muted font-monospace">{{ fw.ip_address }}</td>
                 <td>{{ fw.get_vendor_display }}</td>
-                <td>
+                <td class="js-status-cell">
                   {% if fw.is_online %}
                     <span class="badge badge-online status-dot rounded-pill px-2">On</span>
                   {% else %}
@@ -475,11 +476,11 @@
             </thead>
             <tbody>
               {% for nas in nas_devices %}
-              <tr>
+              <tr data-device-id="{{ nas.pk }}" class="js-device-row">
                 <td class="ps-2 fw-semibold" title="{{ nas.name }}">{{ nas.name }}</td>
                 <td class="text-muted font-monospace">{{ nas.ip_address }}</td>
                 <td>{{ nas.get_vendor_display }}</td>
-                <td>
+                <td class="js-status-cell">
                   {% if nas.is_online %}
                     <span class="badge badge-online status-dot rounded-pill px-2">On</span>
                   {% else %}
@@ -526,10 +527,10 @@
             </thead>
             <tbody>
               {% for hv in hyperv_hosts %}
-              <tr>
+              <tr data-device-id="{{ hv.pk }}" class="js-device-row">
                 <td class="ps-2 fw-semibold" title="{{ hv.name }}">{{ hv.name }}</td>
                 <td class="text-muted font-monospace">{{ hv.ip_address }}</td>
-                <td>
+                <td class="js-status-cell">
                   {% if hv.is_online %}
                     <span class="badge badge-online status-dot rounded-pill px-2">On</span>
                   {% else %}
@@ -577,11 +578,11 @@
             </thead>
             <tbody>
               {% for ac in wlan_controllers %}
-              <tr>
+              <tr data-device-id="{{ ac.pk }}" class="js-device-row">
                 <td class="ps-2 fw-semibold" title="{{ ac.name }}">{{ ac.name }}</td>
                 <td class="text-muted font-monospace">{{ ac.ip_address }}</td>
                 <td>{{ ac.get_vendor_display }}</td>
-                <td>
+                <td class="js-status-cell">
                   {% if ac.is_online %}
                     <span class="badge badge-online status-dot rounded-pill px-2">On</span>
                   {% else %}
@@ -656,6 +657,7 @@
 {% endblock %}
 
 {% block extra_js %}
+<script src="{% static 'js/realtime.js' %}"></script>
 <script>
 (function () {
   const screen = document.getElementById('dashboardScreen');
@@ -683,33 +685,46 @@
   });
 })();
 
-// Reload đồng bộ với chu kỳ poll: theo dõi mốc dữ liệu mới nhất (max last_seen).
-// Mỗi lần mốc tiến lên = có thiết bị vừa poll xong → dời timer; khi đứng yên 10s
-// (cả fleet đã poll xong) thì reload. Thay timer 120s cố định vốn lệch pha poll.
+// Realtime: ưu tiên SSE push — cập nhật badge trạng thái thiết bị TẠI CHỖ, không
+// reload. Vẫn giữ 1 lần reload an toàn định kỳ (FALLBACK_MS) để panel cảnh báo /
+// số đếm / thiết bị mới không bị cũ. Nếu SSE hỏng → fallback về poll-status +
+// quiet-reload như cũ (không regression).
 (function () {
-  var QUIET_MS    = 10000;   // 10s yên lặng sau lần poll cuối → reload
-  var POLL_MS     = 5000;    // tần suất hỏi trạng thái
-  var FALLBACK_MS = 150000;  // trần an toàn: luôn reload nếu mốc không đổi (fleet offline)
+  var QUIET_MS    = 10000;   // 10s yên lặng sau lần poll cuối → reload (chỉ ở fallback)
+  var POLL_MS     = 5000;    // tần suất hỏi trạng thái (chỉ ở fallback)
+  var FALLBACK_MS = 150000;  // refresh toàn trang định kỳ (làm tươi panel/đếm)
   var STATUS_URL  = "{% url 'dashboard:poll_status' %}";
   var lastFresh   = {{ poll_fresh }};   // baseline lúc render trang
-  var reloadTimer = null;
 
-  // Luôn reload sau FALLBACK_MS để trang không kẹt vĩnh viễn khi không có dữ liệu mới.
+  // Refresh toàn trang định kỳ: SSE chỉ cập nhật badge, phần còn lại (alerts,
+  // offline notice, số đếm, thiết bị mới) được làm tươi nhẹ nhàng mỗi 150s.
   setTimeout(function () { location.reload(); }, FALLBACK_MS);
 
-  function tick() {
-    fetch(STATUS_URL, { cache: "no-store" })
-      .then(function (r) { return r.json(); })
-      .then(function (d) {
-        if (d && d.fresh && d.fresh > lastFresh) {
-          lastFresh = d.fresh;                 // có dữ liệu mới hơn → dời mốc reload
-          if (reloadTimer) clearTimeout(reloadTimer);
-          reloadTimer = setTimeout(function () { location.reload(); }, QUIET_MS);
-        }
-      })
-      .catch(function () { /* lỗi mạng tạm thời — fallback vẫn đảm bảo reload */ });
+  var fallbackStarted = false;
+  function startPollingFallback() {
+    if (fallbackStarted) return;   // chỉ chạy 1 lần khi SSE thực sự hỏng
+    fallbackStarted = true;
+    var reloadTimer = null;
+    function tick() {
+      fetch(STATUS_URL, { cache: "no-store" })
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+          if (d && d.fresh && d.fresh > lastFresh) {
+            lastFresh = d.fresh;
+            if (reloadTimer) clearTimeout(reloadTimer);
+            reloadTimer = setTimeout(function () { location.reload(); }, QUIET_MS);
+          }
+        })
+        .catch(function () { /* lỗi mạng tạm thời — FALLBACK_MS vẫn đảm bảo reload */ });
+    }
+    setInterval(tick, POLL_MS);
   }
-  setInterval(tick, POLL_MS);
+
+  Realtime.connectSSE(
+    "{% url 'realtime:fleet_stream' %}",
+    Realtime.updateFleetRow,
+    startPollingFallback
+  );
 })();
 </script>
 {% endblock %}

@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% load static %}
 {% block title %}{{ device.name }}{% endblock %}
 {% block breadcrumb %}
   <a href="{% url 'dashboard:index' %}" class="text-decoration-none text-muted">Dashboard</a>
@@ -199,6 +200,7 @@
 {% endblock %}
 
 {% block extra_js %}
+<script src="{% static 'js/realtime.js' %}"></script>
 <script>
 const DEVICE_ID  = {{ device.pk }};
 const API_METRICS = `/api/metrics/${DEVICE_ID}/`;
@@ -278,6 +280,17 @@ document.getElementById("rangeSelect").addEventListener("change", e => {
   loadHostMetrics(e.target.value);
   loadStatusTimeline(e.target.value);
 });
+
+// ===== Realtime: tự vẽ lại chart khi host này vừa poll xong =====
+const LIVE_RANGES = ["1h", "6h", "24h"];
+function refreshIfLive() {
+  const range = document.getElementById("rangeSelect").value;
+  if (LIVE_RANGES.indexOf(range) === -1) return;  // range tổng hợp đổi rất chậm → bỏ qua
+  loadHostMetrics(range);
+  loadStatusTimeline(range);
+}
+function startDetailFallback() { setInterval(refreshIfLive, 120000); }
+Realtime.connectSSE(`/sse/device/${DEVICE_ID}/`, refreshIfLive, startDetailFallback);
 
 // VM state donut chart
 {% if vms %}

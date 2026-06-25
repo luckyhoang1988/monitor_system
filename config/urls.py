@@ -22,6 +22,9 @@ urlpatterns = [
     path("alerts/", include("apps.alerts.urls")),
     path("users/", include("apps.accounts.urls")),
 
+    # SSE realtime streams (ngoài /api/ để tránh nginx rate-limit cắt kết nối dài)
+    path("sse/", include("apps.realtime.urls")),
+
     # API Router chính (DRF)
     path("api/v1/", include(api_router.urls)),
     
