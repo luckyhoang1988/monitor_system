@@ -676,19 +676,26 @@
   }
 
   function onFleetEvent(payload) {
-    Realtime.updateFleetRow(payload);
-    if (payload && payload.ap_total != null && payload.ap_online != null && payload.ap_offline != null) {
-      Realtime.updateApStatCard(payload.ap_total, payload.ap_online, payload.ap_offline);
-    }
-    // Thiết bị vừa poll (vd WLAN controller) → làm tươi panel Alerts + thẻ AP gần
-    // như tức thì, không chờ vòng poll 25s. AP off sẽ hiện ngay khi AC poll xong.
+    try {
+      if (window.Realtime && Realtime.updateFleetRow) Realtime.updateFleetRow(payload);
+      if (payload && payload.ap_total != null && window.Realtime && Realtime.updateApStatCard) {
+        Realtime.updateApStatCard(payload.ap_total, payload.ap_online, payload.ap_offline);
+      }
+    } catch (e) { /* lỗi cập nhật badge — bỏ qua, poller 25s vẫn làm tươi dữ liệu */ }
+    // Thiết bị vừa poll (vd WLAN controller) → làm tươi panel Alerts + thẻ AP.
     if (window.dashRefreshAlerts) window.dashRefreshAlerts();
   }
-  Realtime.connectSSE(
-    "{% url 'realtime:fleet_stream' %}",
-    onFleetEvent,
-    startPollingFallback
-  );
+  // Bọc guard + try/catch: lỗi SSE / realtime.js KHÔNG được phép làm DỪNG script,
+  // nếu không khối poller 25s phía dưới sẽ không chạy → dashboard đứng hình.
+  try {
+    if (window.Realtime && Realtime.connectSSE) {
+      Realtime.connectSSE("{% url 'realtime:fleet_stream' %}", onFleetEvent, startPollingFallback);
+    } else {
+      startPollingFallback();   // không có Realtime → vẫn còn poll-status reload
+    }
+  } catch (e) {
+    startPollingFallback();
+  }
 })();
 
 // Cảnh báo realtime: cập nhật panel Active Alerts + thẻ Offline/Alerts/AP TẠI CHỖ.
