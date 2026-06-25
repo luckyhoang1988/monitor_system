@@ -99,6 +99,18 @@ class TestPollOnlineCombination:
         device.refresh_from_db()
         assert device.last_seen is None
 
+    def test_offline_clears_last_seen_when_was_online(self, mocker, db):
+        """Chuyển online→offline: last_seen phải clear để is_online khớp SSE badge."""
+        from django.utils import timezone
+
+        device = CiscoSNMPDeviceFactory(last_seen=timezone.now())
+        assert device.is_online is True
+        self._patch(mocker, device, _nd(device, 0), (True, 1.0))  # SNMP rỗng → offline
+        tasks._poll_device_once(device.pk)
+        device.refresh_from_db()
+        assert device.last_seen is None
+        assert device.is_online is False
+
     def test_hyperv_does_not_require_icmp(self, mocker, db):
         device = HyperVDeviceFactory(last_seen=None)
         data = NormalizedData(

@@ -90,7 +90,10 @@ def _poll_device_once(device_id: int) -> None:
         update_fields.append("os_family")
     if online:
         device.last_seen = timezone.now()
-        update_fields.append("last_seen")
+    else:
+        # Đồng bộ is_online với kết quả poll/SSE — tránh badge Off nhưng thẻ đếm vẫn "on".
+        device.last_seen = None
+    update_fields.append("last_seen")
     if update_fields:
         device.save(update_fields=update_fields)
 
