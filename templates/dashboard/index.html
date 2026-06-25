@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% load static %}
+{% load static l10n %}
 {% block title %}Dashboard{% endblock %}
 {% block breadcrumb %}Dashboard{% endblock %}
 
@@ -649,7 +649,7 @@
   var POLL_MS     = 5000;    // tần suất hỏi trạng thái (chỉ ở fallback)
   var FALLBACK_MS = 150000;  // refresh toàn trang định kỳ (làm tươi panel/đếm)
   var STATUS_URL  = "{% url 'dashboard:poll_status' %}";
-  var lastFresh   = {{ poll_fresh }};   // baseline lúc render trang
+  var lastFresh   = {{ poll_fresh|unlocalize }};   // baseline lúc render trang (unlocalize: tránh dấu phẩy thập phân locale vi làm vỡ JS)
 
   // Refresh toàn trang định kỳ: SSE chỉ cập nhật badge, phần còn lại (alerts,
   // offline notice, số đếm, thiết bị mới) được làm tươi nhẹ nhàng mỗi 150s.

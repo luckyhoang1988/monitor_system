@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% load static %}
+{% load static l10n %}
 {% block title %}{{ device.name }}{% endblock %}
 {% block breadcrumb %}
   <a href="{% url 'dashboard:index' %}" class="text-decoration-none text-muted">Dashboard</a>
@@ -173,7 +173,7 @@
 {% block extra_js %}
 <script src="{% static 'js/realtime.js' %}"></script>
 <script>
-const DEVICE_ID = {{ device.pk }};
+const DEVICE_ID = {{ device.pk|unlocalize }};
 const API_WIFI = `/api/metrics/${DEVICE_ID}/wifi/`;
 
 function esc(s) {
