@@ -108,3 +108,38 @@ def get_default_ac_device() -> Device | None:
         .order_by("name")
         .first()
     )
+
+
+def load_ac_ap_snapshot(ac_device: Device | None) -> dict[str, dict]:
+    """MAC chuẩn hóa → {ap_name, ap_ip, is_online, client_count}."""
+    from apps.metrics.models import WifiApStats
+
+    if not ac_device:
+        return {}
+
+    latest_ts = (
+        WifiApStats.objects.filter(device=ac_device)
+        .order_by("-timestamp")
+        .values_list("timestamp", flat=True)
+        .first()
+    )
+    if not latest_ts:
+        return {}
+
+    result: dict[str, dict] = {}
+    for ap in WifiApStats.objects.filter(device=ac_device, timestamp=latest_ts):
+        mac = normalize_mac(ap.ap_mac)
+        if not mac:
+            continue
+        result[mac] = {
+            "ap_name": ap.ap_name,
+            "ap_ip": ap.ap_ip or "",
+            "is_online": ap.is_online,
+            "client_count": ap.client_count,
+        }
+    return result
+
+
+def load_ac_ap_macs(ac_device: Device | None) -> dict[str, str]:
+    """MAC → tên AP (tương thích verify command)."""
+    return {mac: info["ap_name"] for mac, info in load_ac_ap_snapshot(ac_device).items()}
