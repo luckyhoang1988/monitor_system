@@ -93,3 +93,15 @@ wlan:
     radio_type:  ""
     rssi:        ""
     online_time: ""
+
+# LLDP neighbor discovery — LLDP-MIB 1.0.8802.1.1.2 (chuẩn, Huawei VRP hỗ trợ đầy đủ)
+# Index lldpRemTable = timeMark.localPortNum.remIndex
+lldp:
+  rem_local_port: "1.0.8802.1.1.2.1.4.1.1.2"    # lldpRemLocalPortNum
+  rem_chassis_id: "1.0.8802.1.1.2.1.4.1.1.5"    # lldpRemChassisId
+  rem_port_id:    "1.0.8802.1.1.2.1.4.1.1.7"    # lldpRemPortId
+  rem_sys_name:   "1.0.8802.1.1.2.1.4.1.1.9"   # lldpRemSysName
+  loc_port_num:   "1.0.8802.1.1.2.1.3.7.1.1"   # lldpLocPortNum → map tên cổng local
+  loc_port_id:    "1.0.8802.1.1.2.1.3.7.1.3"   # lldpLocPortId (ifName)
+  dot1d_baseport_ifindex: "1.3.6.1.2.1.17.1.4.1.2"
+  if_descr: "1.3.6.1.2.1.2.2.1.2"

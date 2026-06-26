@@ -428,3 +428,43 @@ def firewall_detail(request, pk):
         "latest_health":  latest_health,
         "session_count":  session_count,
     })
+
+
+@never_cache
+@login_required
+def topology(request):
+    """Sơ đồ AP kết nối về switch (Cytoscape.js)."""
+    from apps.devices.models import Device
+
+    ac_devices = list(
+        Device.objects.filter(device_type="wlan_controller", enabled=True).order_by("name")
+    )
+    switches = list(
+        Device.objects.filter(device_type="switch", enabled=True).order_by("name")
+    )
+    ac_id = request.GET.get("ac")
+    switch_id = request.GET.get("switch")
+    return render(request, "dashboard/topology.html", {
+        "ac_devices": ac_devices,
+        "switches": switches,
+        "initial_ac_id": int(ac_id) if ac_id and ac_id.isdigit() else None,
+        "initial_switch_id": int(switch_id) if switch_id and switch_id.isdigit() else None,
+    })
+
+
+@login_required
+def topology_data(request):
+    """JSON nodes/edges cho Cytoscape — ghép TopologyLink + WifiApStats."""
+    from apps.dashboard.topology_api import build_topology_graph
+    from apps.devices.models import Device
+
+    ac = None
+    ac_param = request.GET.get("ac")
+    if ac_param and ac_param.isdigit():
+        ac = Device.objects.filter(pk=int(ac_param), device_type="wlan_controller").first()
+    switch_filter = None
+    sw_param = request.GET.get("switch")
+    if sw_param and sw_param.isdigit():
+        switch_filter = int(sw_param)
+
+    return JsonResponse(build_topology_graph(ac=ac, switch_filter=switch_filter))

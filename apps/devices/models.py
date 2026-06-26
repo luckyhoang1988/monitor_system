@@ -137,6 +137,58 @@ class Interface(models.Model):
         return f"{self.device.name} - {self.name}"
 
 
+class TopologyLink(models.Model):
+    """Liên kết vật lý switch port → AP (discovery qua LLDP hoặc nhập tay)."""
+
+    MATCH_METHODS = [
+        ("mac", "MAC"),
+        ("name", "Tên"),
+        ("ip", "IP"),
+        ("manual", "Thủ công"),
+        ("lldp", "LLDP (chưa match AC)"),
+    ]
+
+    local_device = models.ForeignKey(
+        Device, on_delete=models.CASCADE, related_name="topology_links",
+        verbose_name="Switch",
+    )
+    local_port = models.CharField(max_length=100, verbose_name="Port switch")
+    local_interface = models.ForeignKey(
+        Interface, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name="topology_links", verbose_name="Interface",
+    )
+
+    remote_ap_mac = models.CharField(max_length=32, blank=True, verbose_name="MAC AP")
+    remote_ap_name = models.CharField(max_length=200, blank=True, verbose_name="Tên AP")
+    remote_sys_name = models.CharField(max_length=200, blank=True, verbose_name="LLDP sysName")
+    remote_chassis_id = models.CharField(max_length=200, blank=True, verbose_name="LLDP chassis")
+    remote_port_id = models.CharField(max_length=200, blank=True, verbose_name="LLDP portId")
+    remote_mgmt_ip = models.GenericIPAddressField(
+        null=True, blank=True, verbose_name="IP quản lý (LLDP)",
+    )
+
+    protocol = models.CharField(max_length=10, default="lldp", verbose_name="Giao thức")
+    match_method = models.CharField(
+        max_length=10, choices=MATCH_METHODS, default="lldp", verbose_name="Cách ghép",
+    )
+    is_confirmed = models.BooleanField(default=False, verbose_name="Đã xác nhận với AC")
+    is_stale = models.BooleanField(default=False, verbose_name="Link cũ/stale")
+    miss_count = models.PositiveSmallIntegerField(default=0, verbose_name="Số lần không thấy")
+
+    first_seen = models.DateTimeField(auto_now_add=True, verbose_name="Lần đầu thấy")
+    last_seen = models.DateTimeField(auto_now=True, verbose_name="Lần cuối thấy")
+
+    class Meta:
+        verbose_name = "Liên kết topology"
+        verbose_name_plural = "Liên kết topology"
+        unique_together = ("local_device", "local_port")
+        ordering = ["local_device__name", "local_port"]
+
+    def __str__(self) -> str:
+        target = self.remote_ap_name or self.remote_ap_mac or self.remote_sys_name or "?"
+        return f"{self.local_device.name}:{self.local_port} → {target}"
+
+
 class DiscoveredDevice(models.Model):
     ip_address    = models.GenericIPAddressField(unique=True, verbose_name="Địa chỉ IP")
     hostname      = models.CharField(max_length=200, blank=True, verbose_name="Hostname")

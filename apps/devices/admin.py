@@ -1,6 +1,6 @@
 from django.contrib import admin
 from apps.accounts.admin_mixins import AdminRBACMixin
-from .models import Device, Interface
+from .models import Device, Interface, TopologyLink
 
 
 class InterfaceInline(admin.TabularInline):
@@ -8,6 +8,18 @@ class InterfaceInline(admin.TabularInline):
     extra = 0
     fields = ("if_index", "name", "description", "is_uplink")
     readonly_fields = ("if_index",)
+
+
+@admin.register(TopologyLink)
+class TopologyLinkAdmin(AdminRBACMixin, admin.ModelAdmin):
+    list_display = (
+        "local_device", "local_port", "remote_ap_name", "remote_ap_mac",
+        "match_method", "is_confirmed", "is_stale", "last_seen",
+    )
+    list_filter = ("is_confirmed", "is_stale", "match_method", "local_device")
+    search_fields = ("local_port", "remote_ap_name", "remote_ap_mac", "remote_sys_name")
+    readonly_fields = ("first_seen", "last_seen")
+    autocomplete_fields = ("local_device",)
 
 
 @admin.register(Device)

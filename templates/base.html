@@ -94,6 +94,12 @@
         <i class="bi bi-speedometer2"></i> Dashboard
       </a>
     </li>
+    <li>
+      <a href="{% url 'dashboard:topology' %}"
+         class="nav-link {% if request.resolver_match.url_name == 'topology' and request.resolver_match.namespace == 'dashboard' %}active{% endif %}">
+        <i class="bi bi-diagram-3"></i> Topology AP
+      </a>
+    </li>
 
     <li><span class="sidebar-section">Thiết bị</span></li>
     <li>

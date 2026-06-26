@@ -120,6 +120,7 @@ POLL_NETWORK_INTERVAL_SECS = env.int("POLL_NETWORK_INTERVAL_SECS", default=120)
 POLL_PING_INTERVAL_SECS    = env.int("POLL_PING_INTERVAL_SECS", default=120)
 POLL_HYPERV_INTERVAL_SECS  = env.int("POLL_HYPERV_INTERVAL_SECS", default=300)
 ALERT_EVAL_INTERVAL_SECS   = env.int("ALERT_EVAL_INTERVAL_SECS", default=120)
+TOPOLOGY_DISCOVER_INTERVAL_SECS = env.int("TOPOLOGY_DISCOVER_INTERVAL_SECS", default=1800)
 
 # options.expires: bản điều phối tồn quá 1 chu kỳ trong queue sẽ tự rớt,
 # tránh tích nhiều bản trùng (snowball) khi worker bị dồn.
@@ -151,6 +152,11 @@ CELERY_BEAT_SCHEDULE = {
     "rollup-hourly-metrics": {
         "task": "apps.metrics.tasks.rollup_hourly_metrics",
         "schedule": crontab(minute=5),  # mỗi giờ, phút thứ 5
+    },
+    "discover-topology-links": {
+        "task": "apps.collectors.tasks.discover_topology_links",
+        "schedule": TOPOLOGY_DISCOVER_INTERVAL_SECS,
+        "options": {"expires": TOPOLOGY_DISCOVER_INTERVAL_SECS},
     },
     "rollup-daily-metrics": {
         "task": "apps.metrics.tasks.rollup_daily_metrics",

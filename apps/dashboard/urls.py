@@ -13,4 +13,6 @@ urlpatterns = [
     path("nas/<int:pk>/",      views.nas_detail,      name="nas_detail"),
     path("hyperv/<int:pk>/",   views.hyperv_detail,   name="hyperv_detail"),
     path("wlan/<int:pk>/",     views.wlan_detail,     name="wlan_detail"),
+    path("topology/",          views.topology,        name="topology"),
+    path("api/topology/",      views.topology_data,   name="topology_data"),
 ]

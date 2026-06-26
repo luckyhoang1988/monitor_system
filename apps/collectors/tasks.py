@@ -211,3 +211,22 @@ def poll_all_hyperv() -> None:
             failed += 1
             logger.warning("Inline HyperV poll failed for device %s: %s", pk, exc)
     logger.info("Polled %d/%d hyperv hosts inline (failed=%d)", success, len(device_ids), failed)
+
+
+TOPOLOGY_DISCOVER_SOFT_LIMIT = 120
+TOPOLOGY_DISCOVER_HARD_LIMIT = 150
+
+
+@shared_task(
+    soft_time_limit=TOPOLOGY_DISCOVER_SOFT_LIMIT,
+    time_limit=TOPOLOGY_DISCOVER_HARD_LIMIT,
+)
+def discover_topology_links() -> None:
+    """Walk LLDP trên mọi switch SNMP → upsert TopologyLink (chu kỳ 30 phút)."""
+    from apps.collectors.topology_writer import discover_all_switches
+
+    stats = discover_all_switches()
+    logger.info(
+        "Topology discovery done: switches=%d links=%d confirmed=%d errors=%d",
+        stats["switches"], stats["links"], stats["confirmed"], stats["errors"],
+    )
