@@ -116,6 +116,15 @@ class Interface(models.Model):
     description = models.CharField(max_length=200, blank=True, verbose_name="Mô tả")
     is_uplink   = models.BooleanField(default=False, verbose_name="Là uplink/trunk")
     access_vlan = models.IntegerField(null=True, blank=True, verbose_name="Access VLAN (PVID)")
+    PORT_MODE_CHOICES = (
+        ("access", "Access"),
+        ("trunk",  "Trunk"),
+        ("hybrid", "Hybrid"),
+    )
+    port_mode   = models.CharField(
+        max_length=10, blank=True, default="", choices=PORT_MODE_CHOICES,
+        verbose_name="Chế độ cổng (SNMP Q-BRIDGE)",
+    )
 
     class Meta:
         # Định danh interface theo TÊN (ổn định cho cả SNMP & SSH). if_index vẫn lưu

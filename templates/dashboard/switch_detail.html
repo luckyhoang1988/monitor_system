@@ -133,17 +133,25 @@
           <td class="fw-medium">{{ iface.name }}</td>
           <td class="text-muted small">{{ iface.description|default:"—" }}</td>
           <td>
-            {% if iface.is_uplink %}
+            {% if iface.port_mode == "trunk" %}
+              <span class="badge bg-info-subtle text-info rounded-pill px-2">Trunk</span>
+            {% elif iface.port_mode == "hybrid" %}
+              <span class="badge bg-warning-subtle text-warning rounded-pill px-2">Hybrid</span>
+            {% elif iface.port_mode == "access" %}
+              <span class="badge bg-secondary-subtle text-secondary rounded-pill px-2">Access</span>
+            {% elif iface.is_uplink %}
               <span class="badge bg-primary-subtle text-primary rounded-pill px-2">Uplink</span>
             {% else %}
               <span class="badge bg-secondary-subtle text-secondary rounded-pill px-2">Access</span>
             {% endif %}
           </td>
           <td>
-            {% if iface.is_uplink %}
+            {% if iface.port_mode == "trunk" or iface.port_mode == "hybrid" %}
               <span class="badge bg-info-subtle text-info rounded-pill px-2">Trunk</span>
             {% elif iface.access_vlan %}
               <span class="badge bg-success-subtle text-success rounded-pill px-2 font-monospace">VLAN {{ iface.access_vlan }}</span>
+            {% elif iface.is_uplink and not iface.port_mode %}
+              <span class="badge bg-info-subtle text-info rounded-pill px-2">Trunk</span>
             {% else %}
               <span class="text-muted">—</span>
             {% endif %}

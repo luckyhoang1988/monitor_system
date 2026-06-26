@@ -75,11 +75,19 @@ def _normalize_text(value: str | None) -> str:
 
 
 def _is_trunk_interface(device: Device, iface_data: InterfaceData) -> bool:
-    # Manual cấu hình luôn được ưu tiên.
+    # Dữ liệu mode thật từ SNMP (Q-BRIDGE) ưu tiên cao nhất — trunk/hybrid = uplink.
+    if iface_data.port_mode in ("trunk", "hybrid"):
+        return True
+
+    # Manual cấu hình.
     normalized_manual = {_normalize_text(p) for p in (device.uplink_ports or [])}
     normalized_name = _normalize_text(iface_data.name)
     if normalized_name in normalized_manual:
         return True
+
+    # port_mode == "access" THẬT → access, không để heuristic tên/speed ép thành uplink.
+    if iface_data.port_mode == "access":
+        return False
 
     normalized_desc = _normalize_text(iface_data.description)
     if normalized_desc and any(keyword in normalized_desc for keyword in TRUNK_DESC_KEYWORDS):
@@ -121,16 +129,20 @@ def _save_interface_stats(device: Device, data: NormalizedData) -> None:
                 if iface_data.access_vlan is not None
                 else iface.access_vlan
             )
+            # Tương tự cho port_mode: nguồn không cấp (None/rỗng) → giữ giá trị cũ.
+            next_port_mode = iface_data.port_mode or iface.port_mode
             if (
                 iface.if_index != iface_data.if_index
                 or iface.description != iface_data.description
                 or iface.is_uplink != next_is_uplink
                 or iface.access_vlan != next_access_vlan
+                or iface.port_mode != next_port_mode
             ):
                 iface.if_index = iface_data.if_index
                 iface.description = iface_data.description
                 iface.is_uplink = next_is_uplink
                 iface.access_vlan = next_access_vlan
+                iface.port_mode = next_port_mode
                 update_ifaces.append(iface)
         else:
             new_ifaces.append(Interface(
@@ -140,6 +152,7 @@ def _save_interface_stats(device: Device, data: NormalizedData) -> None:
                 description=iface_data.description,
                 is_uplink=_is_trunk_interface(device, iface_data),
                 access_vlan=iface_data.access_vlan,
+                port_mode=iface_data.port_mode or "",
             ))
 
     if new_ifaces:
@@ -149,7 +162,7 @@ def _save_interface_stats(device: Device, data: NormalizedData) -> None:
         existing_ifaces = {_iface_key(i.name): i for i in Interface.objects.filter(device=device)}
 
     if update_ifaces:
-        Interface.objects.bulk_update(update_ifaces, ["if_index", "description", "is_uplink", "access_vlan"])
+        Interface.objects.bulk_update(update_ifaces, ["if_index", "description", "is_uplink", "access_vlan", "port_mode"])
 
     # 2. Fetch "previous stats" cho tất cả interface bằng 1 query.
     # Cửa sổ tìm prev phải đủ rộng: nhịp poll thực do Celery beat quyết định (vd 300s)

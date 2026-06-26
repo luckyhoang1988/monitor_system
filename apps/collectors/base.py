@@ -19,6 +19,7 @@ class InterfaceData:
     description: str = ""
     speed_mbps: float = 0.0
     access_vlan: int | None = None  # PVID / access VLAN (SNMP), None nếu trunk/không lấy được
+    port_mode: str | None = None    # "access" | "trunk" | "hybrid" (Q-BRIDGE), None nếu không lấy được
 
 
 @dataclass

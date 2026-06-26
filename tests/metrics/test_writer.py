@@ -254,6 +254,43 @@ class TestSaveMetrics:
         iface = Interface.objects.get(device=device, if_index=48)
         assert iface.is_uplink is True
 
+    def test_port_mode_trunk_persisted_and_marks_uplink(self, device):
+        # Q-BRIDGE thấy trunk → port_mode=trunk VÀ is_uplink=True dù tên/speed access.
+        ifaces = [
+            InterfaceData(name="Gi0/1", if_index=1, status="up",
+                          in_bytes=1, out_bytes=1, speed_mbps=1000,
+                          port_mode="trunk"),
+        ]
+        save_metrics(device, self._make_normalized(device, interfaces=ifaces))
+        iface = Interface.objects.get(device=device, if_index=1)
+        assert iface.port_mode == "trunk"
+        assert iface.is_uplink is True
+
+    def test_port_mode_access_overrides_highspeed_heuristic(self, device):
+        # port_mode=access THẬT phải thắng heuristic speed≥10G (không bị ép uplink).
+        ifaces = [
+            InterfaceData(name="XGigabitEthernet0/0/9", if_index=9, status="up",
+                          in_bytes=1, out_bytes=1, speed_mbps=10000,
+                          access_vlan=20, port_mode="access"),
+        ]
+        save_metrics(device, self._make_normalized(device, interfaces=ifaces))
+        iface = Interface.objects.get(device=device, if_index=9)
+        assert iface.port_mode == "access"
+        assert iface.is_uplink is False
+
+    def test_port_mode_not_overwritten_by_empty_source(self, device):
+        # Poll 1 (SNMP) set trunk; poll 2 (vd SSH) không cấp port_mode → giữ trunk.
+        save_metrics(device, self._make_normalized(device, interfaces=[
+            InterfaceData(name="Gi0/1", if_index=1, status="up",
+                          in_bytes=1, out_bytes=1, port_mode="trunk"),
+        ]))
+        save_metrics(device, self._make_normalized(device, interfaces=[
+            InterfaceData(name="Gi0/1", if_index=1, status="up",
+                          in_bytes=2, out_bytes=2, port_mode=None),
+        ]))
+        iface = Interface.objects.get(device=device, if_index=1)
+        assert iface.port_mode == "trunk"
+
     def test_updates_existing_interface_uplink_flag_after_new_poll(self, device):
         iface = Interface.objects.create(
             device=device,

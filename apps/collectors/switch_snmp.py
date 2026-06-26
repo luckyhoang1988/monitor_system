@@ -57,6 +57,55 @@ def _is_cisco_business(sys_desc: str) -> bool:
     return any(marker in lowered for marker in _CISCO_BUSINESS_MARKERS)
 
 
+def _parse_portlist(raw: object) -> set[int]:
+    """Giải mã Q-BRIDGE PortList (OCTET STRING bitmap) → tập dot1dBasePort.
+
+    Bit MSB của byte 0 (0x80) = port 1, bit kế (0x40) = port 2, … (RFC 4363).
+    Giá trị từ SNMP backend có nhiều dạng:
+      - bytes (một số easysnmp build)
+      - hex string "0x800010" hoặc "80 00 10" / "0x80 00 10" (pysnmp prettyPrint, net-snmp Hex-STRING)
+      - raw latin-1 string (easysnmp octet string có thể chứa byte 0..255)
+    ⚠️ easysnmp có thể cắt chuỗi tại null byte → port ở octet sau vị trí null không thấy.
+    Tool verify_vlan_oids in ra để đối chiếu thực tế trên fleet.
+    """
+    if raw is None:
+        return set()
+
+    if isinstance(raw, (bytes, bytearray)):
+        data = bytes(raw)
+    else:
+        s = str(raw).strip()
+        if not s:
+            return set()
+        hexpart = s[2:] if s[:2].lower() == "0x" else s
+        compact = hexpart.replace(" ", "")
+        is_hex = bool(compact) and len(compact) % 2 == 0 and all(
+            c in "0123456789abcdefABCDEF" for c in compact
+        )
+        if s[:2].lower() == "0x" or (is_hex and " " in s):
+            # Có tiền tố 0x, hoặc trông như "80 00 10" (Hex-STRING) → giải mã hex.
+            try:
+                data = bytes.fromhex(compact)
+            except ValueError:
+                return set()
+        elif is_hex and len(compact) >= 2:
+            # Chuỗi hex liền không khoảng trắng (vd "800010").
+            try:
+                data = bytes.fromhex(compact)
+            except ValueError:
+                data = s.encode("latin-1", "ignore")
+        else:
+            # Octet string thô — mỗi ký tự = 1 byte.
+            data = s.encode("latin-1", "ignore")
+
+    ports: set[int] = set()
+    for byte_idx, byte in enumerate(data):
+        for bit in range(8):
+            if byte & (0x80 >> bit):
+                ports.add(byte_idx * 8 + bit + 1)  # base-1 dot1dBasePort
+    return ports
+
+
 def _load_oid_profile(os_family: str) -> dict:
     path = OID_DIR / f"{os_family}.yaml"
     if not path.exists():
@@ -277,6 +326,71 @@ class SwitchSNMPCollector(BaseCollector):
                 result[if_index] = int(val)
             except (ValueError, TypeError):
                 continue
+        return result
+
+    def _collect_port_modes(self, oid_profile: dict) -> dict[int, str]:
+        """Trả về {ifIndex: "access"|"trunk"|"hybrid"} từ Q-BRIDGE dot1qVlanStaticTable.
+
+        Mỗi VLAN có 2 PortList bitmap (index = VLAN id):
+          egress  = tất cả cổng thành viên (tagged ∪ untagged)
+          untagged = cổng untagged → tagged(VLAN) = egress \\ untagged.
+        Gom theo dot1dBasePort:
+          - tagged ở ≥1 VLAN              → trunk
+          - chỉ untagged & đúng 1 VLAN    → access
+          - untagged ở ≥2 VLAN, không tag → hybrid
+        Map dot1dBasePort → ifIndex qua dot1dBasePortIfIndex. Bitmap KHÔNG có entry
+        (cổng routed/L3, member Eth-Trunk) → không xuất hiện → để fallback heuristic.
+        """
+        vlan_oids = oid_profile.get("vlan", {})
+        egress_oid = vlan_oids.get("dot1q_static_egress")
+        untagged_oid = vlan_oids.get("dot1q_static_untagged")
+        baseport_oid = vlan_oids.get("dot1d_baseport_ifindex")
+        if not egress_oid or not untagged_oid or not baseport_oid:
+            return {}
+
+        baseport_to_ifindex: dict[int, int] = {}
+        for oid, val in self._snmp_walk(baseport_oid):
+            try:
+                baseport_to_ifindex[int(oid.split(".")[-1])] = int(val)
+            except (ValueError, TypeError):
+                continue
+        if not baseport_to_ifindex:
+            return {}
+
+        egress_by_vlan: dict[str, set[int]] = {}
+        for oid, val in self._snmp_walk(egress_oid):
+            egress_by_vlan[oid.split(".")[-1]] = _parse_portlist(val)
+        if not egress_by_vlan:
+            return {}
+
+        untagged_by_vlan: dict[str, set[int]] = {}
+        for oid, val in self._snmp_walk(untagged_oid):
+            untagged_by_vlan[oid.split(".")[-1]] = _parse_portlist(val)
+
+        # Đếm số VLAN tagged / untagged cho từng dot1dBasePort.
+        tagged_count: dict[int, int] = {}
+        untagged_count: dict[int, int] = {}
+        for vlan, egress_ports in egress_by_vlan.items():
+            untagged_ports = untagged_by_vlan.get(vlan, set())
+            for port in egress_ports:
+                if port in untagged_ports:
+                    untagged_count[port] = untagged_count.get(port, 0) + 1
+                else:
+                    tagged_count[port] = tagged_count.get(port, 0) + 1
+
+        result: dict[int, str] = {}
+        for base_port, if_index in baseport_to_ifindex.items():
+            tagged = tagged_count.get(base_port, 0)
+            untagged = untagged_count.get(base_port, 0)
+            if tagged >= 1:
+                mode = "trunk"
+            elif untagged >= 2:
+                mode = "hybrid"
+            elif untagged == 1:
+                mode = "access"
+            else:
+                continue  # không thành viên VLAN nào → bỏ qua, dùng fallback
+            result[if_index] = mode
         return result
 
     def _collect_cpu_mem_mikrotik(self, oid_profile: dict) -> tuple[float, float]:
@@ -595,12 +709,16 @@ class SwitchSNMPCollector(BaseCollector):
         if self.device.device_type == "wlan_controller":
             extra.update(self._collect_wifi(oid_profile))
 
-        # Gán access VLAN (PVID) cho từng interface theo ifIndex.
+        # Gán access VLAN (PVID) + chế độ cổng (trunk/access) cho từng interface theo ifIndex.
         interfaces = self._collect_interfaces()
         vlan_map = self._collect_access_vlans(oid_profile)
-        if vlan_map:
+        mode_map = self._collect_port_modes(oid_profile)
+        if vlan_map or mode_map:
             for iface in interfaces:
-                iface.access_vlan = vlan_map.get(iface.if_index)
+                if vlan_map:
+                    iface.access_vlan = vlan_map.get(iface.if_index)
+                if mode_map:
+                    iface.port_mode = mode_map.get(iface.if_index)
 
         return {
             "os_family":   os_family,
