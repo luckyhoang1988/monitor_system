@@ -65,7 +65,10 @@ def _resolve_window(request) -> tuple[datetime, datetime, str]:
     if frm and to:
         since = _parse_local(frm)
         until = _parse_local(to)
-        if since and until and since < until:
+        if since and until and since != until:
+            # Phòng thủ: nếu client gửi Từ > Đến thì hoán đổi thay vì rơi về preset.
+            if since > until:
+                since, until = until, since
             return since, until, _select_source(since, until)
     delta, source = _parse_range(request.GET.get("range", "1h"))
     now = timezone.now()

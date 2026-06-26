@@ -55,7 +55,15 @@
       }
       if (applyBtn) {
         applyBtn.addEventListener("click", function () {
-          if (state.from && state.to && state.from.value && state.to.value) onChange();
+          if (!(state.from && state.to && state.from.value && state.to.value)) return;
+          // Người dùng chọn Từ > Đến → hoán đổi để luôn lọc đúng khoảng
+          // (chuỗi datetime-local 'YYYY-MM-DDTHH:mm' so sánh chuỗi = so sánh thời gian).
+          if (state.from.value > state.to.value) {
+            var tmp = state.from.value;
+            state.from.value = state.to.value;
+            state.to.value = tmp;
+          }
+          onChange();
         });
       }
     },

@@ -59,9 +59,19 @@ def test_device_metrics_custom_window_filters_range(logged_client):
 
 
 @pytest.mark.django_db
-def test_device_metrics_bad_window_falls_back_to_preset(logged_client):
+def test_device_metrics_reversed_window_is_swapped(logged_client):
     device = HyperVDeviceFactory(collect_interval=300)
-    # from > to → bỏ qua, dùng range mặc định 1h (không 500).
-    resp = logged_client.get(f"/api/metrics/{device.pk}/?from=2030-01-02T00:00&to=2030-01-01T00:00")
+    now = timezone.now()
+    inside = now - timedelta(hours=3)
+    outside = now - timedelta(hours=20)
+    for ts, cpu in [(inside, 50.0), (outside, 99.0)]:
+        SystemHealth.objects.create(device=device, timestamp=ts, cpu_percent=cpu, mem_percent=10.0)
+
+    # from > to (chọn ngược) → server tự hoán đổi, lọc đúng khoảng [-5h, -1h].
+    frm = timezone.localtime(now - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M")
+    to = timezone.localtime(now - timedelta(hours=5)).strftime("%Y-%m-%dT%H:%M")
+    resp = logged_client.get(f"/api/metrics/{device.pk}/?from={frm}&to={to}")
     assert resp.status_code == 200
-    assert resp.json()["source"] == "raw"
+    payload = resp.json()
+    assert payload["source"] == "raw"
+    assert payload["cpu_percent"] == [50.0]
