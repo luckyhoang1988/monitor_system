@@ -1,4 +1,4 @@
-/* Topology AP ↔ Switch — Cytoscape.js */
+/* Topology AP ↔ Switch — Cytoscape.js compound layout (không edge spaghetti) */
 (function (global) {
   "use strict";
 
@@ -15,41 +15,51 @@
   function cytoscapeStyle() {
     return [
       {
-        selector: "node[type='switch']",
+        selector: ":parent",
         style: {
           shape: "round-rectangle",
-          width: 120,
-          height: 44,
-          "background-color": "#dbeafe",
-          "border-width": 3,
-          "border-color": "#2563eb",
+          "background-color": "#eff6ff",
+          "background-opacity": 0.55,
+          "border-width": 2,
+          "border-color": "#3b82f6",
           label: "data(label)",
-          "font-size": 11,
-          "text-wrap": "wrap",
-          "text-max-width": 110,
-          "text-valign": "center",
+          "font-size": 12,
+          "font-weight": "bold",
+          "text-valign": "top",
           "text-halign": "center",
+          "text-margin-y": -6,
+          padding: "18px",
+          "min-width": "120px",
+          "min-height": "80px",
         },
       },
       {
-        selector: "node[type='switch'][online='false']",
-        style: { "border-color": "#dc2626", "background-color": "#fee2e2" },
+        selector: ":parent[online='false']",
+        style: { "border-color": "#dc2626", "background-color": "#fef2f2" },
+      },
+      {
+        selector: "node[type='orphan-group']",
+        style: {
+          "background-color": "#f9fafb",
+          "border-color": "#9ca3af",
+          "border-style": "dashed",
+        },
       },
       {
         selector: "node[type='ap']",
         style: {
-          shape: "ellipse",
-          width: 56,
-          height: 56,
+          shape: "round-rectangle",
+          width: 88,
+          height: 36,
           "background-color": "#dcfce7",
           "border-width": 2,
           "border-color": "#16a34a",
           label: "data(label)",
           "font-size": 9,
           "text-wrap": "wrap",
-          "text-max-width": 70,
-          "text-valign": "bottom",
-          "text-margin-y": 6,
+          "text-max-width": 82,
+          "text-valign": "center",
+          "text-halign": "center",
         },
       },
       {
@@ -69,36 +79,15 @@
       },
       {
         selector: "node.topo-offline-pulse",
-        style: { "overlay-opacity": 0.25, "overlay-color": "#dc2626" },
+        style: { "overlay-opacity": 0.3, "overlay-color": "#dc2626" },
       },
       {
         selector: "node:hidden-offline-filter",
         style: { display: "none" },
       },
       {
-        selector: "edge",
-        style: {
-          width: 2,
-          "line-color": "#94a3b8",
-          "target-arrow-color": "#94a3b8",
-          "target-arrow-shape": "triangle",
-          "curve-style": "bezier",
-          label: "data(label)",
-          "font-size": 8,
-          "text-rotation": "autorotate",
-          "text-margin-y": -8,
-        },
-      },
-      {
-        selector: "edge[confirmed='false']",
-        style: { "line-style": "dashed", "line-color": "#d97706" },
-      },
-      {
         selector: ":selected",
-        style: {
-          "border-width": 4,
-          "overlay-opacity": 0.15,
-        },
+        style: { "border-width": 3, "overlay-opacity": 0.12 },
       },
     ];
   }
@@ -119,6 +108,7 @@
           n.removeClass("hidden-offline-filter");
         }
       });
+      runLayout();
     }
 
     function updatePulseClasses() {
@@ -139,12 +129,23 @@
       if (opts.metaUpdated && meta.generated_at) {
         opts.metaUpdated.textContent = "Cập nhật: " + meta.generated_at.slice(11, 19);
       }
+      if (opts.layoutHint) {
+        var nsw = meta.switch_count || 0;
+        if (meta.switch_filter) {
+          opts.layoutHint.textContent = "Đang xem 1 switch — AP trong khung.";
+        } else if (nsw > 4) {
+          opts.layoutHint.textContent = "Nhiều switch — chọn filter Switch để dễ nhìn hơn.";
+        } else {
+          opts.layoutHint.textContent = "Mỗi khung = 1 switch, AP bên trong.";
+        }
+      }
     }
 
     function showPanel(node) {
       if (!opts.panel) return;
       var d = node.data();
-      opts.panelTitle.textContent = d.label || "—";
+      var title = d.full_label || d.label || "—";
+      opts.panelTitle.textContent = title;
       var lines = [];
       if (d.type === "ap") {
         if (d.mac) lines.push("<div><strong>MAC:</strong> " + d.mac + "</div>");
@@ -153,7 +154,7 @@
           lines.push("<div><strong>Switch:</strong> " + d.switch_name + "</div>");
           lines.push("<div><strong>Port:</strong> " + (d.switch_port || "—") + "</div>");
         } else if (d.orphan) {
-          lines.push('<div class="text-warning">Chưa map LLDP — chưa biết switch/port</div>');
+          lines.push('<div class="text-warning">Chưa map — chưa biết switch/port</div>');
         }
         lines.push("<div><strong>Client:</strong> " + (d.client_count != null ? d.client_count : "—") + "</div>");
         lines.push("<div><strong>Trạng thái:</strong> " +
@@ -161,14 +162,12 @@
             ? '<span class="text-danger">Offline</span>'
             : '<span class="text-success">Online</span>') + "</div>");
         if (lastMeta.ac_id) {
-          var url = opts.wlanDetailBase + lastMeta.ac_id + "/";
-          lines.push('<div class="mt-2"><a href="' + url + '">Xem trên WLAN AC</a></div>');
+          lines.push('<div class="mt-2"><a href="' + opts.wlanDetailBase + lastMeta.ac_id + '/">WLAN AC</a></div>');
         }
-      } else if (d.type === "switch") {
+      } else if (node.isParent && node.isParent()) {
         if (d.ip) lines.push("<div><strong>IP:</strong> " + d.ip + "</div>");
         if (d.location) lines.push("<div><strong>Vị trí:</strong> " + d.location + "</div>");
-        lines.push("<div><strong>Trạng thái:</strong> " +
-          (d.online === false || d.online === "false" ? "Offline" : "Online") + "</div>");
+        lines.push("<div><strong>AP:</strong> " + (d.ap_count != null ? d.ap_count : node.children("[type='ap']").length) + "</div>");
         if (d.detail_url) {
           lines.push('<div class="mt-2"><a href="' + d.detail_url + '">Chi tiết switch</a></div>');
         }
@@ -177,15 +176,63 @@
       opts.panel.classList.add("visible");
     }
 
+    function layoutChildrenGrid(parent) {
+      var kids = parent.children("[type='ap']:visible");
+      if (kids.length === 0) return;
+      var cols = kids.length <= 4 ? kids.length : 4;
+      kids.layout({
+        name: "grid",
+        fit: false,
+        padding: 10,
+        avoidOverlap: true,
+        condense: true,
+        cols: cols,
+        nodeDimensionsIncludeLabels: true,
+        boundingBox: { x1: 0, y1: 0, w: cols * 100, h: Math.ceil(kids.length / cols) * 50 },
+      }).run();
+    }
+
     function runLayout() {
       if (!cy || cy.nodes().length === 0) return;
-      cy.layout({
-        name: "breadthfirst",
-        directed: true,
-        padding: 40,
-        spacingFactor: 1.2,
-        roots: cy.nodes("[type='switch']"),
+
+      var parents = cy.nodes(":parent:visible");
+      var switchFilter = opts.filterSwitch && opts.filterSwitch.value;
+
+      if (switchFilter && parents.length === 1) {
+        layoutChildrenGrid(parents[0]);
+        parents[0].layout({
+          name: "preset",
+          fit: true,
+          padding: 40,
+        }).run();
+        cy.fit(parents, 50);
+        return;
+      }
+
+      var nParents = parents.length;
+      var rootCols = nParents <= 2 ? nParents : nParents <= 6 ? 3 : 4;
+
+      parents.layout({
+        name: "grid",
+        fit: false,
+        padding: 36,
+        avoidOverlap: true,
+        condense: false,
+        cols: rootCols,
+        nodeDimensionsIncludeLabels: true,
       }).run();
+
+      parents.forEach(function (p) {
+        layoutChildrenGrid(p);
+      });
+
+      cy.layout({
+        name: "preset",
+        fit: true,
+        padding: 50,
+      }).run();
+
+      cy.fit(undefined, 40);
     }
 
     function loadGraph() {
@@ -193,7 +240,7 @@
       return fetch(url, { cache: "no-store", credentials: "same-origin" })
         .then(function (r) { return r.json(); })
         .then(function (data) {
-          var elements = (data.nodes || []).concat(data.edges || []);
+          var elements = data.nodes || [];
           elements.forEach(function (el) {
             var d = el.data || {};
             if (d.online !== undefined) d.online = d.online ? "true" : "false";
@@ -205,9 +252,10 @@
               container: opts.container,
               elements: elements,
               style: cytoscapeStyle(),
-              minZoom: 0.2,
-              maxZoom: 3,
-              wheelSensitivity: 0.3,
+              minZoom: 0.15,
+              maxZoom: 2.5,
+              wheelSensitivity: 0.25,
+              boxSelectionEnabled: false,
             });
             cy.on("tap", "node", function (evt) {
               showPanel(evt.target);
@@ -221,7 +269,7 @@
           updateMeta(data.meta);
           updatePulseClasses();
           applyOfflineFilter();
-          runLayout();
+          setTimeout(runLayout, 80);
         })
         .catch(function (err) {
           console.warn("Topology load failed:", err);
@@ -256,6 +304,9 @@
       });
     }
     if (opts.btnRelayout) opts.btnRelayout.addEventListener("click", runLayout);
+    if (opts.btnFit) opts.btnFit.addEventListener("click", function () {
+      if (cy) cy.fit(undefined, 40);
+    });
     if (opts.panelClose && opts.panel) {
       opts.panelClose.addEventListener("click", function () {
         opts.panel.classList.remove("visible");
@@ -266,9 +317,7 @@
       schedulePoll();
       try {
         if (global.Realtime && global.Realtime.connectSSE) {
-          global.Realtime.connectSSE(opts.sseUrl, onSseMetrics, function () {
-            /* SSE fail — poll 60s vẫn chạy */
-          });
+          global.Realtime.connectSSE(opts.sseUrl, onSseMetrics, function () {});
         }
       } catch (e) { /* ignore */ }
     });

@@ -65,10 +65,11 @@ class TestTopologyViews:
         assert len(ap_nodes) == 1
         assert ap_nodes[0]["data"]["online"] is False
         assert ap_nodes[0]["data"]["switch_name"] == "SW-ACCESS"
+        assert ap_nodes[0]["data"]["parent"] == f"sw-{sw.pk}"
 
         sw_nodes = [n for n in data["nodes"] if n["data"].get("type") == "switch"]
         assert len(sw_nodes) == 1
-        assert len(data["edges"]) == 1
+        assert data["edges"] == []
 
     def test_topology_orphan_ap(self, logged_in_client):
         ac = DeviceFactory(device_type="wlan_controller", name="AC-ORPHAN")
@@ -82,3 +83,4 @@ class TestTopologyViews:
         assert data["meta"]["ap_unmapped"] == 1
         orphan = [n for n in data["nodes"] if n["data"].get("orphan")]
         assert len(orphan) == 1
+        assert orphan[0]["data"]["parent"] == "group-orphan"

@@ -24,6 +24,7 @@
     50% { opacity: .45; }
   }
   .topo-offline-pulse { animation: topo-pulse 1.2s ease-in-out infinite; }
+  #topology-hint { font-size: .8rem; color: #6b7280; }
 </style>
 {% endblock %}
 
@@ -49,6 +50,9 @@
       <input class="form-check-input" type="checkbox" id="filterOfflineOnly">
       <label class="form-check-label small" for="filterOfflineOnly">Chỉ AP offline</label>
     </div>
+    <button type="button" class="btn btn-sm btn-outline-secondary" id="btnFit" title="Zoom vừa khung">
+      <i class="bi bi-aspect-ratio"></i>
+    </button>
     <button type="button" class="btn btn-sm btn-outline-primary" id="btnRelayout">
       <i class="bi bi-arrows-angle-expand"></i> Sắp xếp lại
     </button>
@@ -62,6 +66,7 @@
   <div class="col-auto topo-stat">Chưa map: <strong id="metaApUnmapped">—</strong></div>
   <div class="col-auto topo-stat ms-auto" id="metaUpdated">—</div>
 </div>
+<p id="topology-hint" class="mb-2">Mỗi khung xanh = 1 switch, AP nằm bên trong.</p>
 
 <div id="topology-wrap" class="card border-0 p-0 overflow-hidden">
   <div id="topology-cy"></div>
@@ -97,6 +102,8 @@
       filterSwitch: document.getElementById("filterSwitch"),
       filterOfflineOnly: document.getElementById("filterOfflineOnly"),
       btnRelayout: document.getElementById("btnRelayout"),
+      btnFit: document.getElementById("btnFit"),
+      layoutHint: document.getElementById("topology-hint"),
       panel: document.getElementById("topology-panel"),
       panelTitle: document.getElementById("panelTitle"),
       panelBody: document.getElementById("panelBody"),
