@@ -94,6 +94,10 @@ def _downsample(rows: list, max_points: int | None = None) -> list:
 
 def _format_timestamp(ts, source: str, span: timedelta | None = None) -> str:
     """Format timestamp label tùy theo data source (và độ rộng khoảng với raw)."""
+    # ts từ DB là UTC-aware (USE_TZ=True) → đổi sang tz hiển thị (Asia/Ho_Chi_Minh)
+    # trước khi strftime, nếu không nhãn trục thời gian sẽ lệch theo offset (UTC vs local).
+    if timezone.is_aware(ts):
+        ts = timezone.localtime(ts)
     if source == "daily":
         return ts.strftime("%d/%m")
     if source == "hourly":
@@ -203,7 +207,7 @@ def _device_metrics_hourly(device: Device, since, until) -> JsonResponse:
 
     rows = list(qs)
     data = {
-        "labels":      [r["hour"].strftime("%d %H:00") for r in rows],
+        "labels":      [timezone.localtime(r["hour"]).strftime("%d %H:00") for r in rows],
         "cpu_percent": [r["cpu_avg"] for r in rows],
         "cpu_max":     [r["cpu_max"] for r in rows],
         "mem_percent": [r["mem_avg"] for r in rows],
@@ -327,7 +331,7 @@ def _interface_metrics_hourly(iface_qs, since, until) -> JsonResponse:
         results.append({
             "port":           iface.name,
             "is_uplink":      iface.is_uplink,
-            "labels":         [r["hour"].strftime("%d %H:00") for r in stats],
+            "labels":         [timezone.localtime(r["hour"]).strftime("%d %H:00") for r in stats],
             "in_mbps":        [r["in_mbps_avg"] for r in stats],
             "in_mbps_max":    [r["in_mbps_max"] for r in stats],
             "out_mbps":       [r["out_mbps_avg"] for r in stats],
@@ -409,8 +413,8 @@ def wifi_metrics(request, device_id: int) -> JsonResponse:
         "client_total": client_total,
         "aps": aps,
         "clients": clients,
-        "ap_updated": latest_ap_ts.strftime("%d/%m %H:%M") if latest_ap_ts else None,
-        "client_updated": latest_cl_ts.strftime("%d/%m %H:%M") if latest_cl_ts else None,
+        "ap_updated": timezone.localtime(latest_ap_ts).strftime("%d/%m %H:%M") if latest_ap_ts else None,
+        "client_updated": timezone.localtime(latest_cl_ts).strftime("%d/%m %H:%M") if latest_cl_ts else None,
     })
 
 

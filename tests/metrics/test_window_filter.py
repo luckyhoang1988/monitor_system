@@ -4,7 +4,7 @@ from datetime import timedelta
 from django.contrib.auth.models import User
 from django.utils import timezone
 
-from apps.metrics.api import _select_source, _parse_local
+from apps.metrics.api import _select_source, _parse_local, _format_timestamp
 from apps.metrics.models import SystemHealth
 from tests.conftest import HyperVDeviceFactory
 
@@ -36,6 +36,20 @@ def test_select_source_wide_span_is_daily():
 def test_parse_local_invalid_returns_none():
     assert _parse_local("not-a-date") is None
     assert _parse_local("") is None
+
+
+def test_format_timestamp_uses_local_timezone():
+    """Nhãn trục thời gian phải theo tz hiển thị (Asia/Ho_Chi_Minh), không phải UTC.
+
+    ts UTC-aware 03:42 UTC → giờ địa phương +07 = 10:42. Trước khi fix, strftime
+    in thẳng UTC → '03:42' làm trục chart lệch 7h so với 'Last poll'.
+    """
+    from datetime import datetime, timezone as dt_tz
+    utc_ts = datetime(2026, 6, 26, 3, 42, tzinfo=dt_tz.utc)
+    label = _format_timestamp(utc_ts, "raw")
+    assert label == timezone.localtime(utc_ts).strftime("%H:%M")
+    # Với tz mặc định dự án (+07) → 10:42, khác hẳn nhãn UTC '03:42'.
+    assert label != "03:42"
 
 
 @pytest.mark.django_db

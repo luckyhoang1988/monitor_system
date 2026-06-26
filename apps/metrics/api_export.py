@@ -68,11 +68,11 @@ def _get_system_export_data(device, source, since):
         qs = SystemHealthHourly.objects.filter(device=device, hour__gte=since).order_by("hour")
         headers.extend(["CPU Max", "Memory Max"])
         for r in qs:
-            rows.append([r.hour.strftime("%Y-%m-%d %H:00"), r.cpu_avg, r.mem_avg, r.cpu_max, r.mem_max])
+            rows.append([timezone.localtime(r.hour).strftime("%Y-%m-%d %H:00"), r.cpu_avg, r.mem_avg, r.cpu_max, r.mem_max])
     else:
         qs = SystemHealth.objects.filter(device=device, timestamp__gte=since).order_by("timestamp")
         for r in qs:
-            rows.append([r.timestamp.strftime("%Y-%m-%d %H:%M:%S"), r.cpu_percent, r.mem_percent])
+            rows.append([timezone.localtime(r.timestamp).strftime("%Y-%m-%d %H:%M:%S"), r.cpu_percent, r.mem_percent])
             
     return headers, rows
 
@@ -93,13 +93,13 @@ def _get_interface_export_data(device, source, since):
         for iface in interfaces:
             qs = InterfaceStatsHourly.objects.filter(interface=iface, hour__gte=since).order_by("hour")
             for r in qs:
-                rows.append([iface.name, r.hour.strftime("%Y-%m-%d %H:00"), r.in_mbps_avg, r.out_mbps_avg, r.in_mbps_max, r.out_mbps_max, r.in_errors, r.out_errors])
+                rows.append([iface.name, timezone.localtime(r.hour).strftime("%Y-%m-%d %H:00"), r.in_mbps_avg, r.out_mbps_avg, r.in_mbps_max, r.out_mbps_max, r.in_errors, r.out_errors])
     else:
         headers.extend(["In Errors", "Out Errors"])
         for iface in interfaces:
             qs = InterfaceStats.objects.filter(interface=iface, timestamp__gte=since).order_by("timestamp")
             for r in qs:
-                rows.append([iface.name, r.timestamp.strftime("%Y-%m-%d %H:%M:%S"), r.in_mbps, r.out_mbps, r.in_errors, r.out_errors])
+                rows.append([iface.name, timezone.localtime(r.timestamp).strftime("%Y-%m-%d %H:%M:%S"), r.in_mbps, r.out_mbps, r.in_errors, r.out_errors])
 
     return headers, rows
 
