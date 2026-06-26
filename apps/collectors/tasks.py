@@ -89,9 +89,15 @@ def _poll_device_once(device_id: int) -> None:
     if data is not None:
         update_fields.append("os_family")
     if online:
-        device.last_seen = timezone.now()
+        now = timezone.now()
+        device.last_seen = now
+        # last_ok_seen chỉ ghi khi poll THÀNH CÔNG, KHÔNG bị xoá khi lỗi → làm mốc
+        # grace cho cảnh báo offline (xem Device.is_online_for_alert). Tránh báo giả.
+        device.last_ok_seen = now
+        update_fields.append("last_ok_seen")
     else:
         # Đồng bộ is_online với kết quả poll/SSE — tránh badge Off nhưng thẻ đếm vẫn "on".
+        # CHỈ xoá last_seen (hiển thị); GIỮ NGUYÊN last_ok_seen để alert có grace.
         device.last_seen = None
     update_fields.append("last_seen")
     if update_fields:

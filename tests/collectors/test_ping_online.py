@@ -77,6 +77,19 @@ class TestPollOnlineCombination:
         tasks._poll_device_once(device.pk)
         device.refresh_from_db()
         assert device.last_seen is not None
+        assert device.last_ok_seen is not None  # poll OK → ghi mốc grace cảnh báo
+
+    def test_offline_preserves_last_ok_seen(self, mocker, db):
+        """Poll trượt: last_seen bị xoá NHƯNG last_ok_seen giữ nguyên (grace cảnh báo)."""
+        from django.utils import timezone
+
+        prev_ok = timezone.now()
+        device = CiscoSNMPDeviceFactory(last_seen=timezone.now(), last_ok_seen=prev_ok)
+        self._patch(mocker, device, _nd(device, 0), (True, 1.0))  # SNMP rỗng → offline
+        tasks._poll_device_once(device.pk)
+        device.refresh_from_db()
+        assert device.last_seen is None
+        assert device.last_ok_seen is not None  # KHÔNG bị xoá khi poll lỗi
 
     def test_offline_when_ping_fails(self, mocker, db):
         device = CiscoSNMPDeviceFactory(last_seen=None)

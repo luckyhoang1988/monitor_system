@@ -61,6 +61,10 @@ class Device(models.Model):
     enabled          = models.BooleanField(default=True, verbose_name="Kích hoạt")
     backup_enabled   = models.BooleanField(default=False, verbose_name="Sao lưu cấu hình")
     last_seen        = models.DateTimeField(null=True, blank=True, verbose_name="Lần poll cuối")
+    # Lần poll THÀNH CÔNG gần nhất — KHÔNG bị xoá khi poll lỗi tạm (khác last_seen
+    # vốn bị null mỗi lần poll trượt để đồng bộ badge). Dùng làm mốc grace cho cảnh
+    # báo offline → tránh báo giả khi chỉ 1 vòng poll bị trượt (ICMP rớt gói, SNMP chậm).
+    last_ok_seen     = models.DateTimeField(null=True, blank=True, verbose_name="Lần poll OK gần nhất")
     created_at       = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -83,6 +87,26 @@ class Device(models.Model):
         grace_secs = max(int(self.collect_interval or 300) * 3, min_grace)
         threshold = timezone.now() - timedelta(seconds=grace_secs)
         return self.last_seen >= threshold
+
+    @property
+    def is_online_for_alert(self) -> bool:
+        """Online theo mốc cảnh báo — KHÁC is_online (hiển thị).
+
+        Dùng `last_ok_seen` (không bị xoá khi poll trượt) nên 1 vòng poll lỗi tạm
+        KHÔNG làm thiết bị bị coi offline ngay → chặn cảnh báo offline giả/flapping.
+        Chỉ coi offline khi đã mất tín hiệu THẬT vượt grace. Mốc dự phòng `created_at`
+        để thiết bị vừa thêm (chưa kịp poll lần đầu) không bị báo offline oan.
+        """
+        from django.utils import timezone
+        from django.conf import settings
+        from datetime import timedelta
+        ref = self.last_ok_seen or self.created_at
+        if not ref:
+            return False
+        min_grace = int(getattr(settings, "DEVICE_ONLINE_MIN_GRACE_SECS", 300))
+        grace_secs = max(int(self.collect_interval or 300) * 3, min_grace)
+        threshold = timezone.now() - timedelta(seconds=grace_secs)
+        return ref >= threshold
 
 
 class Interface(models.Model):

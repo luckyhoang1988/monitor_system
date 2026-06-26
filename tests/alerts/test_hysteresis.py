@@ -145,6 +145,87 @@ class TestFlapping:
 
 
 # ---------------------------------------------------------------------------
+# Recovery ghép cặp fire — không dội RECOVERED cho fire bị suppress
+# ---------------------------------------------------------------------------
+
+@pytest.mark.django_db
+class TestRecoveryPairing:
+    @pytest.fixture
+    def device(self, db):
+        return CiscoSNMPDeviceFactory(last_seen=dj_tz.now())
+
+    def test_recovery_suppressed_when_fire_was_not_notified(self, mocker, device):
+        """Alert không có notification 'sent' (fire bị flapping-suppress) → resolve im lặng."""
+        from apps.alerts.models import AlertNotification
+        mock_recovery = mocker.patch(
+            "apps.alerts.channels.email_channel.send_email_recovery")
+        rule = make_rule(metric="cpu_percent", condition="gt",
+                         threshold=90.0, channels=["email"])
+        Alert.objects.create(device=device, rule=rule, severity="WARNING",
+                             message="High CPU", metric_value=95.0, is_active=True)
+        # Không tạo AlertNotification 'sent' → coi như fire đã bị suppress.
+        SystemHealth.objects.create(device=device, timestamp=now(),
+                                    cpu_percent=30.0, mem_percent=50.0)
+        check_device_alerts(device, since())
+        assert Alert.objects.filter(device=device, is_active=True).count() == 0
+        assert AlertNotification.objects.filter(channel="email").count() == 0
+        mock_recovery.assert_not_called()
+
+    def test_recovery_sent_when_fire_was_notified(self, mocker, device):
+        """Alert đã có notification 'sent' → resolve gửi RECOVERED bình thường."""
+        from apps.alerts.models import AlertNotification
+        mock_recovery = mocker.patch(
+            "apps.alerts.channels.email_channel.send_email_recovery")
+        rule = make_rule(metric="cpu_percent", condition="gt",
+                         threshold=90.0, channels=["email"])
+        alert = Alert.objects.create(device=device, rule=rule, severity="WARNING",
+                                     message="High CPU", metric_value=95.0, is_active=True)
+        AlertNotification.objects.create(alert=alert, channel="email", status="sent")
+        SystemHealth.objects.create(device=device, timestamp=now(),
+                                    cpu_percent=30.0, mem_percent=50.0)
+        check_device_alerts(device, since())
+        assert Alert.objects.filter(device=device, is_active=True).count() == 0
+        mock_recovery.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# mem=0 sentinel — không fire rule lt/lte trên thiết bị không expose mem
+# ---------------------------------------------------------------------------
+
+@pytest.mark.django_db
+class TestMemZeroGuard:
+    @pytest.fixture
+    def device(self, db):
+        return CiscoSNMPDeviceFactory(last_seen=dj_tz.now())
+
+    def test_mem_zero_does_not_fire_lt_rule(self, device):
+        make_rule(name="Mem Low", metric="mem_percent",
+                  condition="lt", threshold=50.0)
+        SystemHealth.objects.create(device=device, timestamp=now(),
+                                    cpu_percent=10.0, mem_percent=0.0)
+        check_device_alerts(device, since())
+        assert Alert.objects.filter(device=device).count() == 0
+
+    def test_mem_zero_sustained_does_not_fire(self, device):
+        make_rule(name="Mem Low Sustained", metric="mem_percent",
+                  condition="lt", threshold=50.0, duration_min=5)
+        for i in range(4):
+            SystemHealth.objects.create(
+                device=device, timestamp=now() - timedelta(minutes=i),
+                cpu_percent=10.0, mem_percent=0.0)
+        check_device_alerts(device, since())
+        assert Alert.objects.filter(device=device).count() == 0
+
+    def test_real_low_mem_still_fires(self, device):
+        make_rule(name="Mem Low", metric="mem_percent",
+                  condition="lt", threshold=50.0)
+        SystemHealth.objects.create(device=device, timestamp=now(),
+                                    cpu_percent=10.0, mem_percent=12.0)
+        check_device_alerts(device, since())
+        assert Alert.objects.filter(device=device, is_active=True).count() == 1
+
+
+# ---------------------------------------------------------------------------
 # N+1 query optimization — số query cố định theo số snapshot
 # ---------------------------------------------------------------------------
 

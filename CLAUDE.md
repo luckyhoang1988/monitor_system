@@ -77,7 +77,12 @@ apps/
 - Thiết bị mạng SNMP/SSH (switch/router/firewall/nas): **ICMP AND SNMP-thật** (`ONLINE_REQUIRE_ICMP=True`). ICMP fail → bỏ qua SNMP, `last_seen=None`, SSE `online=false`.
 - HyperV / WLAN AC / ping-only: không bắt buộc ICMP; online = collect thành công + dữ liệu hợp lệ (`_has_valid_data`).
 - **Đồng bộ `last_seen`**: poll `online=True` → ghi `last_seen=now()`; `online=False` → **`last_seen=None`** (cả SNMP rỗng/exception, không chỉ ICMP). Tránh lệch: SSE badge **Off** nhưng thẻ đếm vẫn `N on` do grace `is_online`.
-- `Device.is_online` ([apps/devices/models.py](apps/devices/models.py)): property từ `last_seen` + grace `max(collect_interval×3, DEVICE_ONLINE_MIN_GRACE_SECS=300)`. Dùng trong `_dashboard_counts()`, alert engine, render index.
+- ⚠️ **TÁCH hiển thị vs cảnh báo — 2 mốc thời gian:**
+  - `last_seen` (**hiển thị**): bị xoá mỗi lần poll trượt → badge/thẻ đếm Off **tức thì**. `Device.is_online` dựa mốc này.
+  - `last_ok_seen` (**cảnh báo**): chỉ ghi khi poll THÀNH CÔNG, **KHÔNG bao giờ bị xoá** khi poll lỗi tạm. `Device.is_online_for_alert` dựa mốc này + grace `max(collect_interval×3, DEVICE_ONLINE_MIN_GRACE_SECS=300)` (dự phòng `created_at` cho thiết bị vừa thêm).
+  - **Vì sao**: trước đây xoá `last_seen` làm `is_online`=False **ngay** (grace bị bỏ qua khi `last_seen=None`) → 1 vòng poll trượt (ICMP rớt gói/SNMP chậm/walk rỗng) đủ bắn alert `device_online` **Offline giả** rồi Recovered → **spam Telegram flapping**. Nay alert offline ([_device_online](apps/alerts/engine.py), [_sustained_device_online](apps/alerts/engine.py)) dùng `is_online_for_alert` → chỉ báo khi mất tín hiệu THẬT vượt grace; dashboard vẫn Off tức thì.
+- `Device.is_online` ([apps/devices/models.py](apps/devices/models.py)): property từ `last_seen` + grace `max(collect_interval×3, DEVICE_ONLINE_MIN_GRACE_SECS=300)`. Dùng trong `_dashboard_counts()`, render index. **Cảnh báo offline KHÔNG dùng property này** (dùng `is_online_for_alert`).
+- **Chống spam khác** ([apps/alerts/engine.py](apps/alerts/engine.py)): (1) `_resolve_alert` chỉ gửi ✅ RECOVERED nếu fire đã từng có `AlertNotification` status `sent` → fire bị flapping-suppress thì resolve im lặng (không dội recovery). (2) `mem_percent==0` coi là sentinel "không đo được" (Cisco Business/SMB không expose mem) → `_latest_mem`/`_sustained_cpu_mem` bỏ qua → rule `lt/lte` mem không fire giả.
 
 **Dashboard index — hiển thị on/off** ([templates/dashboard/index.html](templates/dashboard/index.html)):
 - Stat-card mỗi loại: `total` + `X on` + `· Y off` (chỉ hiện `off` khi Y>0).

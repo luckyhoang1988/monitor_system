@@ -20,7 +20,13 @@ DATABASES = {
         "PASSWORD": env("DB_PASSWORD"),
         "HOST":     env("DB_HOST", default="localhost"),
         "PORT":     env.int("DB_PORT", default=5432),
-        "CONN_MAX_AGE": 60,
+        # ⚠️ ASGI/uvicorn + SSE: persistent connection (CONN_MAX_AGE>0) gây LEAK.
+        # SSE là async streaming request sống hàng giờ; @login_required chạm DB qua
+        # threadpool → mỗi thread giữ 1 connection nhưng request không "finish" để trả
+        # về → idle connection tích tụ tới max_connections (đã thấy 99/100 → "too many
+        # clients", worker poll fail → last_seen bị xoá → cảnh báo offline giả).
+        # Mặc định 0 = đóng connection sau mỗi query, hết tích tụ. Có thể chỉnh qua env.
+        "CONN_MAX_AGE": env.int("DB_CONN_MAX_AGE", default=0),
     }
 }
 

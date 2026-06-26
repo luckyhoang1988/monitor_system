@@ -54,6 +54,10 @@ def _sustained_cpu_mem(device: Device, rule: AlertRule, window_since) -> float |
           .order_by("timestamp")
           .values_list(rule.metric, flat=True))
     values = list(qs)
+    if rule.metric == "mem_percent":
+        # Loại mẫu mem == 0 (sentinel "không đo được") trước khi đánh giá sustained —
+        # tránh rule lt/lte fire giả trên thiết bị không expose mem qua SNMP.
+        values = [v for v in values if v]
     if not values:
         return None
 
@@ -82,7 +86,13 @@ def _latest_cpu(device: Device, since) -> float | None:
 def _latest_mem(device: Device, since) -> float | None:
     from apps.metrics.models import SystemHealth
     rec = SystemHealth.objects.filter(device=device, timestamp__gte=since).order_by("-timestamp").first()
-    return rec.mem_percent if rec else None
+    if rec is None:
+        return None
+    # mem_percent == 0 là sentinel "không đo được" (Cisco Business/SMB không expose mem
+    # qua SNMP, hoặc walk rỗng) — KHÔNG phải mem thật 0% → bỏ qua, tránh rule lt fire giả.
+    if not rec.mem_percent:
+        return None
+    return rec.mem_percent
 
 
 def _check_if_status(device: Device, since) -> float | None:
@@ -340,20 +350,28 @@ def _count_vms_repl_unhealthy(device: Device, since) -> float | None:
 
 
 def _device_online(device: Device) -> float:
-    """1.0 nếu thiết bị online (theo last_seen + grace), 0.0 nếu offline.
+    """1.0 nếu thiết bị online, 0.0 nếu offline — DÙNG CHO CẢNH BÁO.
 
-    Dùng chung công thức grace với Device.is_online để dashboard và alert nhất quán.
-    Phù hợp cho AP (protocol=ping) — phát hiện AP offline.
+    Dựa trên `is_online_for_alert` (mốc `last_ok_seen` + grace), KHÔNG dùng `is_online`
+    (mốc `last_seen` bị xoá mỗi lần poll trượt). Nhờ đó 1 vòng poll lỗi tạm không bắn
+    cảnh báo offline giả; chỉ báo khi mất tín hiệu thật vượt grace.
     """
-    return 1.0 if device.is_online else 0.0
+    return 1.0 if device.is_online_for_alert else 0.0
 
 
 def _sustained_device_online(device: Device, window_since) -> float | None:
-    """Yêu cầu trạng thái online/offline duy trì trong cửa sổ duration_min."""
-    if not device.last_seen or device.last_seen < window_since:
-        return 0.0
-    if device.is_online:
+    """Yêu cầu trạng thái offline duy trì trong cửa sổ duration_min.
+
+    Dùng `last_ok_seen` (không bị xoá khi poll trượt) làm mốc, dự phòng `created_at`.
+    - Còn trong grace → coi online (1.0).
+    - Offline và mốc OK gần nhất đã cũ hơn cửa sổ → xác nhận offline (0.0).
+    - Mới rớt, chưa đủ cửa sổ → None (bỏ qua, chờ thêm).
+    """
+    if device.is_online_for_alert:
         return 1.0
+    ref = device.last_ok_seen or device.created_at
+    if ref and ref < window_since:
+        return 0.0
     return None
 
 
@@ -632,7 +650,11 @@ def _resolve_alert(device: Device, rule: AlertRule) -> None:
         # Gán resolved_at lên object TRƯỚC khi gửi để tin RECOVERED có ngày giờ
         # (trước đây gửi trước update → alert.resolved_at=None → hiện "N/A").
         alert.resolved_at = resolved_at
-        _send_recovery_notifications(alert, rule.channels)
+        # Chỉ gửi RECOVERED nếu fire của alert này ĐÃ TỪNG gửi thành công. Nếu fire
+        # bị flapping-suppress (không có notification "sent") thì im lặng resolve →
+        # tránh dội ✅ RECOVERED cho cảnh báo giả/flapping mà người dùng chưa từng thấy.
+        if AlertNotification.objects.filter(alert=alert, status="sent").exists():
+            _send_recovery_notifications(alert, rule.channels)
     Alert.objects.filter(pk__in=[a.pk for a in alerts_to_resolve]).update(
         is_active=False,
         resolved_at=resolved_at,
