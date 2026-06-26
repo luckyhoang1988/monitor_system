@@ -1,5 +1,6 @@
 """SNMP Collector cho Switch — tự động detect vendor/OS-family."""
 import logging
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -414,6 +415,27 @@ class SwitchSNMPCollector(BaseCollector):
                 pass
         return raw.strip()
 
+    @staticmethod
+    def _decode_inet_ipv4(raw: str | None) -> str:
+        """Decode InetAddress OctetString → dotted IPv4. '' nếu rỗng/0.0.0.0/IPv6.
+
+        Huawei AC trả IP AP (cột .13) là OctetString 4 byte nhị phân; str(var_bind)
+        cho ra chuỗi 4 ký tự latin-1. KHÔNG .strip() vì byte đầu IP 10.x là '\\n'.
+        """
+        if not raw:
+            return ""
+        val = raw.strip()
+        # vài backend tự format sẵn thành dotted IPv4 → giữ nguyên
+        if re.fullmatch(r"\d{1,3}(\.\d{1,3}){3}", val):
+            return "" if val == "0.0.0.0" else val
+        try:
+            b = raw.encode("latin-1", "ignore")
+        except (UnicodeEncodeError, AttributeError):
+            return ""
+        if len(b) == 4 and any(b):           # 4 byte, không phải 0.0.0.0
+            return ".".join(str(x) for x in b)
+        return ""                             # 16-byte IPv6 all-zero / khác → bỏ qua
+
     def _walk_column(self, oid: str | None) -> dict[str, str]:
         """Walk 1 cột bảng, trả về {index_suffix: value}."""
         if not oid:
@@ -466,7 +488,7 @@ class SwitchSNMPCollector(BaseCollector):
                     "index": idx,
                     "name": name or mac or idx,
                     "mac": mac,
-                    "ip": (ips.get(idx) or "").strip(),
+                    "ip": self._decode_inet_ipv4(ips.get(idx)),
                     "group": (groups.get(idx) or "").strip(),
                     "run_state": state_raw,
                     "is_online": is_online,
