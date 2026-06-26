@@ -70,12 +70,21 @@
     <div class="card">
       <div class="card-header bg-white py-2 d-flex align-items-center justify-content-between">
         <span class="fw-semibold"><i class="bi bi-cpu me-2 text-primary"></i>CPU & RAM (%)</span>
-        <select id="rangeSelect" class="form-select form-select-sm w-auto">
-          <option value="1h">1 giờ</option>
-          <option value="6h">6 giờ</option>
-          <option value="24h">24 giờ</option>
-          <option value="7d">7 ngày</option>
-        </select>
+        <div class="d-flex align-items-center gap-2 flex-wrap">
+          <select id="rangeSelect" class="form-select form-select-sm w-auto">
+            <option value="1h">1 giờ</option>
+            <option value="6h">6 giờ</option>
+            <option value="24h">24 giờ</option>
+            <option value="7d">7 ngày</option>
+            <option value="custom">Tùy chọn…</option>
+          </select>
+          <div id="rangeCustom" class="d-none d-flex align-items-center gap-1">
+            <input type="datetime-local" id="rangeFrom" class="form-control form-control-sm w-auto">
+            <span class="text-muted small">→</span>
+            <input type="datetime-local" id="rangeTo" class="form-control form-control-sm w-auto">
+            <button type="button" id="rangeApply" class="btn btn-sm btn-primary">Xem</button>
+          </div>
+        </div>
       </div>
       <div class="card-body">
         <div class="chart-wrap"><canvas id="cpuChart"></canvas></div>
@@ -171,6 +180,7 @@
 
 {% block extra_js %}
 <script src="{% static 'js/realtime.js' %}"></script>
+<script src="{% static 'js/chart_range.js' %}"></script>
 <script>
 const DEVICE_ID = {{ device.pk|unlocalize }};
 const API_METRICS = `/api/metrics/${DEVICE_ID}/`;
@@ -205,8 +215,8 @@ const trafficChart = new Chart(trfCtx, {
   options: chartDefaults,
 });
 
-function loadMetrics(range) {
-  fetch(`${API_METRICS}?range=${range}`)
+function loadMetrics() {
+  fetch(`${API_METRICS}?${ChartRange.query()}`)
     .then(r => r.json())
     .then(d => {
       cpuChart.data.labels = d.labels;
@@ -217,9 +227,8 @@ function loadMetrics(range) {
     .catch(() => {});
 }
 
-function loadTraffic(range) {
-  document.getElementById("trafficRange").textContent = range;
-  fetch(`${API_IFACES}?range=${range}`)
+function loadTraffic() {
+  fetch(`${API_IFACES}?${ChartRange.query()}`)
     .then(r => r.json())
     .then(d => {
       const peak = (iface) => Math.max(
@@ -259,27 +268,30 @@ function loadTraffic(range) {
     .catch(() => {});
 }
 
-// Initial load
-loadMetrics("1h");
-loadTraffic("1h");
+function reloadCharts() {
+  document.getElementById("trafficRange").textContent =
+    ChartRange.query().startsWith("from=") ? "tùy chọn" : document.getElementById("rangeSelect").value;
+  loadMetrics();
+  loadTraffic();
+}
 
-document.getElementById("rangeSelect").addEventListener("change", function () {
-  loadMetrics(this.value);
-  loadTraffic(this.value);
+// Bộ chọn khung thời gian (preset + tùy chọn) → vẽ lại khi đổi/bấm Xem.
+ChartRange.init({
+  selectId: "rangeSelect", customWrapId: "rangeCustom",
+  fromId: "rangeFrom", toId: "rangeTo", applyBtnId: "rangeApply",
+  onChange: reloadCharts,
 });
+
+// Initial load
+reloadCharts();
 
 // ===== Realtime: tự vẽ lại chart khi thiết bị này vừa poll xong =====
 // Mỗi event SSE → re-fetch range đang chọn (tái dùng loadMetrics/loadTraffic,
-// giữ đúng downsampling server-side). Range tổng hợp (7d+) đổi rất chậm nên bỏ qua.
-const LIVE_RANGES = ["1h", "6h", "24h"];
-function currentRange() {
-  return document.getElementById("rangeSelect").value;
-}
+// giữ đúng downsampling server-side). Range tổng hợp/tùy chọn đổi chậm → bỏ qua.
 function refreshIfLive() {
-  const range = currentRange();
-  if (LIVE_RANGES.indexOf(range) === -1) return;
-  loadMetrics(range);
-  loadTraffic(range);
+  if (!ChartRange.isLive()) return;
+  loadMetrics();
+  loadTraffic();
 }
 function startDetailFallback() {
   // Trang chi tiết vốn không auto-refresh → fallback 120s là cải thiện thuần.
