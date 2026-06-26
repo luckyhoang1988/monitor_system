@@ -1,4 +1,4 @@
-"""Build JSON topology graph cho Cytoscape.js."""
+"""Build JSON topology graph cho Cytoscape.js — phân tầng Core → Switch → AP."""
 from __future__ import annotations
 
 from collections import defaultdict
@@ -8,6 +8,7 @@ from django.utils import timezone
 
 from apps.collectors.topology_lldp import normalize_mac
 from apps.devices.models import Device, TopologyLink
+from apps.devices.topology_hierarchy import build_switch_uplink_edges, find_core_device
 from apps.metrics.models import WifiApStats
 
 ORPHAN_GROUP_ID = "group-orphan"
@@ -31,7 +32,6 @@ def _short_label(name: str, max_len: int = 22) -> str:
 
 
 def _latest_ap_snapshot(ac: Device) -> dict[str, dict]:
-    """MAC normalized → {ap_name, ap_ip, is_online, client_count, run_state}."""
     latest_ts = (
         WifiApStats.objects.filter(device=ac)
         .order_by("-timestamp")
@@ -64,7 +64,7 @@ def build_topology_graph(
     ac: Device | None = None,
     switch_filter: int | None = None,
 ) -> dict:
-    """Trả {nodes, edges, meta} — compound parent=switch, không dùng edge (tránh chồng chéo)."""
+    """Core (trên) → Switch access (giữa, khung compound) → AP (trong khung)."""
     if ac is None:
         ac = (
             Device.objects.filter(device_type="wlan_controller", enabled=True)
@@ -91,37 +91,69 @@ def build_topology_graph(
                     "client_count": ap.client_count,
                 })
 
-    links_qs = TopologyLink.objects.filter(is_stale=False).select_related(
-        "local_device", "local_interface",
-    )
-    if switch_filter:
-        links_qs = links_qs.filter(local_device_id=switch_filter)
+    ap_links_qs = TopologyLink.objects.filter(
+        is_stale=False,
+        link_kind="ap",
+    ).select_related("local_device", "local_interface")
 
-    links = list(links_qs.order_by("local_device__name", "local_port"))
-    switch_ids: set[int] = set()
     if switch_filter:
-        switch_ids.add(switch_filter)
-    else:
-        switch_ids.update(link.local_device_id for link in links)
+        ap_links_qs = ap_links_qs.filter(local_device_id=switch_filter)
+
+    ap_links = list(ap_links_qs.order_by("local_device__name", "local_port"))
+
+    access_switch_ids: set[int] = {link.local_device_id for link in ap_links}
+    if switch_filter:
+        access_switch_ids.add(switch_filter)
+
+    core = find_core_device()
+    core_id = core.id if core else None
 
     ap_per_switch: dict[int, int] = defaultdict(int)
-    for link in links:
+    for link in ap_links:
         ap_per_switch[link.local_device_id] += 1
 
     nodes: list[dict] = []
+    edges: list[dict] = []
     mapped_macs: set[str] = set()
+    switch_nodes_added: set[int] = set()
 
-    for sw_id in sorted(switch_ids):
+    # Core node (tầng trên)
+    if core and (not switch_filter or core_id == switch_filter or switch_filter in access_switch_ids):
+        if not switch_filter or core_id != switch_filter:
+            nodes.append({
+                "data": {
+                    "id": _switch_node_id(core.id),
+                    "label": core.name,
+                    "type": "core",
+                    "ip": core.ip_address,
+                    "online": core.is_online,
+                    "location": core.location or "",
+                    "detail_url": reverse("dashboard:switch_detail", args=[core.id]),
+                    "tier": 0,
+                },
+            })
+            switch_nodes_added.add(core.id)
+
+    # Access switch nodes (tầng giữa — compound chứa AP)
+    display_switch_ids = access_switch_ids.copy()
+    if switch_filter:
+        display_switch_ids = {switch_filter}
+
+    for sw_id in sorted(display_switch_ids):
+        if sw_id == core_id:
+            continue
         try:
             sw = Device.objects.get(pk=sw_id)
         except Device.DoesNotExist:
             continue
-        sw_nid = _switch_node_id(sw.id)
+        if sw_id in switch_nodes_added:
+            continue
+        switch_nodes_added.add(sw_id)
         ap_n = ap_per_switch.get(sw_id, 0)
-        label = sw.name if ap_n == 0 else f"{sw.name} ({ap_n} AP)"
+        label = f"{sw.name} ({ap_n} AP)" if ap_n else sw.name
         nodes.append({
             "data": {
-                "id": sw_nid,
+                "id": _switch_node_id(sw.id),
                 "label": label,
                 "type": "switch",
                 "ip": sw.ip_address,
@@ -129,11 +161,17 @@ def build_topology_graph(
                 "location": sw.location or "",
                 "detail_url": reverse("dashboard:switch_detail", args=[sw.id]),
                 "ap_count": ap_n,
+                "tier": 1,
             },
         })
 
-    for link in links:
+    # AP trong khung switch
+    for link in ap_links:
         sw = link.local_device
+        if switch_filter and sw.id != switch_filter:
+            continue
+        if core_id and sw.id == core_id:
+            continue
         sw_nid = _switch_node_id(sw.id)
         mac = normalize_mac(link.remote_ap_mac)
         ap_info = ap_by_mac.get(mac, {}) if mac else {}
@@ -145,7 +183,6 @@ def build_topology_graph(
         is_online = ap_info.get("is_online", True)
         client_count = ap_info.get("client_count", 0)
         ap_nid = _ap_node_id(mac, ap_name)
-        port = link.local_port or ""
 
         if mac:
             mapped_macs.add(mac)
@@ -162,11 +199,30 @@ def build_topology_graph(
                 "client_count": client_count,
                 "confirmed": link.is_confirmed,
                 "switch_name": sw.name,
-                "switch_port": port,
+                "switch_port": link.local_port or "",
                 "parent": sw_nid,
+                "tier": 2,
             },
         })
 
+    # Edge switch → switch (core xuống access)
+    uplink_edges = build_switch_uplink_edges(
+        access_switch_ids,
+        switch_filter=switch_filter,
+    )
+    for ue in uplink_edges:
+        edges.append({
+            "data": {
+                "id": f"e-{ue['source_id']}-{ue['target_id']}",
+                "source": ue["source_id"],
+                "target": ue["target_id"],
+                "label": ue.get("label") or "",
+                "type": "uplink",
+                "inferred": ue.get("inferred", False),
+            },
+        })
+
+    # Orphan AP
     orphan_aps: list[dict] = []
     for ap in all_aps_on_ac:
         if ap["mac"] and ap["mac"] in mapped_macs:
@@ -175,12 +231,13 @@ def build_topology_graph(
             continue
         orphan_aps.append(ap)
 
-    if orphan_aps:
+    if orphan_aps and not switch_filter:
         nodes.append({
             "data": {
                 "id": ORPHAN_GROUP_ID,
                 "label": f"Chưa map ({len(orphan_aps)} AP)",
                 "type": "orphan-group",
+                "tier": 1,
             },
         })
         for ap in orphan_aps:
@@ -200,6 +257,7 @@ def build_topology_graph(
                     "switch_name": "",
                     "switch_port": "",
                     "parent": ORPHAN_GROUP_ID,
+                    "tier": 2,
                 },
             })
 
@@ -211,11 +269,9 @@ def build_topology_graph(
         .values("id", "name")
     )
 
-    switches_with_ap = len([sid for sid in switch_ids if ap_per_switch.get(sid, 0) > 0])
-
     return {
         "nodes": nodes,
-        "edges": [],
+        "edges": edges,
         "meta": {
             "ac_id": ac.id if ac else None,
             "ac_name": ac.name if ac else "",
@@ -224,9 +280,11 @@ def build_topology_graph(
             "ap_mapped": len(mapped_macs),
             "ap_unmapped": len(orphan_aps),
             "ap_offline": ap_offline,
-            "switch_count": switches_with_ap,
+            "switch_count": len(access_switch_ids),
+            "core_id": core_id,
+            "core_name": core.name if core else "",
             "switch_filter": switch_filter,
-            "layout": "compound",
+            "layout": "hierarchy",
             "generated_at": timezone.now().isoformat(),
         },
     }

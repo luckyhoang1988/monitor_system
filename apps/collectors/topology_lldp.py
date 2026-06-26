@@ -126,9 +126,15 @@ def _chassis_to_mac(raw: str) -> str:
     return ""
 
 
-def is_ap_neighbor(sys_name: str, chassis_mac: str, ap_pattern: re.Pattern | None = None) -> bool:
-    """Phân loại neighbor là AP (MAC chassis hoặc tên khớp pattern)."""
-    if chassis_mac:
+def is_ap_neighbor(
+    sys_name: str,
+    chassis_mac: str,
+    ap_pattern: re.Pattern | None = None,
+    ap_macs: set[str] | None = None,
+) -> bool:
+    """Phân loại neighbor là AP — theo MAC trên AC hoặc pattern tên AP."""
+    mac = normalize_mac(chassis_mac) if chassis_mac else ""
+    if ap_macs and mac and mac in ap_macs:
         return True
     pattern = ap_pattern or DEFAULT_AP_NAME_PATTERN
     name = (sys_name or "").strip()
@@ -178,6 +184,7 @@ def collect_lldp_neighbors(
     *,
     ap_only: bool = True,
     ap_pattern: re.Pattern | None = None,
+    ap_macs: set[str] | None = None,
 ) -> list[NeighborRecord]:
     """Walk LLDP trên 1 switch, trả danh sách neighbor (mặc định chỉ AP)."""
     os_family = device.os_family or "huawei_vrp"
@@ -225,7 +232,10 @@ def collect_lldp_neighbors(
         chassis_raw = row.get("chassis_id") or ""
         chassis_mac = _chassis_to_mac(chassis_raw)
         port_id = (row.get("port_id") or "").strip()
-        if not is_ap_neighbor(sys_name, chassis_mac, ap_pattern):
+        if is_ap_neighbor(sys_name, chassis_mac, ap_pattern, ap_macs):
+            is_ap = True
+        else:
+            is_ap = False
             if ap_only:
                 continue
         local_port = _resolve_local_port_name(
@@ -238,7 +248,7 @@ def collect_lldp_neighbors(
             remote_chassis_id=str(chassis_raw).strip(),
             remote_port_id=port_id,
             remote_mac=chassis_mac,
-            is_ap_candidate=True,
+            is_ap_candidate=is_ap,
         ))
 
     logger.info(

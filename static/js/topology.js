@@ -1,4 +1,4 @@
-/* Topology AP ↔ Switch — Cytoscape.js compound layout (không edge spaghetti) */
+/* Topology — phân tầng Core → Switch (compound) → AP */
 (function (global) {
   "use strict";
 
@@ -14,6 +14,26 @@
 
   function cytoscapeStyle() {
     return [
+      {
+        selector: "node[type='core']",
+        style: {
+          shape: "round-rectangle",
+          width: 150,
+          height: 50,
+          "background-color": "#dbeafe",
+          "border-width": 3,
+          "border-color": "#1d4ed8",
+          label: "data(label)",
+          "font-size": 11,
+          "font-weight": "bold",
+          "text-valign": "center",
+          "text-halign": "center",
+        },
+      },
+      {
+        selector: "node[type='core'][online='false']",
+        style: { "border-color": "#dc2626", "background-color": "#fee2e2" },
+      },
       {
         selector: ":parent",
         style: {
@@ -78,6 +98,27 @@
         },
       },
       {
+        selector: "edge[type='uplink']",
+        style: {
+          width: 2,
+          "line-color": "#6366f1",
+          "target-arrow-color": "#6366f1",
+          "target-arrow-shape": "triangle",
+          "curve-style": "bezier",
+          label: "data(label)",
+          "font-size": 8,
+          "text-rotation": "autorotate",
+        },
+      },
+      {
+        selector: "edge[inferred='true']",
+        style: {
+          "line-style": "dashed",
+          "line-color": "#94a3b8",
+          "target-arrow-color": "#94a3b8",
+        },
+      },
+      {
         selector: "node.topo-offline-pulse",
         style: { "overlay-opacity": 0.3, "overlay-color": "#dc2626" },
       },
@@ -130,13 +171,15 @@
         opts.metaUpdated.textContent = "Cập nhật: " + meta.generated_at.slice(11, 19);
       }
       if (opts.layoutHint) {
-        var nsw = meta.switch_count || 0;
         if (meta.switch_filter) {
-          opts.layoutHint.textContent = "Đang xem 1 switch — AP trong khung.";
-        } else if (nsw > 4) {
-          opts.layoutHint.textContent = "Nhiều switch — chọn filter Switch để dễ nhìn hơn.";
+          opts.layoutHint.textContent = "Đang xem 1 switch — Core phía trên, AP trong khung.";
+        } else if (meta.core_name) {
+          opts.layoutHint.textContent =
+            "Phân tầng: " + meta.core_name + " (core) → switch access → AP trong khung.";
+        } else if ((meta.switch_count || 0) > 4) {
+          opts.layoutHint.textContent = "Nhiều switch — chọn filter Switch để dễ nhìn.";
         } else {
-          opts.layoutHint.textContent = "Mỗi khung = 1 switch, AP bên trong.";
+          opts.layoutHint.textContent = "Mỗi khung = 1 switch access, AP bên trong.";
         }
       }
     }
@@ -163,6 +206,13 @@
             : '<span class="text-success">Online</span>') + "</div>");
         if (lastMeta.ac_id) {
           lines.push('<div class="mt-2"><a href="' + opts.wlanDetailBase + lastMeta.ac_id + '/">WLAN AC</a></div>');
+        }
+      } else if (d.type === "core") {
+        lines.push('<div class="badge bg-primary mb-1">Core switch</div>');
+        if (d.ip) lines.push("<div><strong>IP:</strong> " + d.ip + "</div>");
+        if (d.location) lines.push("<div><strong>Vị trí:</strong> " + d.location + "</div>");
+        if (d.detail_url) {
+          lines.push('<div class="mt-2"><a href="' + d.detail_url + '">Chi tiết switch</a></div>');
         }
       } else if (node.isParent && node.isParent()) {
         if (d.ip) lines.push("<div><strong>IP:</strong> " + d.ip + "</div>");
@@ -195,44 +245,43 @@
     function runLayout() {
       if (!cy || cy.nodes().length === 0) return;
 
+      var core = cy.nodes("[type='core']:visible");
       var parents = cy.nodes(":parent:visible");
       var switchFilter = opts.filterSwitch && opts.filterSwitch.value;
 
-      if (switchFilter && parents.length === 1) {
-        layoutChildrenGrid(parents[0]);
-        parents[0].layout({
-          name: "preset",
-          fit: true,
-          padding: 40,
-        }).run();
-        cy.fit(parents, 50);
-        return;
+      if (core.length) {
+        core.position({ x: 0, y: -140 });
       }
 
+      var yStart = core.length ? 60 : 0;
       var nParents = parents.length;
-      var rootCols = nParents <= 2 ? nParents : nParents <= 6 ? 3 : 4;
+      var rootCols = nParents <= 1 ? 1 : nParents <= 2 ? 2 : nParents <= 6 ? 3 : 4;
 
-      parents.layout({
-        name: "grid",
-        fit: false,
-        padding: 36,
-        avoidOverlap: true,
-        condense: false,
-        cols: rootCols,
-        nodeDimensionsIncludeLabels: true,
-      }).run();
+      if (nParents > 0) {
+        parents.layout({
+          name: "grid",
+          fit: false,
+          padding: 36,
+          avoidOverlap: true,
+          condense: false,
+          cols: rootCols,
+          nodeDimensionsIncludeLabels: true,
+          boundingBox: { x1: -520, y1: yStart, w: 1040, h: 520 },
+        }).run();
+      }
 
       parents.forEach(function (p) {
         layoutChildrenGrid(p);
       });
 
-      cy.layout({
-        name: "preset",
-        fit: true,
-        padding: 50,
-      }).run();
+      if (switchFilter && parents.length <= 1) {
+        var fitSet = parents.length ? parents.union(core) : core;
+        if (fitSet.length) cy.fit(fitSet, 50);
+        else cy.fit(undefined, 40);
+        return;
+      }
 
-      cy.fit(undefined, 40);
+      cy.fit(undefined, 45);
     }
 
     function loadGraph() {
@@ -240,19 +289,20 @@
       return fetch(url, { cache: "no-store", credentials: "same-origin" })
         .then(function (r) { return r.json(); })
         .then(function (data) {
-          var elements = data.nodes || [];
+          var elements = (data.nodes || []).concat(data.edges || []);
           elements.forEach(function (el) {
             var d = el.data || {};
             if (d.online !== undefined) d.online = d.online ? "true" : "false";
             if (d.confirmed !== undefined) d.confirmed = d.confirmed ? "true" : "false";
             if (d.orphan !== undefined) d.orphan = d.orphan ? "true" : "false";
+            if (d.inferred !== undefined) d.inferred = d.inferred ? "true" : "false";
           });
           if (!cy) {
             cy = cytoscape({
               container: opts.container,
               elements: elements,
               style: cytoscapeStyle(),
-              minZoom: 0.15,
+              minZoom: 0.12,
               maxZoom: 2.5,
               wheelSensitivity: 0.25,
               boxSelectionEnabled: false,

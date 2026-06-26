@@ -51,7 +51,10 @@ class TestGroupRemRows:
 
 class TestIsApNeighbor:
     def test_mac_chassis(self):
-        assert is_ap_neighbor("", "0c:84:08:59:80:c0") is True
+        assert is_ap_neighbor("", "0c:84:08:59:80:c0") is False
+        assert is_ap_neighbor(
+            "", "0c:84:08:59:80:c0", ap_macs={"0c:84:08:59:80:c0"},
+        ) is True
 
     def test_ap_name_pattern(self):
         assert is_ap_neighbor("AP-XUONG1_MAY/IE", "") is True

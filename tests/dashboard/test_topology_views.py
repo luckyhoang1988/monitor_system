@@ -71,6 +71,37 @@ class TestTopologyViews:
         assert len(sw_nodes) == 1
         assert data["edges"] == []
 
+    def test_topology_hierarchy_core_to_access(self, logged_in_client):
+        ac = DeviceFactory(device_type="wlan_controller", name="ACL_Wlan")
+        core = CiscoSNMPDeviceFactory(name="PFVN-CORE-SW")
+        sw = CiscoSNMPDeviceFactory(name="X1_SW2_Access")
+        ts = timezone.now()
+        WifiApStats.objects.create(
+            device=ac, timestamp=ts, ap_name="AP-01",
+            ap_mac="0c:84:08:59:80:c1", is_online=True, client_count=1,
+        )
+        TopologyLink.objects.create(
+            local_device=sw,
+            local_port="GE0/0/12",
+            link_kind="ap",
+            remote_ap_mac="0c:84:08:59:80:c1",
+            remote_ap_name="AP-01",
+            match_method="mac",
+            is_confirmed=True,
+        )
+
+        response = logged_in_client.get(reverse("dashboard:topology_data"))
+        data = response.json()
+        core_nodes = [n for n in data["nodes"] if n["data"].get("type") == "core"]
+        assert len(core_nodes) == 1
+        assert core_nodes[0]["data"]["id"] == f"sw-{core.pk}"
+
+        uplinks = [e for e in data["edges"] if e["data"].get("type") == "uplink"]
+        assert len(uplinks) == 1
+        assert uplinks[0]["data"]["source"] == f"sw-{core.pk}"
+        assert uplinks[0]["data"]["target"] == f"sw-{sw.pk}"
+        assert uplinks[0]["data"]["inferred"] is True
+
     def test_topology_orphan_ap(self, logged_in_client):
         ac = DeviceFactory(device_type="wlan_controller", name="AC-ORPHAN")
         ts = timezone.now()

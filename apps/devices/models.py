@@ -138,7 +138,12 @@ class Interface(models.Model):
 
 
 class TopologyLink(models.Model):
-    """Liên kết vật lý switch port → AP (discovery qua LLDP hoặc nhập tay)."""
+    """Liên kết topology: switch port → AP hoặc switch khác."""
+
+    LINK_KINDS = [
+        ("ap", "AP"),
+        ("switch", "Switch"),
+    ]
 
     MATCH_METHODS = [
         ("mac", "MAC"),
@@ -156,6 +161,14 @@ class TopologyLink(models.Model):
     local_interface = models.ForeignKey(
         Interface, null=True, blank=True, on_delete=models.SET_NULL,
         related_name="topology_links", verbose_name="Interface",
+    )
+
+    link_kind = models.CharField(
+        max_length=10, choices=LINK_KINDS, default="ap", verbose_name="Loại liên kết",
+    )
+    remote_device = models.ForeignKey(
+        Device, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name="topology_incoming_links", verbose_name="Thiết bị đích (switch)",
     )
 
     remote_ap_mac = models.CharField(max_length=32, blank=True, verbose_name="MAC AP")
@@ -185,6 +198,8 @@ class TopologyLink(models.Model):
         ordering = ["local_device__name", "local_port"]
 
     def __str__(self) -> str:
+        if self.link_kind == "switch" and self.remote_device_id:
+            return f"{self.local_device.name}:{self.local_port} → {self.remote_device.name}"
         target = self.remote_ap_name or self.remote_ap_mac or self.remote_sys_name or "?"
         return f"{self.local_device.name}:{self.local_port} → {target}"
 
