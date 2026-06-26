@@ -1,15 +1,15 @@
 """Thu thập MAC từ bảng FDB (forwarding) trên switch — fallback khi LLDP rỗng.
 
 Đối chiếu MAC học được trên từng port với danh sách AP từ AC (WifiApStats).
+Lọc bỏ cổng trunk/uplink để tránh gán nhầm AP lên cổng uplink.
 """
 from __future__ import annotations
 
 import logging
+import re
+from collections import defaultdict
 from dataclasses import dataclass
-from pathlib import Path
 from typing import TYPE_CHECKING
-
-import yaml
 
 from apps.collectors.snmp_client import (
     create_snmp_session,
@@ -23,14 +23,24 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-OID_DIR = Path(__file__).resolve().parent.parent.parent / "oids"
-
 # Q-BRIDGE FDB (VLAN-aware) — Huawei VRP dùng được
 OID_DOT1Q_FDB_PORT = "1.3.6.1.2.1.17.7.1.2.2.1.2"
 # BRIDGE-MIB FDB (fallback)
 OID_DOT1D_FDB_PORT = "1.3.6.1.2.1.17.4.3.1.2"
 OID_DOT1D_BASEPORT_IFINDEX = "1.3.6.1.2.1.17.1.4.1.2"
 OID_IF_DESCR = "1.3.6.1.2.1.2.2.1.2"
+
+# Cổng có >= N MAC AP → coi là trunk flooding, bỏ qua
+AP_MAC_FLOOD_THRESHOLD = 3
+
+TRUNK_NAME_PREFIXES = (
+    "po", "port-channel", "eth-trunk", "bridge-aggregation",
+    "bond", "lag", "ae", "trunk",
+)
+TRUNK_NAME_PATTERN = re.compile(
+    r"^(eth-trunk|port-channel|po\d|xge|xgigabit|10ge|25ge|40ge|100ge)",
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -42,6 +52,137 @@ class FdbMacEntry:
     ap_name: str = ""
     ap_ip: str = ""
     is_ap_match: bool = False
+    excluded_uplink: bool = False
+
+
+@dataclass
+class PortMeta:
+    port_mode: str = ""
+    is_uplink: bool = False
+    manual_uplink: bool = False
+    name_trunk: bool = False
+    ap_mac_count: int = 0
+
+
+def _normalize_port_name(name: str) -> str:
+    return (name or "").strip().casefold()
+
+
+def _is_trunk_port_name(port_name: str) -> bool:
+    n = _normalize_port_name(port_name)
+    if any(n.startswith(p) for p in TRUNK_NAME_PREFIXES):
+        return True
+    return bool(TRUNK_NAME_PATTERN.match(n))
+
+
+def _load_port_meta(device: Device, ap_entries: list[FdbMacEntry]) -> dict[str, PortMeta]:
+    from apps.devices.models import Interface
+
+    port_ap_counts: dict[str, int] = defaultdict(int)
+    for e in ap_entries:
+        if e.is_ap_match:
+            port_ap_counts[e.local_port] += 1
+
+    manual_ports = {_normalize_port_name(p) for p in (device.uplink_ports or [])}
+    meta: dict[str, PortMeta] = {}
+
+    for iface in Interface.objects.filter(device=device):
+        meta[iface.name] = PortMeta(
+            port_mode=iface.port_mode or "",
+            is_uplink=bool(iface.is_uplink),
+            manual_uplink=_normalize_port_name(iface.name) in manual_ports,
+            name_trunk=_is_trunk_port_name(iface.name),
+            ap_mac_count=port_ap_counts.get(iface.name, 0),
+        )
+
+    for e in ap_entries:
+        if e.local_port not in meta:
+            meta[e.local_port] = PortMeta(
+                name_trunk=_is_trunk_port_name(e.local_port),
+                manual_uplink=_normalize_port_name(e.local_port) in manual_ports,
+                ap_mac_count=port_ap_counts.get(e.local_port, 0),
+            )
+        else:
+            meta[e.local_port].ap_mac_count = port_ap_counts.get(e.local_port, 0)
+
+    return meta
+
+
+def is_uplink_port(port_name: str, port_meta: dict[str, PortMeta]) -> bool:
+    """True nếu cổng là trunk/uplink — không dùng để map AP."""
+    m = port_meta.get(port_name)
+    if not m:
+        return _is_trunk_port_name(port_name)
+    if m.port_mode in ("trunk", "hybrid"):
+        return True
+    if m.is_uplink or m.manual_uplink or m.name_trunk:
+        return True
+    if m.ap_mac_count >= AP_MAC_FLOOD_THRESHOLD:
+        return True
+    return False
+
+
+def _pick_best_port(
+    candidates: list[FdbMacEntry],
+    port_meta: dict[str, PortMeta],
+) -> FdbMacEntry:
+    """Chọn 1 port access tốt nhất khi cùng MAC xuất hiện nhiều cổng."""
+
+    def sort_key(e: FdbMacEntry) -> tuple:
+        m = port_meta.get(e.local_port, PortMeta())
+        is_access = 0 if m.port_mode == "access" else 1
+        is_uplink = 1 if is_uplink_port(e.local_port, port_meta) else 0
+        return (is_uplink, is_access, m.ap_mac_count, e.local_port)
+
+    return min(candidates, key=sort_key)
+
+
+def filter_fdb_ap_entries(
+    device: Device,
+    entries: list[FdbMacEntry],
+    *,
+    exclude_uplink: bool = True,
+) -> list[FdbMacEntry]:
+    """Lọc cổng uplink/trunk; mỗi MAC AP chỉ giữ 1 port access tốt nhất."""
+    ap_entries = [e for e in entries if e.is_ap_match]
+    if not ap_entries:
+        return entries
+
+    port_meta = _load_port_meta(device, ap_entries)
+    excluded_ports = {
+        p for p in port_meta if exclude_uplink and is_uplink_port(p, port_meta)
+    }
+
+    if excluded_ports:
+        logger.info(
+            "Topology FDB %s: loại %d cổng uplink/trunk (%s)",
+            device.name,
+            len(excluded_ports),
+            ", ".join(sorted(excluded_ports)[:6])
+            + ("..." if len(excluded_ports) > 6 else ""),
+        )
+
+    by_mac: dict[str, list[FdbMacEntry]] = defaultdict(list)
+    for e in ap_entries:
+        e.excluded_uplink = e.local_port in excluded_ports
+        if exclude_uplink and e.excluded_uplink:
+            continue
+        by_mac[e.mac].append(e)
+
+    result: list[FdbMacEntry] = []
+    for mac, candidates in by_mac.items():
+        if len(candidates) == 1:
+            result.append(candidates[0])
+        else:
+            result.append(_pick_best_port(candidates, port_meta))
+
+    return result
+
+
+def collect_fdb_ap_mappings(device: Device, ap_macs: set[str]) -> list[FdbMacEntry]:
+    """Walk FDB + lọc uplink + dedupe MAC — dùng cho topology discovery."""
+    raw = collect_switch_mac_table(device, ap_macs=ap_macs, ap_only=True)
+    return filter_fdb_ap_entries(device, raw, exclude_uplink=True)
 
 
 def _snmp_kwargs(device: Device) -> dict:

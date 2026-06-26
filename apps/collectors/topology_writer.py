@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 from django.utils import timezone
 
-from apps.collectors.topology_fdb import collect_switch_mac_table
+from apps.collectors.topology_fdb import collect_fdb_ap_mappings
 from apps.collectors.topology_lldp import collect_lldp_neighbors, normalize_mac
 from apps.devices.topology_match import (
     get_default_ac_device,
@@ -100,7 +100,7 @@ def upsert_switch_topology(device: Device, ac_device=None) -> tuple[int, int]:
     elif ap_macs:
         # Fallback: MAC học trên port khớp AP trên AC
         protocol_used = "fdb"
-        fdb_entries = collect_switch_mac_table(device, ap_macs=ap_macs, ap_only=True)
+        fdb_entries = collect_fdb_ap_mappings(device, ap_macs)
         for entry in fdb_entries:
             seen_ports.add(entry.local_port)
             info = ap_snapshot.get(entry.mac, {})

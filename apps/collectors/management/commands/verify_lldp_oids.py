@@ -8,7 +8,7 @@ Usage:
 """
 from django.core.management.base import BaseCommand, CommandError
 
-from apps.collectors.topology_fdb import collect_switch_mac_table
+from apps.collectors.topology_fdb import collect_fdb_ap_mappings, collect_switch_mac_table
 from apps.collectors.topology_lldp import collect_lldp_neighbors, normalize_mac
 from apps.devices.topology_match import get_default_ac_device, load_ac_ap_snapshot
 
@@ -31,6 +31,8 @@ class Command(BaseCommand):
                             help="Chỉ walk bảng MAC (FDB), bỏ qua LLDP.")
         parser.add_argument("--show-all-macs", action="store_true",
                             help="FDB: in mọi MAC trên switch, không chỉ AP.")
+        parser.add_argument("--show-uplink", action="store_true",
+                            help="FDB: gồm cả cổng trunk/uplink (mặc định lọc bỏ).")
         parser.add_argument("--raw", action="store_true",
                             help="In thêm chassis_id thô (LLDP).")
 
@@ -107,12 +109,22 @@ class Command(BaseCommand):
 
     def _print_fdb(self, device, ap_macs: set[str], ap_snapshot: dict, opts) -> None:
         show_all = opts["show_all_macs"] or not ap_macs
-        entries = collect_switch_mac_table(
-            device,
-            ap_macs=ap_macs if ap_macs else None,
-            ap_only=not show_all and bool(ap_macs),
-        )
-        self.stdout.write(self.style.SUCCESS("\n=== Bảng MAC switch (FDB) ==="))
+        if show_all:
+            entries = collect_switch_mac_table(
+                device,
+                ap_macs=ap_macs if ap_macs else None,
+                ap_only=False,
+            )
+            section = "Bảng MAC switch (FDB) — tất cả"
+        elif opts.get("show_uplink"):
+            raw = collect_switch_mac_table(device, ap_macs=ap_macs, ap_only=True)
+            from apps.collectors.topology_fdb import filter_fdb_ap_entries
+            entries = filter_fdb_ap_entries(device, raw, exclude_uplink=False)
+            section = "Bảng MAC switch (FDB) — gồm uplink"
+        else:
+            entries = collect_fdb_ap_mappings(device, ap_macs)
+            section = "Bảng MAC switch (FDB) — chỉ access (đã lọc uplink)"
+        self.stdout.write(self.style.SUCCESS(f"\n=== {section} ==="))
         if not entries:
             self.stdout.write(self.style.WARNING(
                 "Không đọc được FDB (1.3.6.1.2.1.17.7.1.2.2 / 17.4.3). "
@@ -148,8 +160,10 @@ class Command(BaseCommand):
     def _print_ac_unmatched(
         self, device, ap_macs: set[str], ap_snapshot: dict, opts,
     ) -> None:
-        entries = collect_switch_mac_table(
-            device, ap_macs=ap_macs, ap_only=True,
+        entries = (
+            collect_switch_mac_table(device, ap_macs=ap_macs, ap_only=True)
+            if opts.get("show_uplink")
+            else collect_fdb_ap_mappings(device, ap_macs)
         )
         found = {e.mac for e in entries}
         missing = [m for m in ap_snapshot if m not in found]
