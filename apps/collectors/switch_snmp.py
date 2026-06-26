@@ -340,8 +340,30 @@ class SwitchSNMPCollector(BaseCollector):
           - untagged ở ≥2 VLAN, không tag → hybrid
         Map dot1dBasePort → ifIndex qua dot1dBasePortIfIndex. Bitmap KHÔNG có entry
         (cổng routed/L3, member Eth-Trunk) → không xuất hiện → để fallback heuristic.
+
+        Cisco IOS/IOS-XE ưu tiên CISCO-VTP-MIB vlanTrunkPortDynamicStatus (index =
+        ifIndex trực tiếp; trunking(1)/notTrunking(2)) — Cisco không expose Q-BRIDGE
+        static table theo cách chuẩn. Cisco Business expose cả hai đều rỗng → heuristic.
         """
         vlan_oids = oid_profile.get("vlan", {})
+
+        # 1. Cisco — CISCO-VTP-MIB vlanTrunkPortDynamicStatus, index = ifIndex.
+        trunk_status_oid = vlan_oids.get("vlan_trunk_status")
+        if trunk_status_oid:
+            vtp: dict[int, str] = {}
+            for oid, val in self._snmp_walk(trunk_status_oid):
+                try:
+                    ifidx, status = int(oid.split(".")[-1]), int(val)
+                except (ValueError, TypeError):
+                    continue
+                if status == 1:
+                    vtp[ifidx] = "trunk"
+                elif status == 2:
+                    vtp[ifidx] = "access"
+            if vtp:
+                return vtp
+
+        # 2. Huawei + chuẩn — Q-BRIDGE dot1qVlanStaticTable bitmap.
         egress_oid = vlan_oids.get("dot1q_static_egress")
         untagged_oid = vlan_oids.get("dot1q_static_untagged")
         baseport_oid = vlan_oids.get("dot1d_baseport_ifindex")

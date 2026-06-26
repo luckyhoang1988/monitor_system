@@ -19,6 +19,8 @@ OID_STATIC_EGRESS   = "1.3.6.1.2.1.17.7.1.4.3.1.2"
 OID_STATIC_UNTAGGED = "1.3.6.1.2.1.17.7.1.4.3.1.4"
 OID_BASEPORT_IFIDX  = "1.3.6.1.2.1.17.1.4.1.2"
 OID_DOT1Q_PVID      = "1.3.6.1.2.1.17.7.1.4.5.1.1"
+# CISCO-VTP-MIB::vlanTrunkPortDynamicStatus — index = ifIndex; trunking(1)/notTrunking(2).
+OID_VTP_TRUNK_STATUS = "1.3.6.1.4.1.9.9.46.1.6.1.1.14"
 
 
 class Command(BaseCommand):
@@ -50,6 +52,23 @@ class Command(BaseCommand):
 
         # ifIndex → ifName
         if_names = {oid.split(".")[-1]: val for oid, val in snmp_walk_pairs(session, OID_IF_DESCR)}
+
+        # Cisco — CISCO-VTP-MIB vlanTrunkPortDynamicStatus (index = ifIndex). Nếu có data,
+        # đây là nguồn chính cho Cisco IOS/IOS-XE (collector ưu tiên trước Q-BRIDGE).
+        vtp_rows = snmp_walk_pairs(session, OID_VTP_TRUNK_STATUS)
+        if vtp_rows:
+            self.stdout.write(self.style.SUCCESS(
+                f"\n[CISCO-VTP] vlanTrunkPortDynamicStatus: {len(vtp_rows)} cổng (1=trunk, 2=access)"
+            ))
+            self.stdout.write(f"{'ifIndex':>8} {'ifName':<24} {'status':>6} mode")
+            for oid, val in vtp_rows:
+                ifidx = oid.split(".")[-1]
+                mode = {"1": "trunk", "2": "access"}.get(str(val).strip(), "?")
+                self.stdout.write(f"{ifidx:>8} {if_names.get(ifidx, '?'):<24} {str(val):>6} {mode}")
+        else:
+            self.stdout.write(self.style.NOTICE(
+                "\n[CISCO-VTP] không có data (đúng cho Huawei / Cisco Business) → xem Q-BRIDGE bên dưới."
+            ))
 
         # dot1dBasePort → ifIndex
         base_to_ifidx: dict[int, int] = {}

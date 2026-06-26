@@ -60,11 +60,15 @@ apps/
 - ✅ **Verify runtime fleet thật 2026-06-26** (Huawei CORE 10.0.193.1): vmVlan/dot1qPvid trả đúng. Nếu Huawei/Business trống bất thường → mở SNMP view nhánh `1.3.6.1.2.1.17` (Q-BRIDGE).
 
 **Trunk/Access mode per port** (`Interface.port_mode` ∈ access/trunk/hybrid, collector `_collect_port_modes`, từ 2026-06-26):
-- Đọc **mode switchport THẬT** qua Q-BRIDGE `dot1qVlanStaticTable` thay vì đoán theo tên/tốc độ. Mỗi VLAN có 2 PortList bitmap (index=VLAN id): `dot1qVlanStaticEgressPorts` `1.3.6.1.2.1.17.7.1.4.3.1.2` + `dot1qVlanStaticUntaggedPorts` `…1.4` → `tagged = egress \ untagged`. Gom theo `dot1dBasePort`: tagged≥1 ⇒ **trunk**, untagged đúng 1 ⇒ **access**, untagged≥2 ⇒ **hybrid**; map qua `dot1dBasePortIfIndex`.
+- Đọc **mode switchport THẬT** thay vì đoán theo tên/tốc độ, **2 nguồn theo hãng**:
+  - **Cisco IOS/IOS-XE** (ưu tiên): CISCO-VTP-MIB `vlanTrunkPortDynamicStatus` `1.3.6.1.4.1.9.9.46.1.6.1.1.14`, **index = ifIndex trực tiếp**, trunking(1)⇒trunk / notTrunking(2)⇒access. ✅ verify IOS classic 2026-06-26 (28 cổng). Cisco KHÔNG expose Q-BRIDGE static table chuẩn nên phải đi đường này.
+  - **Huawei + chuẩn** (fallback khi VTP rỗng): Q-BRIDGE `dot1qVlanStaticTable`. Mỗi VLAN có 2 PortList bitmap (index=VLAN id): `dot1qVlanStaticEgressPorts` `1.3.6.1.2.1.17.7.1.4.3.1.2` + `dot1qVlanStaticUntaggedPorts` `…1.4` → `tagged = egress \ untagged`. Gom theo `dot1dBasePort`: tagged≥1 ⇒ **trunk**, untagged đúng 1 ⇒ **access**, untagged≥2 ⇒ **hybrid**; map qua `dot1dBasePortIfIndex`.
+  - ⚠️ **Cisco Business (C1200/C1300/CBS): KHÔNG expose CISCO-VTP-MIB lẫn dot1qVlanStaticTable** (verify 2026-06-26 đều rỗng) → `port_mode` rỗng → dùng heuristic fallback. Giới hạn HW (như mem=0), KHÔNG phải bug.
 - ⚠️ **TÁCH** khỏi `is_uplink`: `port_mode` = mode switchport (điều khiển cột LOẠI/VLAN ở UI); `is_uplink` = vai trò topology cho **cảnh báo băng thông** (`uplink_*_mbps`). Writer: `port_mode==trunk` ⇒ ép `is_uplink=True`; `==access` ⇒ chặn heuristic tên/speed. Lý do đổi: heuristic cũ gán cổng 1G nối switch khác (PFVN-SW03) nhầm "Access VLAN 1", ép mọi XGE thành Trunk.
 - `_parse_portlist` xử lý OCTET STRING (bytes / "0x80.." / "80 00.." / latin-1). ⚠️ easysnmp có thể cắt tại null byte — prod đang chạy **pysnmp** nên OK; `--raw` in giá trị thô để soi.
 - Cổng KHÔNG có entry Q-BRIDGE (routed/L3, Vlanif, member Eth-Trunk) → `port_mode` rỗng → fallback `is_uplink` + access_vlan. UI vẫn hiện VLAN N qua `dot1qPvid`.
-- ✅ **Verify 2026-06-26** CORE: Eth-Trunk→trunk, Gi0/0/31→access VLAN3, Gi0/0/32→access VLAN10 (43 trunk / 50 access toàn fleet). Tool: `python manage.py verify_vlan_oids <device_id> [--raw]` đối chiếu `display port vlan`.
+- ✅ **Verify 2026-06-26**: Huawei CORE (Eth-Trunk→trunk, Gi0/0/31→access VLAN3, Gi0/0/32→access VLAN10); Cisco IOS classic id5 (VTP 28 cổng). Tool: `python manage.py verify_vlan_oids <device_id> [--raw]` — in cả VTP (Cisco) lẫn Q-BRIDGE (Huawei) để đối chiếu `show interfaces switchport` / `display port vlan`.
+- ⚠️ Population **eventually-consistent**: walk bảng VLAN chập chờn khi nhiều thiết bị poll đồng thời → 1 vài Huawei có thể tạm rỗng port_mode; preserve-on-empty giữ giá trị cũ → **tự lành** ở poll thành công kế tiếp (không kẹt).
 
 **Huawei WLAN/AC — AC6508** (`device_type=wlan_controller`, HUAWEI-WLAN MIB `…2011.6.139`, OID đầy đủ trong `oids/huawei_vrp.yaml` `wlan:`):
 - Bảng AP `hwWlanApInfoTable` `…6.139.13.3.3.1.X` (index=MAC AP): `.4` name · `.5` group · `.6` run_state (`8`=online) · `.44` = **client đang kết nối/AP** (cả 2 band, ✅).

@@ -120,6 +120,30 @@ class TestCollectPortModes:
     def test_returns_empty_when_oids_missing(self, collector):
         assert collector._collect_port_modes({"vlan": {}}) == {}
 
+    def test_cisco_vtp_status_preferred(self, mocker, collector):
+        # CISCO-VTP-MIB index = ifIndex trực tiếp; 1=trunk, 2=access.
+        vtp = "1.3.6.1.4.1.9.9.46.1.6.1.1.14"
+        _walk(mocker, collector, {vtp: [("10101", "2"), ("10110", "1")]})
+        profile = {"vlan": {"vlan_trunk_status": vtp}}
+        assert collector._collect_port_modes(profile) == {10101: "access", 10110: "trunk"}
+
+    def test_falls_back_to_qbridge_when_vtp_empty(self, mocker, collector):
+        # VTP rỗng (Huawei) → dùng Q-BRIDGE bitmap.
+        vtp = "1.3.6.1.4.1.9.9.46.1.6.1.1.14"
+        _walk(mocker, collector, {
+            vtp: [],
+            BASEPORT: [("1", "10")],
+            EGRESS:   [("1", "0x80")],
+            UNTAGGED: [("1", "0x80")],
+        })
+        profile = {"vlan": {
+            "vlan_trunk_status": vtp,
+            "dot1q_static_egress": EGRESS,
+            "dot1q_static_untagged": UNTAGGED,
+            "dot1d_baseport_ifindex": BASEPORT,
+        }}
+        assert collector._collect_port_modes(profile) == {10: "access"}
+
     def test_returns_empty_when_baseport_walk_empty(self, mocker, collector):
         _walk(mocker, collector, {EGRESS: [("1", "0x80")], UNTAGGED: [("1", "0x80")]})
         assert collector._collect_port_modes(OID_PROFILE) == {}
