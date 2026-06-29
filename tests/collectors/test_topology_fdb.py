@@ -78,6 +78,18 @@ class TestFilterFdbApEntries:
         assert len(filtered) == 1
         assert filtered[0].local_port == "GE1/0/12"
 
+    def test_no_ap_match_returns_empty(self):
+        # Switch không có MAC AP nào trong FDB (vd cisco_business uplink-only) →
+        # KHÔNG được trả về toàn bộ MAC (sẽ đẻ AP link giả 1/cổng). Phải trả [].
+        device = CiscoSNMPDeviceFactory()
+        raw = [
+            FdbMacEntry(local_port="Gi9", local_port_num=9,
+                        mac="d8:76:ae:b5:2d:0a", is_ap_match=False),
+            FdbMacEntry(local_port="port-0", local_port_num=0,
+                        mac="14:84:73:c0:c1:e0", is_ap_match=False),
+        ]
+        assert filter_fdb_ap_entries(device, raw) == []
+
     def test_excludes_port_with_many_ap_macs(self):
         device = CiscoSNMPDeviceFactory()
         raw = [_entry("GE1/0/25", f"aa:bb:cc:dd:ee:{i:02x}") for i in range(4)]

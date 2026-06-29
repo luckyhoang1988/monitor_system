@@ -163,7 +163,11 @@ def filter_fdb_ap_entries(
     """Lọc cổng uplink/trunk; mỗi MAC AP chỉ giữ 1 port access tốt nhất."""
     ap_entries = [e for e in entries if e.is_ap_match]
     if not ap_entries:
-        return entries
+        # Không MAC nào khớp AP → KHÔNG có AP link. Trả [] (KHÔNG phải `entries`):
+        # trả toàn bộ MAC sẽ khiến caller tạo 1 link AP giả/cổng (update_or_create
+        # keyed theo (device, port) → "last MAC wins") cho mọi switch không có AP
+        # thật qua FDB (cisco_business không LLDP, hoặc walk ra partial table).
+        return []
 
     port_meta = _load_port_meta(device, ap_entries, port_total_counts)
     excluded_ports = {
