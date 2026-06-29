@@ -70,6 +70,33 @@ def _latest_ap_snapshot(ac: Device) -> dict[str, dict]:
     return result
 
 
+def list_ac_aps(ac: Device | None) -> list[dict]:
+    """Danh sách AP ở snapshot mới nhất của AC (name/mac/ip/online/client_count).
+
+    Dùng chung giữa build_topology_graph (orphan/đếm) và API chọn AP thủ công.
+    """
+    if not ac:
+        return []
+    latest_ts = (
+        WifiApStats.objects.filter(device=ac)
+        .order_by("-timestamp")
+        .values_list("timestamp", flat=True)
+        .first()
+    )
+    if not latest_ts:
+        return []
+    out: list[dict] = []
+    for ap in WifiApStats.objects.filter(device=ac, timestamp=latest_ts):
+        out.append({
+            "name": ap.ap_name,
+            "mac": normalize_mac(ap.ap_mac),
+            "ip": ap.ap_ip or "",
+            "online": ap.is_online,
+            "client_count": ap.client_count,
+        })
+    return out
+
+
 def build_topology_graph(
     ac: Device | None = None,
     switch_filter: int | None = None,
@@ -83,23 +110,7 @@ def build_topology_graph(
         )
 
     ap_by_mac = _latest_ap_snapshot(ac) if ac else {}
-    all_aps_on_ac: list[dict] = []
-    if ac:
-        latest_ts = (
-            WifiApStats.objects.filter(device=ac)
-            .order_by("-timestamp")
-            .values_list("timestamp", flat=True)
-            .first()
-        )
-        if latest_ts:
-            for ap in WifiApStats.objects.filter(device=ac, timestamp=latest_ts):
-                all_aps_on_ac.append({
-                    "name": ap.ap_name,
-                    "mac": normalize_mac(ap.ap_mac),
-                    "ip": ap.ap_ip or "",
-                    "online": ap.is_online,
-                    "client_count": ap.client_count,
-                })
+    all_aps_on_ac: list[dict] = list_ac_aps(ac)
 
     ap_links_qs = TopologyLink.objects.filter(
         is_stale=False,

@@ -56,6 +56,14 @@
     <button type="button" class="btn btn-sm btn-outline-primary" id="btnRelayout">
       <i class="bi bi-arrows-angle-expand"></i> Sắp xếp lại
     </button>
+    {% if can_manage_topology %}
+    <button type="button" class="btn btn-sm btn-success" id="btnAddLink" data-bs-toggle="modal" data-bs-target="#linkModal">
+      <i class="bi bi-plus-lg"></i> Thêm liên kết
+    </button>
+    <button type="button" class="btn btn-sm btn-outline-secondary" id="btnManageLinks" data-bs-toggle="modal" data-bs-target="#manageLinksModal">
+      <i class="bi bi-list-check"></i> Quản lý link
+    </button>
+    {% endif %}
   </div>
 </div>
 
@@ -78,6 +86,126 @@
     <div id="panelBody" class="text-muted small"></div>
   </div>
 </div>
+
+{% if can_manage_topology %}
+{% csrf_token %}
+
+<!-- Modal: Thêm liên kết thủ công -->
+<div class="modal fade" id="linkModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h6 class="modal-title fw-bold"><i class="bi bi-plus-circle me-2"></i>Thêm liên kết thủ công</h6>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Đóng"></button>
+      </div>
+      <div class="modal-body">
+        <div id="linkAlert" class="alert alert-danger py-2 small d-none"></div>
+
+        <div class="mb-3">
+          <label class="form-label small fw-semibold d-block">Loại liên kết</label>
+          <div class="btn-group" role="group">
+            <input type="radio" class="btn-check" name="linkKind" id="kindAp" value="ap" checked>
+            <label class="btn btn-sm btn-outline-success" for="kindAp"><i class="bi bi-broadcast me-1"></i>AP ↔ Switch</label>
+            <input type="radio" class="btn-check" name="linkKind" id="kindSwitch" value="switch">
+            <label class="btn btn-sm btn-outline-primary" for="kindSwitch"><i class="bi bi-hdd-network me-1"></i>Switch ↔ Switch</label>
+          </div>
+        </div>
+
+        <div class="mb-3">
+          <label class="form-label small fw-semibold">Switch nguồn</label>
+          <select id="linkLocalDevice" class="form-select form-select-sm">
+            <option value="">— Chọn switch —</option>
+            {% for sw in switches %}
+            <option value="{{ sw.pk|unlocalize }}">{{ sw.name }}</option>
+            {% endfor %}
+          </select>
+        </div>
+
+        <div class="mb-3">
+          <label class="form-label small fw-semibold">Cổng trên switch nguồn</label>
+          <select id="linkLocalPort" class="form-select form-select-sm" disabled>
+            <option value="">— Chọn switch trước —</option>
+          </select>
+          <div class="form-check mt-1">
+            <input class="form-check-input" type="checkbox" id="linkLocalPortManual">
+            <label class="form-check-label small" for="linkLocalPortManual">Nhập tên cổng tay</label>
+          </div>
+          <input type="text" id="linkLocalPortText" class="form-control form-control-sm mt-1 d-none" placeholder="vd: GigabitEthernet0/0/3">
+        </div>
+
+        <!-- AP fields -->
+        <div id="apFields">
+          <div class="mb-3">
+            <label class="form-label small fw-semibold">AP (từ AC)</label>
+            <select id="linkAp" class="form-select form-select-sm">
+              <option value="">— Đang tải —</option>
+            </select>
+          </div>
+          <div class="form-check mb-2">
+            <input class="form-check-input" type="checkbox" id="linkApManual">
+            <label class="form-check-label small" for="linkApManual">Nhập MAC/tên AP tay (AP chưa có trên AC)</label>
+          </div>
+          <div id="apManualFields" class="row g-2 d-none">
+            <div class="col-6">
+              <input type="text" id="linkApMac" class="form-control form-control-sm" placeholder="MAC (aa:bb:cc:dd:ee:ff)">
+            </div>
+            <div class="col-6">
+              <input type="text" id="linkApName" class="form-control form-control-sm" placeholder="Tên AP">
+            </div>
+          </div>
+        </div>
+
+        <!-- Switch fields -->
+        <div id="switchFields" class="d-none">
+          <div class="mb-3">
+            <label class="form-label small fw-semibold">Switch đích</label>
+            <select id="linkRemoteDevice" class="form-select form-select-sm">
+              <option value="">— Chọn switch —</option>
+              {% for sw in switches %}
+              <option value="{{ sw.pk|unlocalize }}">{{ sw.name }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="mb-3">
+            <label class="form-label small fw-semibold">Cổng switch đích <span class="text-muted">(tùy chọn)</span></label>
+            <input type="text" id="linkRemotePort" class="form-control form-control-sm" placeholder="vd: GigabitEthernet1/0/24">
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-sm btn-outline-secondary" data-bs-dismiss="modal">Hủy</button>
+        <button type="button" class="btn btn-sm btn-success" id="linkSaveBtn"><i class="bi bi-check-circle me-1"></i>Lưu</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Modal: Quản lý link thủ công -->
+<div class="modal fade" id="manageLinksModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered modal-lg">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h6 class="modal-title fw-bold"><i class="bi bi-list-check me-2"></i>Link topology thủ công</h6>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Đóng"></button>
+      </div>
+      <div class="modal-body">
+        <div class="table-responsive">
+          <table class="table table-sm align-middle">
+            <thead>
+              <tr class="small text-muted">
+                <th>Loại</th><th>Switch nguồn</th><th>Cổng</th><th>Đích</th><th>Cổng đích</th><th></th>
+              </tr>
+            </thead>
+            <tbody id="manageLinksBody">
+              <tr><td colspan="6" class="text-center text-muted small py-3">Đang tải…</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+{% endif %}
 {% endblock %}
 
 {% block extra_js %}
@@ -95,7 +223,7 @@
 
   try {
   if (window.Topology && window.Topology.init) {
-    window.Topology.init({
+    window.topoInstance = window.Topology.init({
       container: document.getElementById("topology-cy"),
       apiUrl: API_URL,
       sseUrl: SSE_URL,
@@ -120,4 +248,22 @@
   } catch (err) { console.warn("Topology init:", err); }
 })();
 </script>
+{% if can_manage_topology %}
+<script src="{% static 'js/topology_links.js' %}"></script>
+<script>
+(function () {
+  "use strict";
+  try {
+    if (window.TopologyLinks && window.TopologyLinks.init) {
+      window.TopologyLinks.init({
+        portsUrl:  "{% url 'dashboard:topology_ports' %}",
+        apsUrl:    "{% url 'dashboard:topology_aps' %}",
+        linksUrl:  "{% url 'dashboard:topology_links' %}",
+        filterAc:  document.getElementById("filterAc"),
+      });
+    }
+  } catch (err) { console.warn("TopologyLinks init:", err); }
+})();
+</script>
+{% endif %}
 {% endblock %}

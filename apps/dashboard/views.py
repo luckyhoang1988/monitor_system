@@ -453,11 +453,13 @@ def topology(request):
     )
     ac_id = request.GET.get("ac")
     switch_id = request.GET.get("switch")
+    from apps.accounts.roles import is_admin
     return render(request, "dashboard/topology.html", {
         "ac_devices": ac_devices,
         "switches": switches,
         "initial_ac_id": int(ac_id) if ac_id and ac_id.isdigit() else None,
         "initial_switch_id": int(switch_id) if switch_id and switch_id.isdigit() else None,
+        "can_manage_topology": is_admin(request.user),
     })
 
 

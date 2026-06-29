@@ -394,6 +394,9 @@
         }
       } catch (e) { /* ignore */ }
     });
+
+    // Cho phép module khác (topology_links.js) vẽ lại ngay sau khi thêm/xoá link.
+    return { reload: loadGraph };
   }
 
   global.Topology = { init: init };
