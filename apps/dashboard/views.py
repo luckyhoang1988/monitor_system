@@ -276,16 +276,25 @@ def hyperv_detail(request, pk):
                      .order_by("-timestamp")
                      .first())
 
-    from django.db.models import Subquery, OuterRef
+    # Lấy snapshot mới nhất mỗi VM bằng Postgres DISTINCT ON — dùng đúng index
+    # (device_id, vm_name, timestamp DESC) → 1 lần index-scan, ~0.04s.
+    # (Trước đây dùng pk__in + correlated Subquery → Postgres bỏ index, quét
+    #  lặp trên toàn bộ rows của device → ~240s → nginx 504 Gateway Time-out.)
+    from django.db import connection
 
-    latest_vms_subquery = VMStats.objects.filter(
-        device=device,
-        vm_name=OuterRef("vm_name")
-    ).order_by("-timestamp").values("pk")[:1]
-
-    latest_vms = list(VMStats.objects.filter(
-        pk__in=Subquery(latest_vms_subquery)
-    ).order_by("vm_name"))
+    base_qs = VMStats.objects.filter(device=device)
+    if connection.vendor == "postgresql":
+        latest_vms = list(
+            base_qs.order_by("vm_name", "-timestamp").distinct("vm_name")
+        )
+    else:
+        # SQLite (dev): DISTINCT ON không hỗ trợ → dedup theo vm_name trong Python.
+        seen: set[str] = set()
+        latest_vms = []
+        for v in base_qs.order_by("vm_name", "-timestamp"):
+            if v.vm_name not in seen:
+                seen.add(v.vm_name)
+                latest_vms.append(v)
 
     running_count = sum(1 for v in latest_vms if v.state == "Running")
     unhealthy_vms = [v for v in latest_vms if v.repl_health not in ("", "Normal", "NotConfigured")]
