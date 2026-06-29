@@ -188,12 +188,16 @@ def build_topology_graph(
         if mac:
             mapped_macs.add(mac)
 
+        port = link.local_port or ""
+        node_label = _short_label(ap_name)
+        if port:
+            node_label = f"{node_label}\n⇡ {port}"
         if ap_nid not in ap_nodes_added:
             ap_nodes_added.add(ap_nid)
             nodes.append({
                 "data": {
                     "id": ap_nid,
-                    "label": _short_label(ap_name),
+                    "label": node_label,
                     "full_label": ap_name,
                     "type": "ap",
                     "mac": mac or link.remote_ap_mac,
@@ -202,7 +206,7 @@ def build_topology_graph(
                     "client_count": client_count,
                     "confirmed": link.is_confirmed,
                     "switch_name": sw.name,
-                    "switch_port": link.local_port or "",
+                    "switch_port": port,
                     "tier": 2,
                 },
             })
