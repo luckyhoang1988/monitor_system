@@ -138,9 +138,20 @@
           "curve-style": "taxi",
           "taxi-direction": "downward",
           "taxi-turn": "30px",
-          label: "data(label)",
-          "font-size": 8,
-          color: "#4f46e5",
+          // Nhãn = cổng downlink phía parent (CORE). Đặt ở đoạn DỌC sát switch con
+          // (target) để mỗi nhãn tản theo từng switch, không dồn lên đoạn ngang
+          // dùng chung dưới CORE (gây đè nét + đè nhau).
+          "target-label": "data(label)",
+          "target-text-offset": 30,
+          "font-size": 9,
+          color: "#3730a3",
+          "text-background-color": "#ffffff",
+          "text-background-opacity": 0.92,
+          "text-background-padding": "2px",
+          "text-background-shape": "roundrectangle",
+          "text-border-width": 1,
+          "text-border-color": "#c7d2fe",
+          "text-border-opacity": 1,
         },
       },
       {
