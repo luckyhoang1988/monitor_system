@@ -79,10 +79,14 @@ def _upsert_switch_link(
     remote_sys_name: str = "",
     remote_port_id: str = "",
     is_confirmed: bool = True,
+    protocol: str = "lldp",
+    match_method: str | None = None,
 ) -> None:
     from apps.devices.models import TopologyLink
 
     iface = _resolve_interface(device, local_port)
+    if match_method is None:
+        match_method = "name" if is_confirmed else "lldp"
     TopologyLink.objects.update_or_create(
         local_device=device,
         local_port=local_port,
@@ -94,14 +98,83 @@ def _upsert_switch_link(
             "remote_ap_name": remote.name,
             "remote_sys_name": remote_sys_name,
             "remote_port_id": remote_port_id,
-            "protocol": "lldp",
-            "match_method": "name" if is_confirmed else "lldp",
+            "protocol": protocol,
+            "match_method": match_method,
             "is_confirmed": is_confirmed,
             "is_stale": False,
             "miss_count": 0,
             "last_seen": timezone.now(),
         },
     )
+
+
+def discover_switch_links_fdb(switches: list[Device]) -> int:
+    """Phát hiện cạnh switch↔switch qua FDB → upsert TopologyLink(link_kind=switch).
+
+    Orient parent (gần core)→child bằng BFS để admin/đồ thị đọc tự nhiên; graph builder
+    vẫn tự reorient theo BFS nên hướng lưu không bắt buộc.
+    """
+    from apps.collectors.topology_switch_fdb import (
+        build_switch_mac_registry,
+        discover_switch_adjacency,
+    )
+    from apps.devices.models import TopologyLink
+    from apps.devices.topology_hierarchy import bfs_depths, find_core_device
+
+    switches = list(switches)
+    by_id = {sw.id: sw for sw in switches}
+    registry = build_switch_mac_registry(switches)
+    pairs = discover_switch_adjacency(switches, registry)
+
+    # BFS từ core để chọn parent (đầu nông hơn).
+    adjacency: dict[int, set[int]] = {}
+    for a, _pa, b, _pb in pairs:
+        adjacency.setdefault(a, set()).add(b)
+        adjacency.setdefault(b, set()).add(a)
+    core = find_core_device()
+    depths = bfs_depths(adjacency, core.id if core else None)
+
+    def depth_of(dev_id: int) -> int:
+        return depths.get(dev_id, 10_000)
+
+    seen_keys: set[tuple[int, str]] = set()
+    count = 0
+    for a, port_a, b, port_b in pairs:
+        if depth_of(a) <= depth_of(b):
+            parent, parent_port, child = a, port_a, b
+        else:
+            parent, parent_port, child = b, port_b, a
+        parent_dev = by_id.get(parent)
+        child_dev = by_id.get(child)
+        if not parent_dev or not child_dev:
+            continue
+        _upsert_switch_link(
+            parent_dev,
+            parent_port,
+            child_dev,
+            remote_sys_name=child_dev.name,
+            is_confirmed=True,
+            protocol="fdb",
+            match_method="mac",
+        )
+        seen_keys.add((parent, parent_port))
+        count += 1
+
+    # Stale các link FDB không còn thấy (giữ manual).
+    stale_qs = TopologyLink.objects.filter(
+        link_kind="switch",
+        protocol="fdb",
+    ).exclude(match_method="manual")
+    for link in stale_qs:
+        if (link.local_device_id, link.local_port) in seen_keys:
+            continue
+        link.miss_count = (link.miss_count or 0) + 1
+        if link.miss_count >= STALE_MISS_THRESHOLD:
+            link.is_stale = True
+        link.save(update_fields=["miss_count", "is_stale"])
+
+    logger.info("Topology switch-FDB: %d cạnh switch↔switch", count)
+    return count
 
 
 def discover_switch_uplinks(
@@ -241,7 +314,8 @@ def discover_all_switches() -> dict[str, int]:
     switch_links = 0
     errors = 0
 
-    for sw in switches:
+    switch_list = list(switches)
+    for sw in switch_list:
         try:
             n, c = upsert_switch_topology(sw, ac)
             total_links += n
@@ -250,6 +324,13 @@ def discover_all_switches() -> dict[str, int]:
         except Exception as exc:
             errors += 1
             logger.warning("Topology discovery failed %s: %s", sw.name, exc)
+
+    # Phát hiện cạnh switch↔switch qua FDB (1 lần/run — cần MAC toàn fleet).
+    try:
+        switch_links += discover_switch_links_fdb(switch_list)
+    except Exception as exc:
+        errors += 1
+        logger.warning("Topology switch-FDB discovery failed: %s", exc)
 
     return {
         "switches": switches.count(),

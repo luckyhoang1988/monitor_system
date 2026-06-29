@@ -136,51 +136,53 @@ def build_topology_graph(
     switch_nodes_added: set[int] = set()
     ap_nodes_added: set[str] = set()
 
-    # Core node (tầng trên)
-    if core and (not switch_filter or core_id == switch_filter or switch_filter in access_switch_ids):
-        if not switch_filter or core_id != switch_filter:
-            nodes.append({
-                "data": {
-                    "id": _switch_node_id(core.id),
-                    "label": core.name,
-                    "type": "core",
-                    "ip": core.ip_address,
-                    "online": core.is_online,
-                    "location": core.location or "",
-                    "detail_url": reverse("dashboard:switch_detail", args=[core.id]),
-                    "tier": 0,
-                },
-            })
-            switch_nodes_added.add(core.id)
+    # Cạnh + độ sâu cây switch (BFS từ core) — tính sớm để xếp tầng node.
+    uplink_edges, depth_map = build_switch_uplink_edges(switch_filter=switch_filter)
 
-    # Access switch nodes (tầng giữa — compound chứa AP)
-    display_switch_ids = access_switch_ids.copy()
+    # Tập switch cần vẽ: mọi switch enabled (yêu cầu "vẽ mọi switch").
     if switch_filter:
-        display_switch_ids = {switch_filter}
+        render_switch_ids = {switch_filter}
+        for ue in uplink_edges:
+            for sid in (ue["source_id"], ue["target_id"]):
+                if sid.startswith("sw-"):
+                    render_switch_ids.add(int(sid[3:]))
+        if core_id:
+            render_switch_ids.add(core_id)
+    else:
+        render_switch_ids = set(
+            Device.objects.filter(device_type="switch", enabled=True)
+            .values_list("id", flat=True)
+        )
+        render_switch_ids |= access_switch_ids
+        if core_id:
+            render_switch_ids.add(core_id)
 
-    for sw_id in sorted(display_switch_ids):
-        if sw_id == core_id:
-            continue
-        try:
-            sw = Device.objects.get(pk=sw_id)
-        except Device.DoesNotExist:
-            continue
-        if sw_id in switch_nodes_added:
+    sw_objs = {d.id: d for d in Device.objects.filter(pk__in=render_switch_ids)}
+
+    for sw_id in sorted(render_switch_ids):
+        sw = sw_objs.get(sw_id)
+        if not sw or sw_id in switch_nodes_added:
             continue
         switch_nodes_added.add(sw_id)
+        is_core = sw_id == core_id
         ap_n = ap_per_switch.get(sw_id, 0)
-        label = f"{sw.name}\n({ap_n} AP)" if ap_n else sw.name
+        if is_core:
+            node_type, tier, label = "core", 0, sw.name
+        else:
+            node_type = "switch"
+            tier = depth_map.get(sw_id) or 1
+            label = f"{sw.name}\n({ap_n} AP)" if ap_n else sw.name
         nodes.append({
             "data": {
                 "id": _switch_node_id(sw.id),
                 "label": label,
-                "type": "switch",
+                "type": node_type,
                 "ip": sw.ip_address,
                 "online": sw.is_online,
                 "location": sw.location or "",
                 "detail_url": reverse("dashboard:switch_detail", args=[sw.id]),
                 "ap_count": ap_n,
-                "tier": 1,
+                "tier": tier,
             },
         })
 
@@ -241,11 +243,7 @@ def build_topology_graph(
             },
         })
 
-    # Edge switch → switch (core xuống access)
-    uplink_edges = build_switch_uplink_edges(
-        access_switch_ids,
-        switch_filter=switch_filter,
-    )
+    # Edge switch → switch (core → dist → access, cây nhiều tầng) — đã tính ở trên.
     for ue in uplink_edges:
         edges.append({
             "data": {
@@ -254,6 +252,7 @@ def build_topology_graph(
                 "target": ue["target_id"],
                 "label": ue.get("label") or "",
                 "type": "uplink",
+                "trunk": ue.get("trunk", False),
                 "inferred": ue.get("inferred", False),
             },
         })
@@ -327,7 +326,7 @@ def build_topology_graph(
             "ap_mapped": len(mapped_macs),
             "ap_unmapped": len(orphan_aps),
             "ap_offline": ap_offline,
-            "switch_count": len(access_switch_ids),
+            "switch_count": len(switch_nodes_added),
             "core_id": core_id,
             "core_name": core.name if core else "",
             "switch_filter": switch_filter,

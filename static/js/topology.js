@@ -225,7 +225,7 @@
           opts.layoutHint.textContent = "Đang xem 1 switch — Core trên cùng, AP bên dưới.";
         } else if (meta.core_name) {
           opts.layoutHint.textContent =
-            "Phân tầng cây: " + meta.core_name + " (core) → switch access → AP.";
+            "Phân tầng cây: " + meta.core_name + " (core) → switch (trunk) → AP. Nhãn trên cạnh = cổng trunk.";
         } else if ((meta.switch_count || 0) > 6) {
           opts.layoutHint.textContent = "Nhiều switch — chọn filter Switch để dễ nhìn.";
         } else {
