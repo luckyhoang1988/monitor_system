@@ -209,13 +209,15 @@ def collect_lldp_neighbors(
         except (ValueError, TypeError):
             continue
 
-    loc_nums = _walk_column(session, oids.get("loc_port_num"))
+    # lldpLocPortId (.3.7.1.3) được index TRỰC TIẾP bằng lldpLocPortNum → index của nó
+    # CHÍNH LÀ port number. Bảng lldpLocPortNum (.3.7.1.1) trên một số Huawei VRP trả rỗng;
+    # nếu phụ thuộc nó thì loc_port_map rỗng → _resolve_local_port_name fallback coi
+    # localPortNum như ifIndex → resolve nhầm (GE0/0/1 → "InLoopBack0", GE0/0/8 → "GE0/0/3").
     loc_ids = _walk_column(session, oids.get("loc_port_id"))
     loc_port_map: dict[int, str] = {}
-    for idx, num_raw in loc_nums.items():
+    for idx, port_id in loc_ids.items():
         try:
-            port_num = int(num_raw)
-            loc_port_map[port_num] = (loc_ids.get(idx) or "").strip()
+            loc_port_map[int(idx)] = (port_id or "").strip()
         except ValueError:
             continue
 
