@@ -151,7 +151,7 @@ def build_topology_graph(
             continue
         switch_nodes_added.add(sw_id)
         ap_n = ap_per_switch.get(sw_id, 0)
-        label = f"{sw.name} ({ap_n} AP)" if ap_n else sw.name
+        label = f"{sw.name}\n({ap_n} AP)" if ap_n else sw.name
         nodes.append({
             "data": {
                 "id": _switch_node_id(sw.id),
