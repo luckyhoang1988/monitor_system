@@ -26,6 +26,16 @@ def _switch_node_id(device_id: int) -> str:
     return f"sw-{device_id}"
 
 
+def _ap_identity(link: TopologyLink, ap_by_mac: dict[str, dict]) -> tuple[str, dict, str, str]:
+    """(mac, ap_info, ap_name, ap_node_id) cho 1 AP link — dùng chung pre-pass & vẽ node."""
+    mac = normalize_mac(link.remote_ap_mac)
+    ap_info = ap_by_mac.get(mac, {}) if mac else {}
+    if not ap_info and link.remote_ap_name:
+        ap_info = ap_by_mac.get(f"name:{link.remote_ap_name.strip().casefold()}", {})
+    ap_name = ap_info.get("ap_name") or link.remote_ap_name or link.remote_sys_name or mac or "AP"
+    return mac, ap_info, ap_name, _ap_node_id(mac, ap_name)
+
+
 def _short_label(name: str, max_len: int = 22) -> str:
     n = (name or "").strip()
     return n if len(n) <= max_len else n[: max_len - 1] + "…"
@@ -108,8 +118,16 @@ def build_topology_graph(
     core = find_core_device()
     core_id = core.id if core else None
 
+    # 1 AP (theo node-id/MAC) chỉ thuộc 1 switch — link đầu tiên theo thứ tự sắp xếp
+    # "sở hữu" AP; link trùng từ switch khác (vd MAC flood qua uplink) bị bỏ qua.
+    # Badge "(n AP)" đếm đúng số node AP thực vẽ ra → không lệch tổng vs hiển thị.
+    ap_owner: dict[str, int] = {}
     ap_per_switch: dict[int, int] = defaultdict(int)
     for link in ap_links:
+        _mac, _info, _name, ap_nid = _ap_identity(link, ap_by_mac)
+        if ap_nid in ap_owner:
+            continue
+        ap_owner[ap_nid] = link.local_device_id
         ap_per_switch[link.local_device_id] += 1
 
     nodes: list[dict] = []
@@ -174,16 +192,15 @@ def build_topology_graph(
         if core_id and sw.id == core_id:
             continue
         sw_nid = _switch_node_id(sw.id)
-        mac = normalize_mac(link.remote_ap_mac)
-        ap_info = ap_by_mac.get(mac, {}) if mac else {}
-        if not ap_info and link.remote_ap_name:
-            ap_info = ap_by_mac.get(f"name:{link.remote_ap_name.strip().casefold()}", {})
+        mac, ap_info, ap_name, ap_nid = _ap_identity(link, ap_by_mac)
+        # AP đã thuộc switch khác (link trùng do MAC flood qua uplink) → bỏ qua,
+        # không vẽ thêm node/edge để badge "(n AP)" khớp số node thực.
+        if ap_owner.get(ap_nid, sw.id) != sw.id:
+            continue
 
-        ap_name = ap_info.get("ap_name") or link.remote_ap_name or link.remote_sys_name or mac or "AP"
         ap_ip = ap_info.get("ap_ip") or (link.remote_mgmt_ip or "")
         is_online = ap_info.get("is_online", True)
         client_count = ap_info.get("client_count", 0)
-        ap_nid = _ap_node_id(mac, ap_name)
 
         if mac:
             mapped_macs.add(mac)

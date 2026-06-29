@@ -45,6 +45,15 @@ class TestIsUplinkPort:
     def test_eth_trunk_name(self):
         assert is_uplink_port("Eth-Trunk1", {}) is True
 
+    def test_total_mac_flood_threshold(self):
+        # Uplink chỉ mang 1 MAC-AP nhưng hàng trăm MAC tổng → vẫn là uplink.
+        meta = {"Gi9": PortMeta(ap_mac_count=1, total_mac_count=582)}
+        assert is_uplink_port("Gi9", meta) is True
+
+    def test_low_total_mac_is_access(self):
+        meta = {"GE1/0/3": PortMeta(ap_mac_count=1, total_mac_count=1)}
+        assert is_uplink_port("GE1/0/3", meta) is False
+
 
 @pytest.mark.django_db
 class TestFilterFdbApEntries:
@@ -74,3 +83,15 @@ class TestFilterFdbApEntries:
         raw = [_entry("GE1/0/25", f"aa:bb:cc:dd:ee:{i:02x}") for i in range(4)]
         filtered = filter_fdb_ap_entries(device, raw)
         assert filtered == []
+
+    def test_excludes_uplink_by_total_mac_no_portmode(self):
+        # Như Cisco Business: không có port_mode/is_uplink. Uplink chỉ phân biệt
+        # được qua tổng MAC (582 vs 1) — đúng case AP flood qua uplink switch nối tầng.
+        device = CiscoSNMPDeviceFactory(uplink_ports=[])
+        mac = "ac:99:29:e4:89:70"
+        raw = [_entry("Gi9", mac), _entry("GE1/0/3", mac)]
+        filtered = filter_fdb_ap_entries(
+            device, raw, port_total_counts={"Gi9": 582, "GE1/0/3": 1},
+        )
+        assert len(filtered) == 1
+        assert filtered[0].local_port == "GE1/0/3"

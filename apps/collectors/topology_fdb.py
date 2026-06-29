@@ -32,6 +32,10 @@ OID_IF_DESCR = "1.3.6.1.2.1.2.2.1.2"
 
 # Cổng có >= N MAC AP → coi là trunk flooding, bỏ qua
 AP_MAC_FLOOD_THRESHOLD = 3
+# Cổng có >= N MAC TỔNG (mọi loại) → uplink/trunk gom nhiều thiết bị, không phải port AP.
+# Bắt uplink chỉ mang 1 MAC-AP nhưng hàng trăm MAC khác (AP_MAC_FLOOD_THRESHOLD bỏ sót):
+# vd switch nối tầng học 1 AP downstream qua uplink → MAC-AP=1 < 3 nhưng tổng MAC ~hàng trăm.
+FDB_UPLINK_TOTAL_MAC_THRESHOLD = 25
 
 TRUNK_NAME_PREFIXES = (
     "po", "port-channel", "eth-trunk", "bridge-aggregation",
@@ -62,6 +66,7 @@ class PortMeta:
     manual_uplink: bool = False
     name_trunk: bool = False
     ap_mac_count: int = 0
+    total_mac_count: int = 0
 
 
 def _normalize_port_name(name: str) -> str:
@@ -75,9 +80,14 @@ def _is_trunk_port_name(port_name: str) -> bool:
     return bool(TRUNK_NAME_PATTERN.match(n))
 
 
-def _load_port_meta(device: Device, ap_entries: list[FdbMacEntry]) -> dict[str, PortMeta]:
+def _load_port_meta(
+    device: Device,
+    ap_entries: list[FdbMacEntry],
+    port_total_counts: dict[str, int] | None = None,
+) -> dict[str, PortMeta]:
     from apps.devices.models import Interface
 
+    port_total_counts = port_total_counts or {}
     port_ap_counts: dict[str, int] = defaultdict(int)
     for e in ap_entries:
         if e.is_ap_match:
@@ -93,6 +103,7 @@ def _load_port_meta(device: Device, ap_entries: list[FdbMacEntry]) -> dict[str, 
             manual_uplink=_normalize_port_name(iface.name) in manual_ports,
             name_trunk=_is_trunk_port_name(iface.name),
             ap_mac_count=port_ap_counts.get(iface.name, 0),
+            total_mac_count=port_total_counts.get(iface.name, 0),
         )
 
     for e in ap_entries:
@@ -101,9 +112,11 @@ def _load_port_meta(device: Device, ap_entries: list[FdbMacEntry]) -> dict[str, 
                 name_trunk=_is_trunk_port_name(e.local_port),
                 manual_uplink=_normalize_port_name(e.local_port) in manual_ports,
                 ap_mac_count=port_ap_counts.get(e.local_port, 0),
+                total_mac_count=port_total_counts.get(e.local_port, 0),
             )
         else:
             meta[e.local_port].ap_mac_count = port_ap_counts.get(e.local_port, 0)
+            meta[e.local_port].total_mac_count = port_total_counts.get(e.local_port, 0)
 
     return meta
 
@@ -119,6 +132,8 @@ def is_uplink_port(port_name: str, port_meta: dict[str, PortMeta]) -> bool:
         return True
     if m.ap_mac_count >= AP_MAC_FLOOD_THRESHOLD:
         return True
+    if m.total_mac_count >= FDB_UPLINK_TOTAL_MAC_THRESHOLD:
+        return True
     return False
 
 
@@ -132,7 +147,8 @@ def _pick_best_port(
         m = port_meta.get(e.local_port, PortMeta())
         is_access = 0 if m.port_mode == "access" else 1
         is_uplink = 1 if is_uplink_port(e.local_port, port_meta) else 0
-        return (is_uplink, is_access, m.ap_mac_count, e.local_port)
+        # Port ít MAC tổng hơn = sát thiết bị (access) hơn port gom nhiều MAC (uplink).
+        return (is_uplink, is_access, m.total_mac_count, m.ap_mac_count, e.local_port)
 
     return min(candidates, key=sort_key)
 
@@ -141,6 +157,7 @@ def filter_fdb_ap_entries(
     device: Device,
     entries: list[FdbMacEntry],
     *,
+    port_total_counts: dict[str, int] | None = None,
     exclude_uplink: bool = True,
 ) -> list[FdbMacEntry]:
     """Lọc cổng uplink/trunk; mỗi MAC AP chỉ giữ 1 port access tốt nhất."""
@@ -148,7 +165,7 @@ def filter_fdb_ap_entries(
     if not ap_entries:
         return entries
 
-    port_meta = _load_port_meta(device, ap_entries)
+    port_meta = _load_port_meta(device, ap_entries, port_total_counts)
     excluded_ports = {
         p for p in port_meta if exclude_uplink and is_uplink_port(p, port_meta)
     }
@@ -180,9 +197,18 @@ def filter_fdb_ap_entries(
 
 
 def collect_fdb_ap_mappings(device: Device, ap_macs: set[str]) -> list[FdbMacEntry]:
-    """Walk FDB + lọc uplink + dedupe MAC — dùng cho topology discovery."""
-    raw = collect_switch_mac_table(device, ap_macs=ap_macs, ap_only=True)
-    return filter_fdb_ap_entries(device, raw, exclude_uplink=True)
+    """Walk FDB + lọc uplink + dedupe MAC — dùng cho topology discovery.
+
+    Walk TOÀN BỘ MAC (không chỉ MAC-AP) để đếm tổng MAC/port → nhận diện uplink
+    gom nhiều thiết bị (xem FDB_UPLINK_TOTAL_MAC_THRESHOLD).
+    """
+    raw = collect_switch_mac_table(device, ap_macs=ap_macs, ap_only=False)
+    port_total_counts: dict[str, int] = defaultdict(int)
+    for e in raw:
+        port_total_counts[e.local_port] += 1
+    return filter_fdb_ap_entries(
+        device, raw, port_total_counts=port_total_counts, exclude_uplink=True,
+    )
 
 
 def _snmp_kwargs(device: Device) -> dict:
