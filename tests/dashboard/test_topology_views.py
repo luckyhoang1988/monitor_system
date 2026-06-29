@@ -65,11 +65,17 @@ class TestTopologyViews:
         assert len(ap_nodes) == 1
         assert ap_nodes[0]["data"]["online"] is False
         assert ap_nodes[0]["data"]["switch_name"] == "SW-ACCESS"
-        assert ap_nodes[0]["data"]["parent"] == f"sw-{sw.pk}"
+        assert "parent" not in ap_nodes[0]["data"]
+        ap_nid = ap_nodes[0]["data"]["id"]
 
         sw_nodes = [n for n in data["nodes"] if n["data"].get("type") == "switch"]
         assert len(sw_nodes) == 1
-        assert data["edges"] == []
+
+        # AP nối switch bằng edge (thay cho compound parent)
+        ap_edges = [e for e in data["edges"] if e["data"].get("type") == "ap"]
+        assert len(ap_edges) == 1
+        assert ap_edges[0]["data"]["source"] == f"sw-{sw.pk}"
+        assert ap_edges[0]["data"]["target"] == ap_nid
 
     def test_topology_hierarchy_core_to_access(self, logged_in_client):
         ac = DeviceFactory(device_type="wlan_controller", name="ACL_Wlan")
@@ -114,4 +120,9 @@ class TestTopologyViews:
         assert data["meta"]["ap_unmapped"] == 1
         orphan = [n for n in data["nodes"] if n["data"].get("orphan")]
         assert len(orphan) == 1
-        assert orphan[0]["data"]["parent"] == "group-orphan"
+        assert "parent" not in orphan[0]["data"]
+        orphan_edges = [
+            e for e in data["edges"] if e["data"].get("source") == "group-orphan"
+        ]
+        assert len(orphan_edges) == 1
+        assert orphan_edges[0]["data"]["target"] == orphan[0]["data"]["id"]

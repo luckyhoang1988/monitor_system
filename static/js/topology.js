@@ -1,9 +1,21 @@
-/* Topology — phân tầng Core → Switch (compound) → AP */
+/* Topology — cây phân tầng Core → Switch access → AP (dagre, top-down) */
 (function (global) {
   "use strict";
 
   var POLL_MS = 60000;
   var SSE_DEBOUNCE_MS = 2000;
+  var dagreReady = false;
+
+  function ensureDagre() {
+    if (dagreReady) return true;
+    if (global.cytoscape && global.cytoscapeDagre) {
+      try {
+        global.cytoscape.use(global.cytoscapeDagre);
+        dagreReady = true;
+      } catch (e) { /* đã register hoặc lỗi → fallback breadthfirst */ }
+    }
+    return dagreReady;
+  }
 
   function buildQuery(apiUrl, filterAc, filterSwitch) {
     var params = [];
@@ -18,16 +30,18 @@
         selector: "node[type='core']",
         style: {
           shape: "round-rectangle",
-          width: 150,
-          height: 50,
+          width: 160,
+          height: 52,
           "background-color": "#dbeafe",
           "border-width": 3,
           "border-color": "#1d4ed8",
           label: "data(label)",
-          "font-size": 11,
+          "font-size": 13,
           "font-weight": "bold",
           "text-valign": "center",
           "text-halign": "center",
+          "text-wrap": "wrap",
+          "text-max-width": 150,
         },
       },
       {
@@ -35,49 +49,59 @@
         style: { "border-color": "#dc2626", "background-color": "#fee2e2" },
       },
       {
-        selector: ":parent",
+        selector: "node[type='switch']",
         style: {
           shape: "round-rectangle",
-          "background-color": "#eff6ff",
-          "background-opacity": 0.55,
+          width: 130,
+          height: 44,
+          "background-color": "#e0e7ff",
           "border-width": 2,
-          "border-color": "#3b82f6",
+          "border-color": "#4f46e5",
           label: "data(label)",
-          "font-size": 12,
+          "font-size": 11,
           "font-weight": "bold",
-          "text-valign": "top",
+          "text-valign": "center",
           "text-halign": "center",
-          "text-margin-y": -6,
-          padding: "18px",
-          "min-width": "120px",
-          "min-height": "80px",
+          "text-wrap": "wrap",
+          "text-max-width": 122,
         },
       },
       {
-        selector: ":parent[online='false']",
-        style: { "border-color": "#dc2626", "background-color": "#fef2f2" },
+        selector: "node[type='switch'][online='false']",
+        style: { "border-color": "#dc2626", "background-color": "#fee2e2" },
       },
       {
         selector: "node[type='orphan-group']",
         style: {
-          "background-color": "#f9fafb",
+          shape: "round-rectangle",
+          width: 130,
+          height: 44,
+          "background-color": "#f3f4f6",
+          "border-width": 2,
           "border-color": "#9ca3af",
           "border-style": "dashed",
+          label: "data(label)",
+          "font-size": 11,
+          "font-weight": "bold",
+          "text-valign": "center",
+          "text-halign": "center",
+          "text-wrap": "wrap",
+          "text-max-width": 122,
         },
       },
       {
         selector: "node[type='ap']",
         style: {
           shape: "round-rectangle",
-          width: 88,
-          height: 36,
+          width: 96,
+          height: 38,
           "background-color": "#dcfce7",
           "border-width": 2,
           "border-color": "#16a34a",
           label: "data(label)",
           "font-size": 9,
           "text-wrap": "wrap",
-          "text-max-width": 82,
+          "text-max-width": 90,
           "text-valign": "center",
           "text-halign": "center",
         },
@@ -100,22 +124,41 @@
       {
         selector: "edge[type='uplink']",
         style: {
-          width: 2,
+          width: 2.5,
           "line-color": "#6366f1",
           "target-arrow-color": "#6366f1",
           "target-arrow-shape": "triangle",
-          "curve-style": "bezier",
+          "curve-style": "taxi",
+          "taxi-direction": "downward",
+          "taxi-turn": "30px",
           label: "data(label)",
           "font-size": 8,
-          "text-rotation": "autorotate",
+          color: "#4f46e5",
         },
+      },
+      {
+        selector: "edge[type='ap']",
+        style: {
+          width: 1.5,
+          "line-color": "#86efac",
+          "target-arrow-color": "#86efac",
+          "target-arrow-shape": "triangle",
+          "arrow-scale": 0.8,
+          "curve-style": "taxi",
+          "taxi-direction": "downward",
+          "taxi-turn": "20px",
+        },
+      },
+      {
+        selector: "edge[type='ap'][online='false']",
+        style: { "line-color": "#fca5a5", "target-arrow-color": "#fca5a5" },
       },
       {
         selector: "edge[inferred='true']",
         style: {
           "line-style": "dashed",
-          "line-color": "#94a3b8",
-          "target-arrow-color": "#94a3b8",
+          "line-color": "#cbd5e1",
+          "target-arrow-color": "#cbd5e1",
         },
       },
       {
@@ -123,7 +166,7 @@
         style: { "overlay-opacity": 0.3, "overlay-color": "#dc2626" },
       },
       {
-        selector: "node:hidden-offline-filter",
+        selector: "node.hidden-offline-filter",
         style: { display: "none" },
       },
       {
@@ -172,14 +215,14 @@
       }
       if (opts.layoutHint) {
         if (meta.switch_filter) {
-          opts.layoutHint.textContent = "Đang xem 1 switch — Core phía trên, AP trong khung.";
+          opts.layoutHint.textContent = "Đang xem 1 switch — Core trên cùng, AP bên dưới.";
         } else if (meta.core_name) {
           opts.layoutHint.textContent =
-            "Phân tầng: " + meta.core_name + " (core) → switch access → AP trong khung.";
-        } else if ((meta.switch_count || 0) > 4) {
+            "Phân tầng cây: " + meta.core_name + " (core) → switch access → AP.";
+        } else if ((meta.switch_count || 0) > 6) {
           opts.layoutHint.textContent = "Nhiều switch — chọn filter Switch để dễ nhìn.";
         } else {
-          opts.layoutHint.textContent = "Mỗi khung = 1 switch access, AP bên trong.";
+          opts.layoutHint.textContent = "Core → switch access → AP (đường nối switch → AP).";
         }
       }
     }
@@ -207,17 +250,12 @@
         if (lastMeta.ac_id) {
           lines.push('<div class="mt-2"><a href="' + opts.wlanDetailBase + lastMeta.ac_id + '/">WLAN AC</a></div>');
         }
-      } else if (d.type === "core") {
-        lines.push('<div class="badge bg-primary mb-1">Core switch</div>');
+      } else if (d.type === "core" || d.type === "switch") {
+        lines.push('<div class="badge ' + (d.type === "core" ? "bg-primary" : "bg-secondary") + ' mb-1">' +
+          (d.type === "core" ? "Core switch" : "Switch access") + "</div>");
         if (d.ip) lines.push("<div><strong>IP:</strong> " + d.ip + "</div>");
         if (d.location) lines.push("<div><strong>Vị trí:</strong> " + d.location + "</div>");
-        if (d.detail_url) {
-          lines.push('<div class="mt-2"><a href="' + d.detail_url + '">Chi tiết switch</a></div>');
-        }
-      } else if (node.isParent && node.isParent()) {
-        if (d.ip) lines.push("<div><strong>IP:</strong> " + d.ip + "</div>");
-        if (d.location) lines.push("<div><strong>Vị trí:</strong> " + d.location + "</div>");
-        lines.push("<div><strong>AP:</strong> " + (d.ap_count != null ? d.ap_count : node.children("[type='ap']").length) + "</div>");
+        if (d.ap_count != null) lines.push("<div><strong>AP:</strong> " + d.ap_count + "</div>");
         if (d.detail_url) {
           lines.push('<div class="mt-2"><a href="' + d.detail_url + '">Chi tiết switch</a></div>');
         }
@@ -226,62 +264,29 @@
       opts.panel.classList.add("visible");
     }
 
-    function layoutChildrenGrid(parent) {
-      var kids = parent.children("[type='ap']:visible");
-      if (kids.length === 0) return;
-      var cols = kids.length <= 4 ? kids.length : 4;
-      kids.layout({
-        name: "grid",
-        fit: false,
-        padding: 10,
-        avoidOverlap: true,
-        condense: true,
-        cols: cols,
-        nodeDimensionsIncludeLabels: true,
-        boundingBox: { x1: 0, y1: 0, w: cols * 100, h: Math.ceil(kids.length / cols) * 50 },
-      }).run();
-    }
-
     function runLayout() {
       if (!cy || cy.nodes().length === 0) return;
-
-      var core = cy.nodes("[type='core']:visible");
-      var parents = cy.nodes(":parent:visible");
-      var switchFilter = opts.filterSwitch && opts.filterSwitch.value;
-
-      if (core.length) {
-        core.position({ x: 0, y: -140 });
-      }
-
-      var yStart = core.length ? 60 : 0;
-      var nParents = parents.length;
-      var rootCols = nParents <= 1 ? 1 : nParents <= 2 ? 2 : nParents <= 6 ? 3 : 4;
-
-      if (nParents > 0) {
-        parents.layout({
-          name: "grid",
-          fit: false,
-          padding: 36,
-          avoidOverlap: true,
-          condense: false,
-          cols: rootCols,
-          nodeDimensionsIncludeLabels: true,
-          boundingBox: { x1: -520, y1: yStart, w: 1040, h: 520 },
-        }).run();
-      }
-
-      parents.forEach(function (p) {
-        layoutChildrenGrid(p);
-      });
-
-      if (switchFilter && parents.length <= 1) {
-        var fitSet = parents.length ? parents.union(core) : core;
-        if (fitSet.length) cy.fit(fitSet, 50);
-        else cy.fit(undefined, 40);
-        return;
-      }
-
-      cy.fit(undefined, 45);
+      var eles = cy.elements(":visible");
+      var useDagre = ensureDagre();
+      var layoutOpts = useDagre
+        ? {
+            name: "dagre",
+            rankDir: "TB",
+            nodeSep: 22,
+            edgeSep: 8,
+            rankSep: 75,
+            ranker: "tight-tree",
+            fit: true,
+            padding: 35,
+          }
+        : {
+            name: "breadthfirst",
+            directed: true,
+            spacingFactor: 1.1,
+            fit: true,
+            padding: 35,
+          };
+      eles.layout(layoutOpts).run();
     }
 
     function loadGraph() {

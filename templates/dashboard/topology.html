@@ -66,7 +66,7 @@
   <div class="col-auto topo-stat">Chưa map: <strong id="metaApUnmapped">—</strong></div>
   <div class="col-auto topo-stat ms-auto" id="metaUpdated">—</div>
 </div>
-<p id="topology-hint" class="mb-2">Phân tầng: Core → switch access (khung xanh) → AP bên trong.</p>
+<p id="topology-hint" class="mb-2">Phân tầng cây: Core → switch access → AP (đường nối switch → AP).</p>
 
 <div id="topology-wrap" class="card border-0 p-0 overflow-hidden">
   <div id="topology-cy"></div>
@@ -82,6 +82,8 @@
 
 {% block extra_js %}
 <script src="https://cdn.jsdelivr.net/npm/cytoscape@3.30.2/dist/cytoscape.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/dagre@0.8.5/dist/dagre.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/cytoscape-dagre@2.5.0/cytoscape-dagre.min.js"></script>
 <script src="{% static 'js/realtime.js' %}"></script>
 <script src="{% static 'js/topology.js' %}"></script>
 <script>

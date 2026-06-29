@@ -116,6 +116,7 @@ def build_topology_graph(
     edges: list[dict] = []
     mapped_macs: set[str] = set()
     switch_nodes_added: set[int] = set()
+    ap_nodes_added: set[str] = set()
 
     # Core node (tầng trên)
     if core and (not switch_filter or core_id == switch_filter or switch_filter in access_switch_ids):
@@ -187,21 +188,35 @@ def build_topology_graph(
         if mac:
             mapped_macs.add(mac)
 
-        nodes.append({
+        if ap_nid not in ap_nodes_added:
+            ap_nodes_added.add(ap_nid)
+            nodes.append({
+                "data": {
+                    "id": ap_nid,
+                    "label": _short_label(ap_name),
+                    "full_label": ap_name,
+                    "type": "ap",
+                    "mac": mac or link.remote_ap_mac,
+                    "ip": ap_ip,
+                    "online": is_online,
+                    "client_count": client_count,
+                    "confirmed": link.is_confirmed,
+                    "switch_name": sw.name,
+                    "switch_port": link.local_port or "",
+                    "tier": 2,
+                },
+            })
+
+        # Edge switch → AP (thay cho compound parent)
+        edges.append({
             "data": {
-                "id": ap_nid,
-                "label": _short_label(ap_name),
-                "full_label": ap_name,
+                "id": f"e-ap-{sw.id}-{ap_nid}",
+                "source": sw_nid,
+                "target": ap_nid,
+                "label": link.local_port or "",
                 "type": "ap",
-                "mac": mac or link.remote_ap_mac,
-                "ip": ap_ip,
                 "online": is_online,
-                "client_count": client_count,
-                "confirmed": link.is_confirmed,
-                "switch_name": sw.name,
-                "switch_port": link.local_port or "",
-                "parent": sw_nid,
-                "tier": 2,
+                "inferred": not link.is_confirmed,
             },
         })
 
@@ -242,6 +257,9 @@ def build_topology_graph(
         })
         for ap in orphan_aps:
             ap_nid = _ap_node_id(ap["mac"], ap["name"])
+            if ap_nid in ap_nodes_added:
+                continue
+            ap_nodes_added.add(ap_nid)
             nodes.append({
                 "data": {
                     "id": ap_nid,
@@ -256,8 +274,16 @@ def build_topology_graph(
                     "orphan": True,
                     "switch_name": "",
                     "switch_port": "",
-                    "parent": ORPHAN_GROUP_ID,
                     "tier": 2,
+                },
+            })
+            edges.append({
+                "data": {
+                    "id": f"e-orphan-{ap_nid}",
+                    "source": ORPHAN_GROUP_ID,
+                    "target": ap_nid,
+                    "type": "ap",
+                    "inferred": True,
                 },
             })
 
