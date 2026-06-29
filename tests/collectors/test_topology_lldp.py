@@ -64,6 +64,15 @@ class TestIsApNeighbor:
         assert is_ap_neighbor("CORE-SW", "") is False
         assert is_ap_neighbor("", "") is False
 
+    def test_switch_name_beats_ap_pattern(self):
+        # Tên switch khớp pattern AP `^X\d[-_/]` nhưng phải bị loại (không thành AP ma).
+        assert is_ap_neighbor("X1_SW3_DauX1_20U_V14", "") is False
+        assert is_ap_neighbor("X2-SW1-CuoiX2-6U-TTPP", "") is False
+        # Nhưng MAC khớp AC thì vẫn là AP dù tên trông giống switch.
+        assert is_ap_neighbor(
+            "X2_SW_LIKE", "0c:84:08:59:80:c0", ap_macs={"0c:84:08:59:80:c0"},
+        ) is True
+
     def test_custom_pattern(self):
         import re
         pat = re.compile(r"^MYAP", re.I)

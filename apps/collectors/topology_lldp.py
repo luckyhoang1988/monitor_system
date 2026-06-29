@@ -135,10 +135,17 @@ def is_ap_neighbor(
     """Phân loại neighbor là AP — theo MAC trên AC hoặc pattern tên AP."""
     mac = normalize_mac(chassis_mac) if chassis_mac else ""
     if ap_macs and mac and mac in ap_macs:
-        return True
-    pattern = ap_pattern or DEFAULT_AP_NAME_PATTERN
+        return True  # MAC khớp AC = chắc chắn AP, thắng mọi heuristic tên
     name = (sys_name or "").strip()
-    return bool(name and pattern.search(name))
+    if not name:
+        return False
+    # Tên giống switch trong fleet (X1_SW.., X2-SW.., CORE..) thắng pattern AP `^X\d[-_/]`
+    # → tránh switch bị nhầm thành AP ma trên topology.
+    from apps.devices.topology_switch_match import looks_like_switch_name
+    if looks_like_switch_name(name):
+        return False
+    pattern = ap_pattern or DEFAULT_AP_NAME_PATTERN
+    return bool(pattern.search(name))
 
 
 def _load_lldp_oids(os_family: str = "huawei_vrp") -> dict:
