@@ -76,6 +76,12 @@ apps/
 - Bảng STA chi tiết **KHÔNG expose** SNMP → chỉ lấy được **số lượng** client/AP, không liệt kê từng client/MAC. Lệch nhẹ vs Web UI từng thời điểm là bình thường.
 - Tool dò: `python manage.py verify_wlan_oids <device_id> --parent <oid>`.
 
+**Topology — map AP vào switch (`apps/collectors/topology_*`, `apps/dashboard/topology_api.py`)**:
+- Badge "(n AP)" trên node switch = số `TopologyLink(link_kind='ap', is_stale=False)` của switch đó.
+- Ưu tiên LLDP; switch **không expose LLDP** (cisco_business, một số cisco_ios) → fallback **FDB** (dò MAC bảng forwarding khớp danh sách AP từ AC). FDB không phân biệt "AP cắm trực tiếp" vs "MAC học vọng qua uplink" → lọc bằng `is_uplink_port` (port_mode trunk/hybrid, `FDB_UPLINK_TOTAL_MAC_THRESHOLD=25` tổng MAC, `AP_MAC_FLOOD_THRESHOLD=3`).
+- ⚠️ **AP link unique theo `(local_device, local_port)`** (update_or_create) → "last-MAC-wins"/cổng. Đường FDB phải chỉ trả entry **đã khớp AP**, nếu trả mọi MAC sẽ đẻ AP ma 1/cổng (đã từng: `filter_fdb_ap_entries` trả `entries` thay vì `[]` khi không match → ma trên uplink Gi9 + `port-0`, MAC đổi mỗi vòng, fix 2026-06-29 commit 6409b73).
+- **Soi AP ma:** AP link `is_stale=False` có MAC **không** thuộc snapshot AC (`load_ac_ap_snapshot`) = giả. Lệnh: `diagnose_ap_mapping`. Link sẽ tự `is_stale` sau `STALE_MISS_THRESHOLD=3` vòng miss, nhưng nếu gốc còn đẻ thì phải fix collector chứ xoá vô ích.
+
 ## RBAC — 2 cấp (app `apps.accounts`, không có model riêng)
 - **Admin** = group `Network Admins` (hoặc superuser): full + quản lý user. **Review** = `Read-Only Operators`: chỉ xem, write → 403.
 - Nguồn sự thật: [apps/accounts/roles.py](apps/accounts/roles.py) (`is_admin/get_role/set_role`) — dùng chung với `_can_write` (devices/alerts) và `IsAdminOrReadOnly` (DRF).
