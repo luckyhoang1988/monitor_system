@@ -45,12 +45,13 @@ def _purge_metrics(start, end) -> int:
     KHÔNG đụng tới lịch sử cảnh báo (Alert/AlertNotification).
     """
     from apps.metrics.models import (
-        InterfaceStats, SystemHealth, VMStats,
+        InterfaceStats, SystemHealth, VMStats, WifiApStats, WifiClientStats,
         SystemHealthHourly, SystemHealthDaily,
         InterfaceStatsHourly, InterfaceStatsDaily,
     )
     total = 0
-    for model in (InterfaceStats, SystemHealth, VMStats):
+    # Raw time-series — đồng bộ với cleanup_old_metrics (gồm cả bảng Wifi).
+    for model in (InterfaceStats, SystemHealth, VMStats, WifiApStats, WifiClientStats):
         total += model.objects.filter(timestamp__gte=start, timestamp__lt=end).delete()[0]
     for model in (SystemHealthHourly, InterfaceStatsHourly):
         total += model.objects.filter(hour__gte=start, hour__lt=end).delete()[0]
