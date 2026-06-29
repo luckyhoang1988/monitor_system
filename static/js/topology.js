@@ -229,7 +229,13 @@
       if (opts.metaApOffline) opts.metaApOffline.textContent = meta.ap_offline != null ? meta.ap_offline : "—";
       if (opts.metaApUnmapped) opts.metaApUnmapped.textContent = meta.ap_unmapped != null ? meta.ap_unmapped : "—";
       if (opts.metaUpdated && meta.generated_at) {
-        opts.metaUpdated.textContent = "Cập nhật: " + meta.generated_at.slice(11, 19);
+        // generated_at là ISO UTC (timezone.now().isoformat()). Parse rồi format
+        // theo giờ địa phương trình duyệt (VN +7) thay vì cắt thô chuỗi UTC.
+        var d = new Date(meta.generated_at);
+        var hhmmss = isNaN(d.getTime())
+          ? meta.generated_at.slice(11, 19)
+          : d.toLocaleTimeString("vi-VN", { hour12: false });
+        opts.metaUpdated.textContent = "Cập nhật: " + hhmmss;
       }
       if (opts.layoutHint) {
         if (meta.switch_filter) {
