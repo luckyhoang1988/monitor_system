@@ -122,11 +122,11 @@ CELERY_BEAT_SCHEDULER = "django_celery_beat.schedulers:DatabaseScheduler"
 
 from celery.schedules import crontab  # noqa: E402
 
-# Chu kỳ poll (giây) — override qua .env nếu cần. Mọi mục 120s trừ HyperV.
-POLL_NETWORK_INTERVAL_SECS = env.int("POLL_NETWORK_INTERVAL_SECS", default=120)
-POLL_PING_INTERVAL_SECS    = env.int("POLL_PING_INTERVAL_SECS", default=120)
+# Chu kỳ poll (giây) — override qua .env nếu cần. Mọi mục 60s trừ HyperV.
+POLL_NETWORK_INTERVAL_SECS = env.int("POLL_NETWORK_INTERVAL_SECS", default=60)
+POLL_PING_INTERVAL_SECS    = env.int("POLL_PING_INTERVAL_SECS", default=60)
 POLL_HYPERV_INTERVAL_SECS  = env.int("POLL_HYPERV_INTERVAL_SECS", default=300)
-ALERT_EVAL_INTERVAL_SECS   = env.int("ALERT_EVAL_INTERVAL_SECS", default=120)
+ALERT_EVAL_INTERVAL_SECS   = env.int("ALERT_EVAL_INTERVAL_SECS", default=60)
 TOPOLOGY_DISCOVER_INTERVAL_SECS = env.int("TOPOLOGY_DISCOVER_INTERVAL_SECS", default=1800)
 
 # options.expires: bản điều phối tồn quá 1 chu kỳ trong queue sẽ tự rớt,
@@ -224,8 +224,8 @@ METRICS_WRITE_MODE = env("METRICS_WRITE_MODE", default="db")
 METRICS_LATEST_TTL_SECS = env.int("METRICS_LATEST_TTL_SECS", default=1800)
 # TTL (giây) cho ring-buffer time-series (chart ngắn hạn + sustained alert).
 METRICS_SERIES_TTL_SECS = env.int("METRICS_SERIES_TTL_SECS", default=90000)  # ~25h
-# Số mẫu tối đa giữ trong mỗi ring-buffer (~800 mẫu ≈ 26h @120s → phủ chart raw-tier 24h).
-METRICS_SERIES_MAX_SAMPLES = env.int("METRICS_SERIES_MAX_SAMPLES", default=800)
+# Số mẫu tối đa giữ trong mỗi ring-buffer (~1500 mẫu ≈ 25h @60s → phủ chart raw-tier 24h).
+METRICS_SERIES_MAX_SAMPLES = env.int("METRICS_SERIES_MAX_SAMPLES", default=1500)
 
 # Đường dẫn để theo dõi dung lượng disk (trang Cảnh báo → Dung lượng).
 # Mặc định "/" — trong container, overlay fs phản ánh disk host nơi đặt volume DB.
@@ -244,12 +244,12 @@ ONLINE_REQUIRE_ICMP = env.bool("ONLINE_REQUIRE_ICMP", default=True)
 PING_TIMEOUT_SECS   = env.int("PING_TIMEOUT_SECS", default=1)
 
 # SNMP request timeout/retries (collector). Giữ nhỏ để thiết bị offline không treo
-# worker khi chu kỳ poll ngắn (120s). 1 walk chết ≈ timeout×(retries+1).
+# worker khi chu kỳ poll ngắn (60s). 1 walk chết ≈ timeout×(retries+1).
 SNMP_TIMEOUT_SECS = env.int("SNMP_TIMEOUT_SECS", default=5)
 SNMP_RETRIES      = env.int("SNMP_RETRIES", default=1)
 
 # Alert engine
-ALERT_GRACE_PERIOD_SECS    = 120  # min seconds before "no data" is treated as offline
+ALERT_GRACE_PERIOD_SECS    = 90   # min seconds before "no data" is treated as offline (1.5× poll interval)
 ALERT_EVAL_WINDOW_MINUTES  = 10   # look-back window for alert task
 DEVICE_ONLINE_MIN_GRACE_SECS = 300  # min grace for Device.is_online to avoid flapping
 
@@ -268,6 +268,6 @@ HOURLY_ROLLUP_BUFFER_HOURS = 2
 DAILY_ROLLUP_BUFFER_DAYS   = 1
 
 # Cửa sổ (giây) tìm mẫu InterfaceStats trước để tính delta Mbps.
-# Phải ≥ nhịp poll thực của Celery beat (poll-all-network-devices = 120s) để
+# Phải ≥ nhịp poll thực của Celery beat (poll-all-network-devices = 60s) để
 # không bỏ lỡ mẫu trước khi device.collect_interval bị đặt nhỏ hơn nhịp poll.
 METRIC_PREV_LOOKBACK_SECS = env.int("METRIC_PREV_LOOKBACK_SECS", default=900)
