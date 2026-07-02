@@ -83,6 +83,7 @@ apps/
 - ⚠️ **client/AP đúng là `.44`, KHÔNG phải `.41`** (`.41`≈số khác; `.17/.33/.34` bất biến = config). Cách dò: poll 2 lần lọc cột dao động + đối chiếu Total Web UI (`/research-oids`).
 - Bảng STA chi tiết **KHÔNG expose** SNMP → chỉ lấy được **số lượng** client/AP, không liệt kê từng client/MAC. Lệch nhẹ vs Web UI từng thời điểm là bình thường.
 - Tool dò: `python manage.py verify_wlan_oids <device_id> --parent <oid>`.
+- ⚠️ **AC SNMP phản hồi CHẬM đều** (verify id=23 ACL_Wlan 2026-07-02): poll ~28-33s (interfaces 9s + wifi walk 9s + vlan 4s + port_mode 3s) → sát `POLL_DEVICE_SOFT_LIMIT=45s`; khi 4 worker bận vượt 45s → `soft_timeout_sighandler` giết task → coi offline → xoá `last_seen` → **badge Off giả** dù ICMP+SNMP thật vẫn OK (`wlan_controller` KHÔNG trong `ICMP_DEVICE_TYPES` nên online = collect-thành-công; ping tốt vô nghĩa với online status). Fix (commit 836d543): `collect_raw` **bỏ `_collect_access_vlans`+`_collect_port_modes` cho `device_type=wlan_controller`** (AC giám sát AP/client, không phải switchport VLAN) → poll còn ~22s, biên an toàn dưới 45s.
 
 **Topology — map AP vào switch (`apps/collectors/topology_*`, `apps/dashboard/topology_api.py`)**:
 - Badge "(n AP)" trên node switch = số `TopologyLink(link_kind='ap', is_stale=False)` của switch đó.
@@ -159,7 +160,8 @@ celery -A config beat -l info
 Phase 1–7 **đã hoàn thành** (setup/models → collector SNMP/SSH + tests → Celery + HyperV WinRM → dashboard + Chart.js → alert Email/Telegram + Rule CRUD → Docker/prod deploy → RBAC 2 cấp).
 
 ### Thay đổi quan trọng
-- **2026-07-02**: Hạ SNMP polling interval **120s → 60s** (fleet ≤30 thiết bị, 4 Celery workers đủ throughput). Kèm theo: `ALERT_EVAL_INTERVAL_SECS` 120→60, `ALERT_GRACE_PERIOD_SECS` 120→90 (1.5× interval), `METRICS_SERIES_MAX_SAMPLES` 800→1500 (giữ 24h chart @60s). Các setting đọc từ env, override qua `.env` nếu cần rollback. Commit `0e4258c`.
+- **2026-07-02**: Nâng SNMP polling interval **60s → 90s** (wall-clock poll 20 thiết bị ~56.5s/60s quá sát ngưỡng, biên chỉ 3.5s; nâng lên 90s cho biên ~33.5s an toàn). Kèm theo: `ALERT_EVAL_INTERVAL_SECS` 60→90, `ALERT_GRACE_PERIOD_SECS` 90→135 (1.5× interval), `METRICS_SERIES_MAX_SAMPLES` 1500→1000 (giữ 25h chart @90s). Các setting đọc từ env, override qua `.env` nếu cần rollback.
+- **2026-07-02 (trước đó)**: Hạ SNMP polling interval **120s → 60s** (fleet ≤30 thiết bị, 4 Celery workers đủ throughput). Kèm theo: `ALERT_EVAL_INTERVAL_SECS` 120→60, `ALERT_GRACE_PERIOD_SECS` 120→90 (1.5× interval), `METRICS_SERIES_MAX_SAMPLES` 800→1500 (giữ 24h chart @60s). Các setting đọc từ env, override qua `.env` nếu cần rollback. Commit `0e4258c`.
 
 ### Production (đang chạy)
 - Server `monitorsrv` = `10.0.193.234` (SSH sẵn, user `monitorsys`); app tại `/home/monitorsys/monitor_system`.
