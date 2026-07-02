@@ -765,14 +765,18 @@ class SwitchSNMPCollector(BaseCollector):
 
         # Gán access VLAN (PVID) + chế độ cổng (trunk/access) cho từng interface theo ifIndex.
         interfaces = self._collect_interfaces()
-        vlan_map = self._collect_access_vlans(oid_profile)
-        mode_map = self._collect_port_modes(oid_profile)
-        if vlan_map or mode_map:
-            for iface in interfaces:
-                if vlan_map:
-                    iface.access_vlan = vlan_map.get(iface.if_index)
-                if mode_map:
-                    iface.port_mode = mode_map.get(iface.if_index)
+        # WLAN controller: bỏ walk VLAN + port-mode. Mục tiêu giám sát AC là AP/client,
+        # không phải switchport VLAN; 2 walk này (~7s) đẩy tổng poll (~28-33s) vượt
+        # soft_time_limit 45s khi worker bận → AC báo Off giả dù SNMP thật vẫn phản hồi.
+        if self.device.device_type != "wlan_controller":
+            vlan_map = self._collect_access_vlans(oid_profile)
+            mode_map = self._collect_port_modes(oid_profile)
+            if vlan_map or mode_map:
+                for iface in interfaces:
+                    if vlan_map:
+                        iface.access_vlan = vlan_map.get(iface.if_index)
+                    if mode_map:
+                        iface.port_mode = mode_map.get(iface.if_index)
 
         return {
             "os_family":   os_family,
