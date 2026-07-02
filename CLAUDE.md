@@ -15,7 +15,7 @@ Django 5.x + Bootstrap 5 · PostgreSQL (prod) / SQLite (dev) · Celery + Redis +
 
 ## Luồng dữ liệu
 ```
-Celery Beat (120s) → CollectorFactory → SNMP/SSH/WinRM
+Celery Beat (60s) → CollectorFactory → SNMP/SSH/WinRM
   → Adapter (normalize theo vendor) → MetricWriter → DB
   → evaluate_alert_rules → Email/Telegram
   → Django Views + Chart.js → Dashboard
@@ -135,7 +135,7 @@ apps/
 
 - **Cờ** `METRICS_WRITE_MODE ∈ {"db","cache"}` (env, mặc định `"db"`). `"cache"` = bật cache-first. Rollback = đổi về `"db"` + rebuild. Bật dần an toàn.
 - **Redis DB /1 riêng** (`CACHE_REDIS_URL`, suy từ `REDIS_URL` `.rsplit("/",1)[0]+"/1"`) — tách Celery **/0** & realtime **/2**. Dùng **redis-py trực tiếp** (không django-redis) qua [apps/metrics/cache.py](apps/metrics/cache.py); mọi thao tác nuốt exception (ghi trả cờ False → caller fallback).
-- **Key** (đều có TTL): `m:latest:<device_id>` (STRING JSON, snapshot mới nhất) · `m:series:sys:<device_id>` (LIST scalar cấp device `{ts,cpu,mem,sc?,vmr?,vmu?,wc?,wao?}`) · `m:series:if:<interface_id>` (LIST `{ts,in_mbps,out_mbps,status,in_errors,out_errors}`). Cap `METRICS_SERIES_MAX_SAMPLES` (mặc định 800 ≈ 26h @120s → phủ chart raw-tier 24h). TTL: latest 30min, series ~25h.
+- **Key** (đều có TTL): `m:latest:<device_id>` (STRING JSON, snapshot mới nhất) · `m:series:sys:<device_id>` (LIST scalar cấp device `{ts,cpu,mem,sc?,vmr?,vmu?,wc?,wao?}`) · `m:series:if:<interface_id>` (LIST `{ts,in_mbps,out_mbps,status,in_errors,out_errors}`). Cap `METRICS_SERIES_MAX_SAMPLES` (mặc định 1500 ≈ 25h @60s → phủ chart raw-tier 24h). TTL: latest 30min, series ~25h.
 - **3 nguồn đọc chuyển sang cache** (mấu chốt — bỏ ghi raw phải kèm chuyển đọc):
   1. **Alert engine** ([apps/alerts/engine.py](apps/alerts/engine.py)): mọi getter có nhánh `if _use_cache()` đọc `get_latest`/`get_sys_series`/`get_if_series`, **giữ nguyên signature + logic hysteresis/sustained** (helper chung `_sustained_verdict`). Sustained cấp-device đọc scalar trong sys-series (`sc/vmr/vmu/wc/wao`), sustained interface đọc if-series. `device_online` KHÔNG đổi (dùng `last_ok_seen`). `_fresh_latest` bỏ snapshot cũ hơn `since` (giữ ngữ nghĩa `timestamp__gte`).
   2. **Tính Mbps** ([apps/metrics/writer.py](apps/metrics/writer.py) `_compute_mbps_core`): prev counter lấy từ `m:latest` (bytes+ts snapshot trước) thay vì row `InterfaceStats`. `_calc_mbps` (DB) & `_calc_mbps_from_snapshot` (cache) cùng gọi core.
@@ -157,6 +157,9 @@ celery -A config beat -l info
 
 ## Trạng thái
 Phase 1–7 **đã hoàn thành** (setup/models → collector SNMP/SSH + tests → Celery + HyperV WinRM → dashboard + Chart.js → alert Email/Telegram + Rule CRUD → Docker/prod deploy → RBAC 2 cấp).
+
+### Thay đổi quan trọng
+- **2026-07-02**: Hạ SNMP polling interval **120s → 60s** (fleet ≤30 thiết bị, 4 Celery workers đủ throughput). Kèm theo: `ALERT_EVAL_INTERVAL_SECS` 120→60, `ALERT_GRACE_PERIOD_SECS` 120→90 (1.5× interval), `METRICS_SERIES_MAX_SAMPLES` 800→1500 (giữ 24h chart @60s). Các setting đọc từ env, override qua `.env` nếu cần rollback. Commit `0e4258c`.
 
 ### Production (đang chạy)
 - Server `monitorsrv` = `10.0.193.234` (SSH sẵn, user `monitorsys`); app tại `/home/monitorsys/monitor_system`.
