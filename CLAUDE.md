@@ -1,5 +1,12 @@
 # Monitor System — CLAUDE.md
 
+## ⓿ Nguyên tắc làm việc (BẮT BUỘC — đọc trước mọi việc)
+> Rút ra từ thực chiến trên fleet + prod. Vi phạm là lặp lại lỗi cũ. Chi tiết trong `/deploy` §0.
+1. **KHÔNG suy luận linh tinh, KHÔNG đoán mò.** Mọi kết luận (OID, root cause, mapping) phải có bằng chứng. Chưa chứng minh được thì nói "chưa chắc" + đi verify, KHÔNG viết vào code/doc như sự thật.
+2. **Test bằng KẾT QUẢ THẬT trước khi thay đổi.** Đo/probe trên thiết bị/DB/shell thật (vd walk OID trên `docker compose exec worker`) → xác nhận số liệu → rồi mới sửa code. Sửa xong verify live lại (§4 /deploy).
+3. **Đọc KỸ tài liệu hãng/OS của từng thiết bị** (Cisco IOS/IOS-XE/Business-CISCOSB, Huawei VRP/YunShan, HyperV/WinRM) — MIB/enum/OID khác nhau theo firmware. Không đồng nhất "Cisco" hay "Huawei" là một. Tài liệu chung mâu thuẫn thiết bị thật → tin thiết bị thật (đã verify), ghi lại điểm lệch.
+4. **Đổi code = đọc `/deploy` skill TRƯỚC, học được gì mới thì UPDATE NGAY skill + CLAUDE.md + memory.** Skill là nguồn sự thật sống; giữ nó đúng hiện trạng cho lần sau.
+
 ## Mục tiêu
 Giám sát hạ tầng mạng + ảo hoá: **Switch** Cisco (IOS/IOS-XE) & Huawei (VRP — S5700/S6700/S9300); **HyperV** (VM health, host resources, replication, snapshot).
 
