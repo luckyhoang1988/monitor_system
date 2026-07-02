@@ -6,6 +6,7 @@ from django.db import transaction
 from django.utils import timezone
 from apps.collectors.base import NormalizedData, InterfaceData
 from apps.devices.models import Device, Interface
+from . import cache as metrics_cache
 from .models import InterfaceStats, SystemHealth, VMStats, WifiApStats, WifiClientStats
 
 logger = logging.getLogger(__name__)
@@ -42,6 +43,20 @@ _EXTRA_SKIP_KEYS = ("vms", "wifi_aps", "wifi_clients")
 
 
 def save_metrics(device: Device, data: NormalizedData) -> None:
+    """Ghi metrics 1 vòng poll.
+
+    - Mode "cache" (METRICS_WRITE_MODE): metrics vào Redis (latest + ring-buffer),
+      Postgres chỉ ghi evidence khi đổi trạng thái quan trọng. Redis lỗi → fallback DB.
+    - Mode "db" (mặc định): ghi raw như cũ.
+    """
+    if metrics_cache.is_cache_mode():
+        if _save_metrics_cache(device, data):
+            return
+        logger.warning("Device %s: ghi cache thất bại → fallback ghi DB", device.name)
+    _save_metrics_db(device, data)
+
+
+def _save_metrics_db(device: Device, data: NormalizedData) -> None:
     with transaction.atomic():
         _save_system_health(device, data)
         if data.interfaces:
@@ -52,6 +67,157 @@ def save_metrics(device: Device, data: NormalizedData) -> None:
             _save_wifi_ap_stats(device, data)
         if data.extra.get("wifi_clients"):
             _save_wifi_client_stats(device, data)
+
+
+def _save_metrics_cache(device: Device, data: NormalizedData) -> bool:
+    """Ghi snapshot + ring-buffer vào Redis; persist DB khi đổi trạng thái quan trọng.
+
+    Trả True nếu ghi cache thành công; False → caller fallback ghi DB (Redis lỗi).
+    """
+    prev = metrics_cache.get_latest(device.id) or {}
+    prev_ifaces = prev.get("interfaces") or {}
+    prev_ts_epoch = prev.get("ts")
+
+    # Interface inventory VẪN ghi DB (đổi thưa) — cần mapping name->Interface (có PK)
+    # để khoá ring-buffer theo interface_id và ghi evidence.
+    existing_ifaces = _sync_interface_inventory(device, data) if data.interfaces else {}
+
+    ts_epoch = data.timestamp.timestamp()
+    snap_ifaces: dict[str, dict] = {}
+    if_samples: dict[int, dict] = {}
+    changed_ifaces: list[tuple] = []  # (Interface, InterfaceData, in_mbps, out_mbps)
+
+    for iface_data in data.interfaces:
+        iface = existing_ifaces.get(_iface_key(iface_data.name))
+        if not iface:
+            continue
+        prev_if = prev_ifaces.get(str(iface.id))
+        in_mbps, out_mbps = _calc_mbps_from_snapshot(
+            prev_if, prev_ts_epoch, iface_data, data.timestamp, device.collect_interval
+        )
+        snap_ifaces[str(iface.id)] = {
+            "if_index": iface_data.if_index,
+            "name": iface_data.name,
+            "status": iface_data.status,
+            "in_bytes": iface_data.in_bytes,
+            "out_bytes": iface_data.out_bytes,
+            "in_errors": iface_data.in_errors,
+            "out_errors": iface_data.out_errors,
+            "in_mbps": in_mbps,
+            "out_mbps": out_mbps,
+            "speed": iface_data.speed_mbps,
+        }
+        if_samples[iface.id] = {
+            "ts": ts_epoch,
+            "in_mbps": in_mbps,
+            "out_mbps": out_mbps,
+            "status": iface_data.status,
+            "in_errors": iface_data.in_errors,
+            "out_errors": iface_data.out_errors,
+        }
+        # Chỉ coi là "đổi trạng thái" khi có mẫu trước (tránh nhiễu ở poll đầu).
+        if prev_if and prev_if.get("status") != iface_data.status:
+            changed_ifaces.append((iface, iface_data, in_mbps, out_mbps))
+
+    extra = {k: v for k, v in data.extra.items() if k not in _EXTRA_SKIP_KEYS}
+    snapshot = {
+        "ts": ts_epoch,
+        "cpu": data.cpu_percent,
+        "mem": data.mem_percent,
+        "uptime": data.uptime_secs or None,
+        "extra": extra,
+        "interfaces": snap_ifaces,
+        "vms": data.extra.get("vms", []),
+        "wifi_aps": data.extra.get("wifi_aps", []),
+        "wifi_clients": data.extra.get("wifi_clients", []),
+    }
+
+    ok_latest = metrics_cache.set_latest(device.id, snapshot)
+    ok_series = metrics_cache.push_series(
+        device.id,
+        _device_scalar_sample(data, ts_epoch),
+        if_samples,
+    )
+    if not (ok_latest and ok_series):
+        return False
+
+    _persist_change_events(device, data, prev, changed_ifaces)
+    return True
+
+
+_REPL_HEALTHY = {"Normal", "NotConfigured"}
+
+
+def _device_scalar_sample(data: NormalizedData, ts_epoch: float) -> dict:
+    """Mẫu scalar cấp thiết bị cho ring-buffer sys — nguồn cho sustained alert.
+
+    Ngoài cpu/mem còn gói các scalar/poll: session_count (sc), vm running (vmr),
+    vm repl unhealthy (vmu), wifi client (wc), wifi AP offline (wao) — chỉ thêm key
+    khi thiết bị có dữ liệu tương ứng.
+    """
+    sample = {"ts": ts_epoch, "cpu": data.cpu_percent, "mem": data.mem_percent}
+    sc = data.extra.get("session_count")
+    if sc is not None:
+        sample["sc"] = sc
+    vms = data.extra.get("vms")
+    if vms:
+        sample["vmr"] = sum(1 for v in vms if v.get("state") == "Running")
+        sample["vmu"] = sum(1 for v in vms if (v.get("repl_health") or "") not in _REPL_HEALTHY)
+    aps = data.extra.get("wifi_aps")
+    if aps:
+        sample["wao"] = sum(1 for a in aps if not a.get("is_online"))
+        clients = data.extra.get("wifi_clients")
+        sample["wc"] = len(clients) if clients else sum(int(a.get("client_count") or 0) for a in aps)
+    return sample
+
+
+def _vms_changed(prev_vms: list, new_vms: list) -> bool:
+    """True nếu có VM đổi state/repl_health (hoặc thêm/bớt VM). Poll đầu (prev rỗng) → False."""
+    if not prev_vms:
+        return False
+
+    def _idx(vms):
+        return {v.get("name"): (v.get("state"), v.get("repl_health")) for v in vms}
+
+    p, n = _idx(prev_vms), _idx(new_vms)
+    if set(p) != set(n):
+        return True
+    return any(p[k] != n[k] for k in n)
+
+
+def _persist_change_events(device: Device, data: NormalizedData, prev: dict, changed_ifaces: list) -> None:
+    """Ghi evidence xuống Postgres khi đổi trạng thái quan trọng (event thưa).
+
+    - Interface up/down → ghi InterfaceStats cho các cổng đổi trạng thái.
+    - VM đổi state/replication → ghi snapshot VMStats.
+    - Kèm 1 SystemHealth làm ngữ cảnh CPU/mem tại thời điểm sự cố.
+    """
+    vm_changed = _vms_changed(prev.get("vms") or [], data.extra.get("vms") or [])
+    if not (changed_ifaces or vm_changed):
+        return
+    with transaction.atomic():
+        _save_system_health(device, data)
+        if changed_ifaces:
+            InterfaceStats.objects.bulk_create([
+                InterfaceStats(
+                    interface=iface,
+                    timestamp=data.timestamp,
+                    status=idata.status,
+                    in_bytes=idata.in_bytes,
+                    out_bytes=idata.out_bytes,
+                    in_errors=idata.in_errors,
+                    out_errors=idata.out_errors,
+                    in_mbps=in_mbps,
+                    out_mbps=out_mbps,
+                )
+                for (iface, idata, in_mbps, out_mbps) in changed_ifaces
+            ])
+        if vm_changed:
+            _save_vm_stats(device, data)
+    logger.info(
+        "Device %s: ghi evidence DB (if_changes=%d vm_changed=%s)",
+        device.name, len(changed_ifaces), vm_changed,
+    )
 
 
 def _save_system_health(device: Device, data: NormalizedData) -> None:
@@ -112,8 +278,12 @@ def _iface_key(name: str | None) -> str:
     return (name or "").strip().casefold()
 
 
-def _save_interface_stats(device: Device, data: NormalizedData) -> None:
-    # 1. Đồng bộ Interface list (giảm N get_or_create thành bulk) — khớp theo TÊN.
+def _sync_interface_inventory(device: Device, data: NormalizedData) -> dict[str, Interface]:
+    """Đồng bộ bảng Interface (inventory thiết bị) — khớp theo TÊN, bulk create/update.
+
+    Trả về mapping {name_key: Interface} có PK (dùng cho cả DB-mode lẫn cache-mode).
+    Đây là dữ liệu cấu hình đổi thưa → vẫn ghi Postgres ở cả hai mode.
+    """
     existing_ifaces = {_iface_key(i.name): i for i in Interface.objects.filter(device=device)}
     new_ifaces = []
     update_ifaces = []
@@ -163,6 +333,13 @@ def _save_interface_stats(device: Device, data: NormalizedData) -> None:
 
     if update_ifaces:
         Interface.objects.bulk_update(update_ifaces, ["if_index", "description", "is_uplink", "access_vlan", "port_mode"])
+
+    return existing_ifaces
+
+
+def _save_interface_stats(device: Device, data: NormalizedData) -> None:
+    # 1. Đồng bộ Interface list (giảm N get_or_create thành bulk) — khớp theo TÊN.
+    existing_ifaces = _sync_interface_inventory(device, data)
 
     # 2. Fetch "previous stats" cho tất cả interface bằng 1 query.
     # Cửa sổ tìm prev phải đủ rộng: nhịp poll thực do Celery beat quyết định (vd 300s)
@@ -225,28 +402,28 @@ def _counter_delta(prev: int, new: int, max_counter: int) -> int:
     return 0
 
 
-def _calc_mbps(
-    prev_stat: InterfaceStats | None,
+def _compute_mbps_core(
+    prev_in: int,
+    prev_out: int,
+    prev_ts: datetime | None,
     new: InterfaceData,
     new_timestamp: datetime | None,
     fallback_interval_secs: int,
 ) -> tuple[float, float]:
-    """Tính tốc độ Mbps từ delta bytes / delta time giữa 2 poll."""
-    if not prev_stat:
-        return 0.0, 0.0
+    """Lõi tính Mbps từ delta bytes / delta time — dùng chung DB-mode & cache-mode."""
     try:
         # seconds between samples
         interval = float(fallback_interval_secs or 0)
-        if new_timestamp and prev_stat.timestamp:
-            dt = (new_timestamp - prev_stat.timestamp).total_seconds()
+        if new_timestamp and prev_ts:
+            dt = (new_timestamp - prev_ts).total_seconds()
             if dt > 0:
                 interval = float(dt)
         if not interval:
             return 0.0, 0.0
 
         max_counter = 2**64  # ifHCIn/OutOctets are 64-bit counters
-        delta_in = _counter_delta(prev_stat.in_bytes, new.in_bytes, max_counter)
-        delta_out = _counter_delta(prev_stat.out_bytes, new.out_bytes, max_counter)
+        delta_in = _counter_delta(int(prev_in), int(new.in_bytes), max_counter)
+        delta_out = _counter_delta(int(prev_out), int(new.out_bytes), max_counter)
 
         in_mbps  = (delta_in * 8) / (interval * 1_000_000)
         out_mbps = (delta_out * 8) / (interval * 1_000_000)
@@ -258,15 +435,47 @@ def _calc_mbps(
             cap = speed * 1.5
             if in_mbps > cap or out_mbps > cap:
                 logger.debug(
-                    "_calc_mbps: bỏ mẫu vì vượt cap (in=%.1f out=%.1f cap=%.1f Mbps)",
+                    "_compute_mbps: bỏ mẫu vì vượt cap (in=%.1f out=%.1f cap=%.1f Mbps)",
                     in_mbps, out_mbps, cap,
                 )
                 return 0.0, 0.0
 
         return round(in_mbps, 3), round(out_mbps, 3)
     except Exception as exc:
-        logger.debug("_calc_mbps failed: %s", exc)
+        logger.debug("_compute_mbps failed: %s", exc)
         return 0.0, 0.0
+
+
+def _calc_mbps(
+    prev_stat: InterfaceStats | None,
+    new: InterfaceData,
+    new_timestamp: datetime | None,
+    fallback_interval_secs: int,
+) -> tuple[float, float]:
+    """DB-mode: prev từ row InterfaceStats trước."""
+    if not prev_stat:
+        return 0.0, 0.0
+    return _compute_mbps_core(
+        prev_stat.in_bytes, prev_stat.out_bytes, prev_stat.timestamp,
+        new, new_timestamp, fallback_interval_secs,
+    )
+
+
+def _calc_mbps_from_snapshot(
+    prev_if: dict | None,
+    prev_ts_epoch: float | None,
+    new: InterfaceData,
+    new_timestamp: datetime | None,
+    fallback_interval_secs: int,
+) -> tuple[float, float]:
+    """Cache-mode: prev từ snapshot Redis trước (bytes trong prev_if, ts chung của snapshot)."""
+    if not prev_if or prev_ts_epoch is None:
+        return 0.0, 0.0
+    prev_ts = metrics_cache.epoch_to_dt(prev_ts_epoch)
+    return _compute_mbps_core(
+        prev_if.get("in_bytes", 0), prev_if.get("out_bytes", 0), prev_ts,
+        new, new_timestamp, fallback_interval_secs,
+    )
 
 
 def _save_vm_stats(device: Device, data: NormalizedData) -> None:

@@ -6,6 +6,7 @@ from django.http import JsonResponse
 from django.utils import timezone
 from apps.devices.models import Device
 from apps.alerts.models import Alert
+from apps.metrics import cache as metrics_cache
 
 
 def health_check(request):
@@ -65,7 +66,19 @@ def _dashboard_counts(all_devices):
     # nhất của từng wlan_controller để card "Access Point" phản ánh AP thật.
     ap_total = ap_online = 0
     offline_ap_rows = []
+    use_cache = metrics_cache.is_cache_mode()
     for ac in by_type["wlan_controller"]:
+        if use_cache:
+            aps = (metrics_cache.get_latest(ac.id) or {}).get("wifi_aps") or []
+            ap_total += len(aps)
+            ap_online += sum(1 for a in aps if a.get("is_online"))
+            for a in sorted((x for x in aps if not x.get("is_online")), key=lambda x: x.get("name") or ""):
+                offline_ap_rows.append({
+                    "name": a.get("name") or "",
+                    "ip_address": a.get("ip") or "—",
+                    "group_label": "Access Point · " + ac.name,
+                })
+            continue
         latest_ts = (WifiApStats.objects
                      .filter(device=ac)
                      .order_by("-timestamp")
@@ -226,30 +239,56 @@ def poll_status(request):
     })
 
 
-@login_required
-def switch_detail(request, pk):
-    from apps.metrics.models import InterfaceStats, SystemHealth
-    from django.db.models import Subquery, OuterRef
-
-    device     = get_object_or_404(Device, pk=pk, device_type="switch")
-    interfaces = device.interfaces.all().order_by("if_index")
-
-    # Latest health for summary badges
-    latest_health = (SystemHealth.objects
-                     .filter(device=device)
-                     .order_by("-timestamp")
-                     .first())
-
-    # Latest stats per interface — annotate with subquery to avoid N+1
-    latest_status   = (InterfaceStats.objects
-                       .filter(interface=OuterRef("pk"))
-                       .order_by("-timestamp"))
-    interfaces = interfaces.annotate(
-        cur_status   =Subquery(latest_status.values("status")[:1]),
-        cur_in_mbps  =Subquery(latest_status.values("in_mbps")[:1]),
-        cur_out_mbps =Subquery(latest_status.values("out_mbps")[:1]),
+def _cache_latest_health(device):
+    """SystemHealth (chưa lưu) dựng từ cache snapshot cho template detail. None nếu chưa có."""
+    from apps.metrics.models import SystemHealth
+    snap = metrics_cache.get_latest(device.id)
+    if not snap:
+        return None
+    sh = SystemHealth(
+        device=device,
+        cpu_percent=snap.get("cpu") or 0,
+        mem_percent=snap.get("mem") or 0,
+        uptime_secs=snap.get("uptime"),
+        extra=snap.get("extra") or {},
     )
-    interfaces = sorted(
+    if snap.get("ts"):
+        sh.timestamp = metrics_cache.epoch_to_dt(snap["ts"])
+    return sh
+
+
+def _detail_health(device):
+    """latest_health cho trang detail — cache-mode đọc Redis, else DB."""
+    if metrics_cache.is_cache_mode():
+        return _cache_latest_health(device)
+    from apps.metrics.models import SystemHealth
+    return SystemHealth.objects.filter(device=device).order_by("-timestamp").first()
+
+
+def _detail_interfaces(device, sort: bool = True):
+    """Interface + cur_status/cur_in_mbps/cur_out_mbps (cache hoặc DB)."""
+    if metrics_cache.is_cache_mode():
+        snap_ifaces = (metrics_cache.get_latest(device.id) or {}).get("interfaces") or {}
+        interfaces = list(device.interfaces.all().order_by("if_index"))
+        for i in interfaces:
+            s = snap_ifaces.get(str(i.id)) or {}
+            i.cur_status = s.get("status")
+            i.cur_in_mbps = s.get("in_mbps")
+            i.cur_out_mbps = s.get("out_mbps")
+    else:
+        from apps.metrics.models import InterfaceStats
+        from django.db.models import Subquery, OuterRef
+        latest_status = (InterfaceStats.objects
+                         .filter(interface=OuterRef("pk"))
+                         .order_by("-timestamp"))
+        interfaces = list(device.interfaces.all().order_by("if_index").annotate(
+            cur_status   =Subquery(latest_status.values("status")[:1]),
+            cur_in_mbps  =Subquery(latest_status.values("in_mbps")[:1]),
+            cur_out_mbps =Subquery(latest_status.values("out_mbps")[:1]),
+        ))
+    if not sort:
+        return interfaces
+    return sorted(
         interfaces,
         key=lambda i: (
             -int(i.is_uplink),
@@ -258,43 +297,59 @@ def switch_detail(request, pk):
         ),
     )
 
+
+@login_required
+def switch_detail(request, pk):
+    device = get_object_or_404(Device, pk=pk, device_type="switch")
     return render(request, "dashboard/switch_detail.html", {
         "device":         device,
-        "interfaces":     interfaces,
-        "latest_health":  latest_health,
+        "interfaces":     _detail_interfaces(device),
+        "latest_health":  _detail_health(device),
     })
 
 
 @login_required
 def hyperv_detail(request, pk):
-    from apps.metrics.models import VMStats, SystemHealth
+    from apps.metrics.models import VMStats
 
     device = get_object_or_404(Device, pk=pk, device_type="hyperv")
+    latest_health = _detail_health(device)
 
-    latest_health = (SystemHealth.objects
-                     .filter(device=device)
-                     .order_by("-timestamp")
-                     .first())
-
-    # Lấy snapshot mới nhất mỗi VM bằng Postgres DISTINCT ON — dùng đúng index
-    # (device_id, vm_name, timestamp DESC) → 1 lần index-scan, ~0.04s.
-    # (Trước đây dùng pk__in + correlated Subquery → Postgres bỏ index, quét
-    #  lặp trên toàn bộ rows của device → ~240s → nginx 504 Gateway Time-out.)
-    from django.db import connection
-
-    base_qs = VMStats.objects.filter(device=device)
-    if connection.vendor == "postgresql":
-        latest_vms = list(
-            base_qs.order_by("vm_name", "-timestamp").distinct("vm_name")
-        )
+    if metrics_cache.is_cache_mode():
+        # Cache-mode: danh sách VM từ snapshot Redis (dựng VMStats chưa lưu cho template).
+        snap = metrics_cache.get_latest(device.id) or {}
+        latest_vms = [
+            VMStats(
+                device=device,
+                vm_name=v.get("name", ""),
+                state=v.get("state", ""),
+                cpu_percent=float(v.get("cpu_percent") or 0),
+                mem_assigned_mb=int(v.get("mem_mb") or 0),
+                repl_health=(v.get("repl_health") or "")[:50],
+            )
+            for v in (snap.get("vms") or [])
+        ]
+        latest_vms.sort(key=lambda v: v.vm_name)
     else:
-        # SQLite (dev): DISTINCT ON không hỗ trợ → dedup theo vm_name trong Python.
-        seen: set[str] = set()
-        latest_vms = []
-        for v in base_qs.order_by("vm_name", "-timestamp"):
-            if v.vm_name not in seen:
-                seen.add(v.vm_name)
-                latest_vms.append(v)
+        # Lấy snapshot mới nhất mỗi VM bằng Postgres DISTINCT ON — dùng đúng index
+        # (device_id, vm_name, timestamp DESC) → 1 lần index-scan, ~0.04s.
+        # (Trước đây dùng pk__in + correlated Subquery → Postgres bỏ index, quét
+        #  lặp trên toàn bộ rows của device → ~240s → nginx 504 Gateway Time-out.)
+        from django.db import connection
+
+        base_qs = VMStats.objects.filter(device=device)
+        if connection.vendor == "postgresql":
+            latest_vms = list(
+                base_qs.order_by("vm_name", "-timestamp").distinct("vm_name")
+            )
+        else:
+            # SQLite (dev): DISTINCT ON không hỗ trợ → dedup theo vm_name trong Python.
+            seen: set[str] = set()
+            latest_vms = []
+            for v in base_qs.order_by("vm_name", "-timestamp"):
+                if v.vm_name not in seen:
+                    seen.add(v.vm_name)
+                    latest_vms.append(v)
 
     running_count = sum(1 for v in latest_vms if v.state == "Running")
     unhealthy_vms = [v for v in latest_vms if v.repl_health not in ("", "Normal", "NotConfigured")]
@@ -310,37 +365,11 @@ def hyperv_detail(request, pk):
 
 def _switch_like_detail(request, pk: int, device_type: str, template: str):
     """Logic chung cho switch_detail và router_detail (cùng có interfaces + CPU/RAM)."""
-    from apps.metrics.models import InterfaceStats, SystemHealth
-    from django.db.models import Subquery, OuterRef
-
-    device     = get_object_or_404(Device, pk=pk, device_type=device_type)
-    interfaces = device.interfaces.all().order_by("if_index")
-
-    latest_health = (SystemHealth.objects
-                     .filter(device=device)
-                     .order_by("-timestamp")
-                     .first())
-
-    latest_status = (InterfaceStats.objects
-                     .filter(interface=OuterRef("pk"))
-                     .order_by("-timestamp"))
-    interfaces = interfaces.annotate(
-        cur_status   =Subquery(latest_status.values("status")[:1]),
-        cur_in_mbps  =Subquery(latest_status.values("in_mbps")[:1]),
-        cur_out_mbps =Subquery(latest_status.values("out_mbps")[:1]),
-    )
-    interfaces = sorted(
-        interfaces,
-        key=lambda i: (
-            -int(i.is_uplink),
-            -float(i.cur_in_mbps or 0) - float(i.cur_out_mbps or 0),
-            i.if_index,
-        ),
-    )
+    device = get_object_or_404(Device, pk=pk, device_type=device_type)
     return render(request, template, {
         "device":        device,
-        "interfaces":    interfaces,
-        "latest_health": latest_health,
+        "interfaces":    _detail_interfaces(device),
+        "latest_health": _detail_health(device),
     })
 
 
@@ -362,28 +391,56 @@ def wlan_detail(request, pk):
 
     device = get_object_or_404(Device, pk=pk, device_type="wlan_controller")
 
-    latest_health = (SystemHealth.objects
-                     .filter(device=device)
-                     .order_by("-timestamp")
-                     .first())
+    if metrics_cache.is_cache_mode():
+        latest_health = _detail_health(device)
+        snap = metrics_cache.get_latest(device.id) or {}
+        latest_ap_ts = latest_cl_ts = (
+            metrics_cache.epoch_to_dt(snap["ts"]) if snap.get("ts") else None
+        )
+        aps = [
+            WifiApStats(
+                device=device, ap_name=a.get("name") or "", ap_mac=a.get("mac") or "",
+                ap_ip=a.get("ip") or "", ap_group=a.get("group") or "",
+                is_online=bool(a.get("is_online")), run_state=a.get("run_state") or "",
+                client_count=int(a.get("client_count") or 0),
+            )
+            for a in (snap.get("wifi_aps") or [])
+        ]
+        aps.sort(key=lambda a: a.ap_name)
+        clients = [
+            WifiClientStats(
+                device=device, mac=c.get("mac") or "", ip=c.get("ip") or "",
+                ssid=c.get("ssid") or "", ap_name=c.get("ap_name") or "",
+                radio=c.get("radio") or "", rssi=c.get("rssi"),
+                online_secs=int(c.get("online_secs") or 0),
+            )
+            for c in (snap.get("wifi_clients") or [])
+        ]
+        clients.sort(key=lambda c: (c.ap_name, c.mac))
+        latest_cl_ts = latest_cl_ts if clients else None
+    else:
+        latest_health = (SystemHealth.objects
+                         .filter(device=device)
+                         .order_by("-timestamp")
+                         .first())
 
-    # AP snapshot mới nhất.
-    latest_ap_ts = (WifiApStats.objects
-                    .filter(device=device)
-                    .order_by("-timestamp")
-                    .values_list("timestamp", flat=True)
-                    .first())
-    aps = list(WifiApStats.objects.filter(device=device, timestamp=latest_ap_ts)
-               .order_by("ap_name")) if latest_ap_ts else []
+        # AP snapshot mới nhất.
+        latest_ap_ts = (WifiApStats.objects
+                        .filter(device=device)
+                        .order_by("-timestamp")
+                        .values_list("timestamp", flat=True)
+                        .first())
+        aps = list(WifiApStats.objects.filter(device=device, timestamp=latest_ap_ts)
+                   .order_by("ap_name")) if latest_ap_ts else []
 
-    # Client snapshot mới nhất.
-    latest_cl_ts = (WifiClientStats.objects
-                    .filter(device=device)
-                    .order_by("-timestamp")
-                    .values_list("timestamp", flat=True)
-                    .first())
-    clients = list(WifiClientStats.objects.filter(device=device, timestamp=latest_cl_ts)
-                   .order_by("ap_name", "mac")) if latest_cl_ts else []
+        # Client snapshot mới nhất.
+        latest_cl_ts = (WifiClientStats.objects
+                        .filter(device=device)
+                        .order_by("-timestamp")
+                        .values_list("timestamp", flat=True)
+                        .first())
+        clients = list(WifiClientStats.objects.filter(device=device, timestamp=latest_cl_ts)
+                       .order_by("ap_name", "mac")) if latest_cl_ts else []
 
     ap_online = sum(1 for a in aps if a.is_online)
     # AC6508 không liệt kê từng client qua SNMP — tổng client lấy bằng tổng số
@@ -406,34 +463,18 @@ def wlan_detail(request, pk):
 
 @login_required
 def firewall_detail(request, pk):
-    from apps.metrics.models import SystemHealth
-
     device = get_object_or_404(Device, pk=pk, device_type="firewall")
-    interfaces = device.interfaces.all().order_by("if_index")
-
-    latest_health = (SystemHealth.objects
-                     .filter(device=device)
-                     .order_by("-timestamp")
-                     .first())
+    latest_health = _detail_health(device)
 
     # Lấy session_count từ extra nếu Fortinet lưu vào SystemHealth
     session_count = None
     if latest_health and latest_health.extra:
         session_count = latest_health.extra.get("session_count")
 
-    from apps.metrics.models import InterfaceStats
-    from django.db.models import Subquery, OuterRef
-    latest_status = (InterfaceStats.objects
-                     .filter(interface=OuterRef("pk"))
-                     .order_by("-timestamp"))
-    interfaces = interfaces.annotate(
-        cur_status   =Subquery(latest_status.values("status")[:1]),
-        cur_in_mbps  =Subquery(latest_status.values("in_mbps")[:1]),
-        cur_out_mbps =Subquery(latest_status.values("out_mbps")[:1]),
-    )
+    # Firewall giữ thứ tự if_index (không sort theo traffic như switch).
     return render(request, "dashboard/firewall_detail.html", {
         "device":         device,
-        "interfaces":     interfaces,
+        "interfaces":     _detail_interfaces(device, sort=False),
         "latest_health":  latest_health,
         "session_count":  session_count,
     })

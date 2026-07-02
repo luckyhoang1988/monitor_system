@@ -14,6 +14,7 @@ from .models import (
     InterfaceStatsHourly, InterfaceStatsDaily,
     WifiApStats, WifiClientStats,
 )
+from . import cache as metrics_cache
 from apps.devices.models import Device, Interface
 
 
@@ -150,11 +151,14 @@ def device_status_timeline(request, device_id: int) -> JsonResponse:
     )
 
     # Include previous sample before the window to infer initial state.
-    sample_qs = (SystemHealth.objects
-                 .filter(device=device, timestamp__lte=until, timestamp__gte=since - timedelta(seconds=grace_secs))
-                 .order_by("timestamp")
-                 .values_list("timestamp", flat=True))
-    samples = list(sample_qs)
+    if metrics_cache.is_cache_mode():
+        samples, grace_secs = _timeline_samples_cache(device, since, until, grace_secs, source)
+    else:
+        sample_qs = (SystemHealth.objects
+                     .filter(device=device, timestamp__lte=until, timestamp__gte=since - timedelta(seconds=grace_secs))
+                     .order_by("timestamp")
+                     .values_list("timestamp", flat=True))
+        samples = list(sample_qs)
 
     labels: list[str] = []
     online_series: list[int] = []
@@ -178,8 +182,55 @@ def device_status_timeline(request, device_id: int) -> JsonResponse:
     })
 
 
+def _timeline_samples_cache(device, since, until, grace_secs, source):
+    """Cache-mode: mốc thời gian "có dữ liệu" cho status timeline.
+
+    - raw: từ ring-buffer sys (Redis, ~26h).
+    - hourly/daily: từ bảng rollup (grace nới bằng 1 bước để mỗi bucket có rollup
+      được coi là online suốt bước đó).
+    Trả (samples: list[datetime tăng dần], grace_secs điều chỉnh).
+    """
+    if source == "hourly":
+        start = since - timedelta(seconds=grace_secs)
+        samples = list(SystemHealthHourly.objects
+                       .filter(device=device, hour__gte=start, hour__lte=until)
+                       .order_by("hour").values_list("hour", flat=True))
+        return samples, max(grace_secs, 3600)
+    if source == "daily":
+        days = (SystemHealthDaily.objects
+                .filter(device=device, day__gte=(since - timedelta(days=1)).date(), day__lte=until.date())
+                .order_by("day").values_list("day", flat=True))
+        tz = timezone.get_current_timezone()
+        samples = [timezone.make_aware(datetime(d.year, d.month, d.day), tz) for d in days]
+        return samples, max(grace_secs, 86400)
+    # raw
+    start = since - timedelta(seconds=grace_secs)
+    start_ts, until_ts = start.timestamp(), until.timestamp()
+    samples = [metrics_cache.epoch_to_dt(s["ts"])
+               for s in metrics_cache.get_sys_series(device.id, start)
+               if s.get("ts") is not None and start_ts <= s["ts"] <= until_ts]
+    return samples, grace_secs
+
+
 def _device_metrics_raw(device: Device, since, until) -> JsonResponse:
-    """Query raw SystemHealth data."""
+    """Query raw SystemHealth data (cache-mode: từ ring-buffer sys trong Redis)."""
+    if metrics_cache.is_cache_mode():
+        until_ts = until.timestamp()
+        series = [s for s in metrics_cache.get_sys_series(device.id, since)
+                  if s.get("ts") is not None and s["ts"] <= until_ts]
+        rows = _downsample(series)
+        span = until - since
+        data = {
+            "labels":      [_format_timestamp(metrics_cache.epoch_to_dt(r["ts"]), "raw", span) for r in rows],
+            "cpu_percent": [r.get("cpu") for r in rows],
+            "mem_percent": [r.get("mem") for r in rows],
+            "source":      "raw",
+        }
+        sc_series = [r.get("sc") for r in rows]
+        if any(v is not None for v in sc_series):
+            data["session_count"] = [float(v) if v is not None else None for v in sc_series]
+        return JsonResponse(data)
+
     qs = (SystemHealth.objects
           .filter(device=device, timestamp__gte=since, timestamp__lte=until)
           .order_by("timestamp")
@@ -280,7 +331,28 @@ def interface_metrics(request, device_id: int):
 
 
 def _interface_metrics_raw(iface_qs, since, until) -> JsonResponse:
-    """Query raw InterfaceStats — bulk fetch, then group in Python."""
+    """Query raw InterfaceStats — bulk fetch, then group in Python.
+
+    Cache-mode: đọc ring-buffer interface trong Redis thay vì bảng InterfaceStats.
+    """
+    if metrics_cache.is_cache_mode():
+        span = until - since
+        until_ts = until.timestamp()
+        results = []
+        for iface in iface_qs:
+            series = [s for s in metrics_cache.get_if_series(iface.id, since)
+                      if s.get("ts") is not None and s["ts"] <= until_ts]
+            stats = _downsample(series)
+            results.append({
+                "port":           iface.name,
+                "is_uplink":      iface.is_uplink,
+                "labels":         [_format_timestamp(metrics_cache.epoch_to_dt(r["ts"]), "raw", span) for r in stats],
+                "in_mbps":        [r.get("in_mbps") for r in stats],
+                "out_mbps":       [r.get("out_mbps") for r in stats],
+                "current_status": stats[-1]["status"] if stats else "unknown",
+            })
+        return JsonResponse({"interfaces": results, "source": "raw"})
+
     ifaces = list(iface_qs)
     iface_ids = [i.id for i in ifaces]
     span = until - since
@@ -341,6 +413,59 @@ def _interface_metrics_hourly(iface_qs, since, until) -> JsonResponse:
     return JsonResponse({"interfaces": results, "source": "hourly"})
 
 
+def _wifi_metrics_cache(device: Device, ap_filter: str, ssid_filter: str) -> JsonResponse:
+    """Cache-mode: snapshot WiFi từ Redis latest thay vì bảng WifiApStats/WifiClientStats."""
+    snap = metrics_cache.get_latest(device.id) or {}
+    aps_raw = snap.get("wifi_aps") or []
+    clients_raw = snap.get("wifi_clients") or []
+    ts = snap.get("ts")
+
+    aps = [
+        {
+            "ap_name": a.get("name") or "",
+            "ap_mac": a.get("mac") or "",
+            "ap_ip": a.get("ip") or "",
+            "ap_group": a.get("group") or "",
+            "is_online": bool(a.get("is_online")),
+            "run_state": a.get("run_state") or "",
+            "client_count": int(a.get("client_count") or 0),
+        }
+        for a in aps_raw
+        if not ap_filter or (a.get("name") or "") == ap_filter
+    ]
+    aps.sort(key=lambda x: x["ap_name"])
+
+    clients = [
+        {
+            "mac": c.get("mac") or "",
+            "ip": c.get("ip") or "",
+            "ssid": c.get("ssid") or "",
+            "ap_name": c.get("ap_name") or "",
+            "radio": c.get("radio") or "",
+            "rssi": c.get("rssi"),
+            "online_secs": int(c.get("online_secs") or 0),
+        }
+        for c in clients_raw
+        if (not ap_filter or (c.get("ap_name") or "") == ap_filter)
+        and (not ssid_filter or (c.get("ssid") or "") == ssid_filter)
+    ]
+    clients.sort(key=lambda x: (x["ap_name"], x["mac"]))
+
+    ap_online = sum(1 for a in aps if a["is_online"])
+    client_total = len(clients) if clients else sum(a["client_count"] for a in aps)
+    updated = timezone.localtime(metrics_cache.epoch_to_dt(ts)).strftime("%d/%m %H:%M") if ts else None
+    return JsonResponse({
+        "ap_total": len(aps),
+        "ap_online": ap_online,
+        "ap_offline": len(aps) - ap_online,
+        "client_total": client_total,
+        "aps": aps,
+        "clients": clients,
+        "ap_updated": updated,
+        "client_updated": updated if clients else None,
+    })
+
+
 @login_required
 def wifi_metrics(request, device_id: int) -> JsonResponse:
     """Trả về snapshot WiFi mới nhất của 1 WLAN controller cho UI.
@@ -351,6 +476,9 @@ def wifi_metrics(request, device_id: int) -> JsonResponse:
     device = get_object_or_404(Device, pk=device_id)
     ap_filter = (request.GET.get("ap") or "").strip()
     ssid_filter = (request.GET.get("ssid") or "").strip()
+
+    if metrics_cache.is_cache_mode():
+        return _wifi_metrics_cache(device, ap_filter, ssid_filter)
 
     # AP snapshot mới nhất.
     latest_ap_ts = (WifiApStats.objects

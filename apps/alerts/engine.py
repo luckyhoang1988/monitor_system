@@ -5,6 +5,7 @@ from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 from apps.devices.models import Device
+from apps.metrics import cache as metrics_cache
 from .models import AlertRule, Alert, AlertNotification
 
 logger = logging.getLogger(__name__)
@@ -41,12 +42,60 @@ METRIC_GETTERS = {
 SUSTAINABLE_METRICS = {"cpu_percent", "mem_percent"}
 
 
+# ── Cache-first: khi METRICS_WRITE_MODE="cache", getters đọc từ Redis thay vì DB ──
+def _use_cache() -> bool:
+    return metrics_cache.is_cache_mode()
+
+
+def _fresh_latest(device: Device, since) -> dict | None:
+    """Snapshot mới nhất từ cache nếu còn trong cửa sổ `since`, ngược lại None.
+
+    Giữ đúng ngữ nghĩa DB (`timestamp__gte=since`): snapshot cũ hơn `since` bị bỏ
+    → tránh cảnh báo trên số liệu ôi khi thiết bị ngừng poll.
+    """
+    snap = metrics_cache.get_latest(device.id)
+    if not snap:
+        return None
+    if since is not None and snap.get("ts", 0) < since.timestamp():
+        return None
+    return snap
+
+
+def _sustained_verdict(values: list, rule: AlertRule) -> float | None:
+    """Logic sustained dùng chung: điều kiện phải đúng TRÊN TOÀN cửa sổ.
+
+    gt/gte → min(values) vượt ngưỡng; lt/lte → max(values) dưới ngưỡng; eq/ne →
+    xét giá trị mới nhất. Trả latest (để dựng message) nếu sustained, else None.
+    """
+    if not values:
+        return None
+    latest = float(values[-1])
+    threshold = float(rule.threshold)
+    cond = rule.condition
+    if cond in ("gt", "gte"):
+        ok = (min(values) > threshold) if cond == "gt" else (min(values) >= threshold)
+        return latest if ok else None
+    if cond in ("lt", "lte"):
+        ok = (max(values) < threshold) if cond == "lt" else (max(values) <= threshold)
+        return latest if ok else None
+    cond_fn = CONDITION_FN.get(cond)
+    return latest if (cond_fn and cond_fn(latest, threshold)) else None
+
+
 def _sustained_cpu_mem(device: Device, rule: AlertRule, window_since) -> float | None:
     """Evaluate sustained condition for CPU/MEM over a time window.
 
     If rule.duration_min > 0, we require the condition to hold for the whole window.
     Returns the latest value (for messaging) if sustained, else None.
     """
+    if _use_cache():
+        field = "cpu" if rule.metric == "cpu_percent" else "mem"
+        series = metrics_cache.get_sys_series(device.id, window_since)
+        values = [s[field] for s in series if s.get(field) is not None]
+        if rule.metric == "mem_percent":
+            values = [v for v in values if v]  # bỏ sentinel mem==0
+        return _sustained_verdict(values, rule)
+
     from apps.metrics.models import SystemHealth
 
     qs = (SystemHealth.objects
@@ -78,12 +127,19 @@ def _sustained_cpu_mem(device: Device, rule: AlertRule, window_since) -> float |
 
 
 def _latest_cpu(device: Device, since) -> float | None:
+    if _use_cache():
+        snap = _fresh_latest(device, since)
+        return snap.get("cpu") if snap else None
     from apps.metrics.models import SystemHealth
     rec = SystemHealth.objects.filter(device=device, timestamp__gte=since).order_by("-timestamp").first()
     return rec.cpu_percent if rec else None
 
 
 def _latest_mem(device: Device, since) -> float | None:
+    if _use_cache():
+        snap = _fresh_latest(device, since)
+        # mem == 0 là sentinel "không đo được" → bỏ qua (xem chú thích DB path bên dưới).
+        return (snap.get("mem") or None) if snap else None
     from apps.metrics.models import SystemHealth
     rec = SystemHealth.objects.filter(device=device, timestamp__gte=since).order_by("-timestamp").first()
     if rec is None:
@@ -97,8 +153,25 @@ def _latest_mem(device: Device, since) -> float | None:
 
 def _check_if_status(device: Device, since) -> float | None:
     """Trả về 0 nếu có uplink nào DOWN, 1 nếu tất cả UP."""
-    from apps.metrics.models import InterfaceStats
     from apps.devices.models import Interface
+
+    if _use_cache():
+        uplink_ids = list(Interface.objects.filter(device=device, is_uplink=True).values_list("id", flat=True))
+        if not uplink_ids:
+            return None
+        snap = _fresh_latest(device, since)
+        if not snap:
+            return None
+        ifs = snap.get("interfaces") or {}
+        for uid in uplink_ids:
+            status = (ifs.get(str(uid)) or {}).get("status")
+            if status is None:
+                return None
+            if status != "up":
+                return 0.0
+        return 1.0
+
+    from apps.metrics.models import InterfaceStats
     from django.db.models import OuterRef, Subquery
 
     uplinks = Interface.objects.filter(device=device, is_uplink=True)
@@ -125,18 +198,34 @@ def _sustained_if_status(device: Device, window_since) -> float | None:
     Returns 1.0 if all uplinks stayed up within window and we have at least one sample per uplink.
     Returns None if no uplinks or not enough data.
     """
-    from apps.metrics.models import InterfaceStats
     from apps.devices.models import Interface
-    from django.db.models import Exists, OuterRef, Subquery
-
-    uplinks_qs = Interface.objects.filter(device=device, is_uplink=True)
-    if not uplinks_qs.exists():
-        return None
 
     from django.conf import settings as _settings
     _min_grace = getattr(_settings, "ALERT_GRACE_PERIOD_SECS", 120)
     grace_secs = max(_min_grace, int(getattr(device, "collect_interval", 300)) * 2)
     min_ts = timezone.now() - timedelta(seconds=grace_secs)
+
+    if _use_cache():
+        uplink_ids = list(Interface.objects.filter(device=device, is_uplink=True).values_list("id", flat=True))
+        if not uplink_ids:
+            return None
+        for uid in uplink_ids:
+            series = metrics_cache.get_if_series(uid, window_since)
+            if not series:
+                return None  # thiếu dữ liệu → chưa kết luận
+            if any(s.get("status") != "up" for s in series):
+                return 0.0
+            latest = series[-1]
+            if metrics_cache.epoch_to_dt(latest.get("ts", 0)) < min_ts:
+                return None  # mẫu mới nhất quá cũ (poll kẹt)
+        return 1.0
+
+    from apps.metrics.models import InterfaceStats
+    from django.db.models import Exists, OuterRef, Subquery
+
+    uplinks_qs = Interface.objects.filter(device=device, is_uplink=True)
+    if not uplinks_qs.exists():
+        return None
 
     # Annotate each uplink with: has non-up in window, latest timestamp, latest status
     nonup_in_window = InterfaceStats.objects.filter(
@@ -174,7 +263,6 @@ def _sustained_if_status(device: Device, window_since) -> float | None:
 
 def _uplink_traffic_max(device: Device, since, direction: str) -> float | None:
     """Return max IN/OUT Mbps among uplink interfaces since time."""
-    from apps.metrics.models import InterfaceStats
     from apps.devices.models import Interface
 
     uplink_ids = list(Interface.objects.filter(device=device, is_uplink=True).values_list("pk", flat=True))
@@ -182,6 +270,17 @@ def _uplink_traffic_max(device: Device, since, direction: str) -> float | None:
         return None
 
     field = "in_mbps" if direction == "in" else "out_mbps"
+
+    if _use_cache():
+        peak = None
+        for uid in uplink_ids:
+            for s in metrics_cache.get_if_series(uid, since):
+                v = s.get(field)
+                if v is not None:
+                    peak = float(v) if peak is None else max(peak, float(v))
+        return peak
+
+    from apps.metrics.models import InterfaceStats
     qs = (InterfaceStats.objects
           .filter(interface_id__in=uplink_ids, timestamp__gte=since)
           .order_by(f"-{field}")
@@ -196,8 +295,6 @@ def _sustained_uplink_traffic_max(device: Device, rule: AlertRule, window_since)
     We compute 'max uplink Mbps' per poll-snapshot timestamp, then require the condition
     to hold for all snapshots in the window.
     """
-    from django.db.models import Max
-    from apps.metrics.models import InterfaceStats
     from apps.devices.models import Interface
 
     uplink_ids = list(Interface.objects.filter(device=device, is_uplink=True).values_list("pk", flat=True))
@@ -205,6 +302,18 @@ def _sustained_uplink_traffic_max(device: Device, rule: AlertRule, window_since)
         return None
 
     field = "in_mbps" if rule.metric == "uplink_in_mbps_max" else "out_mbps"
+
+    if _use_cache():
+        per_ts: dict = {}
+        for uid in uplink_ids:
+            for s in metrics_cache.get_if_series(uid, window_since):
+                ts = s.get("ts")
+                per_ts[ts] = max(per_ts.get(ts, 0.0), float(s.get(field) or 0.0))
+        values = [per_ts[ts] for ts in sorted(per_ts)]
+        return _sustained_verdict(values, rule)
+
+    from django.db.models import Max
+    from apps.metrics.models import InterfaceStats
     # 1 query: gom max(field) theo từng snapshot timestamp (thay vòng lặp N query).
     rows = (InterfaceStats.objects
             .filter(interface_id__in=uplink_ids, timestamp__gte=window_since)
@@ -232,6 +341,15 @@ def _sustained_uplink_traffic_max(device: Device, rule: AlertRule, window_since)
 
 def _fw_session_count(device: Device, since) -> float | None:
     """Latest firewall session count from SystemHealth.extra.session_count."""
+    if _use_cache():
+        snap = _fresh_latest(device, since)
+        if not snap:
+            return None
+        sc = (snap.get("extra") or {}).get("session_count")
+        try:
+            return float(sc) if sc is not None else None
+        except (TypeError, ValueError):
+            return None
     from apps.metrics.models import SystemHealth
     rec = (SystemHealth.objects
            .filter(device=device, timestamp__gte=since, extra__session_count__isnull=False)
@@ -247,6 +365,11 @@ def _fw_session_count(device: Device, since) -> float | None:
 
 
 def _sustained_fw_session_count(device: Device, rule: AlertRule, window_since) -> float | None:
+    if _use_cache():
+        series = metrics_cache.get_sys_series(device.id, window_since)
+        values = [float(s["sc"]) for s in series if s.get("sc") is not None]
+        return _sustained_verdict(values, rule)
+
     from apps.metrics.models import SystemHealth
 
     qs = (SystemHealth.objects
@@ -254,22 +377,7 @@ def _sustained_fw_session_count(device: Device, rule: AlertRule, window_since) -
           .order_by("timestamp")
           .values_list("extra__session_count", flat=True))
     values = [float(v) for v in qs if v is not None]
-    if not values:
-        return None
-
-    latest = float(values[-1])
-    threshold = float(rule.threshold)
-    cond = rule.condition
-
-    if cond in ("gt", "gte"):
-        ok = (min(values) > threshold) if cond == "gt" else (min(values) >= threshold)
-        return latest if ok else None
-    if cond in ("lt", "lte"):
-        ok = (max(values) < threshold) if cond == "lt" else (max(values) <= threshold)
-        return latest if ok else None
-
-    cond_fn = CONDITION_FN.get(cond)
-    return latest if (cond_fn and cond_fn(latest, threshold)) else None
+    return _sustained_verdict(values, rule)
 
 
 def _sustained_vm_metric(device: Device, rule: AlertRule, window_since) -> float | None:
@@ -279,6 +387,12 @@ def _sustained_vm_metric(device: Device, rule: AlertRule, window_since) -> float
     then require the condition to hold for ALL snapshots in the window.
     Returns latest snapshot value (for messaging) if sustained, else None.
     """
+    if _use_cache():
+        field = "vmr" if rule.metric == "vm_count_running" else "vmu"
+        series = metrics_cache.get_sys_series(device.id, window_since)
+        values = [float(s[field]) for s in series if field in s]
+        return _sustained_verdict(values, rule)
+
     from django.db.models import Count
     from apps.metrics.models import VMStats
 
@@ -327,6 +441,14 @@ def _sustained_vm_metric(device: Device, rule: AlertRule, window_since) -> float
 
 
 def _count_vms_running(device: Device, since) -> float | None:
+    if _use_cache():
+        snap = _fresh_latest(device, since)
+        if not snap:
+            return None
+        vms = snap.get("vms") or []
+        if not vms:  # không có VM ghi nhận → None (đồng nhất DB path)
+            return None
+        return float(sum(1 for v in vms if v.get("state") == "Running"))
     from apps.metrics.models import VMStats
     latest = (VMStats.objects.filter(device=device, timestamp__gte=since)
               .order_by("-timestamp").values("timestamp").first())
@@ -338,8 +460,16 @@ def _count_vms_running(device: Device, since) -> float | None:
 
 
 def _count_vms_repl_unhealthy(device: Device, since) -> float | None:
-    from apps.metrics.models import VMStats
     _HEALTHY = {"Normal", "NotConfigured"}
+    if _use_cache():
+        snap = _fresh_latest(device, since)
+        if not snap:
+            return None
+        vms = snap.get("vms") or []
+        if not vms:
+            return None
+        return float(sum(1 for v in vms if (v.get("repl_health") or "") not in _HEALTHY))
+    from apps.metrics.models import VMStats
     latest = (VMStats.objects.filter(device=device, timestamp__gte=since)
               .order_by("-timestamp").values("timestamp").first())
     if not latest:
@@ -392,6 +522,18 @@ def _wifi_client_count_at_ts(device: Device, ts) -> float:
 
 def _wifi_client_count(device: Device, since) -> float | None:
     """Tổng số client WiFi ở snapshot mới nhất của WLAN controller."""
+    if _use_cache():
+        snap = _fresh_latest(device, since)
+        if not snap:
+            return None
+        clients = snap.get("wifi_clients")
+        aps = snap.get("wifi_aps")
+        if not clients and not aps:
+            return None
+        if clients:
+            return float(len(clients))
+        return float(sum(int(a.get("client_count") or 0) for a in (aps or [])))
+
     from apps.metrics.models import WifiClientStats, WifiApStats
 
     latest_ts = (WifiClientStats.objects
@@ -411,6 +553,11 @@ def _wifi_client_count(device: Device, since) -> float | None:
 
 
 def _sustained_wifi_client_count(device: Device, rule: AlertRule, window_since) -> float | None:
+    if _use_cache():
+        series = metrics_cache.get_sys_series(device.id, window_since)
+        values = [float(s["wc"]) for s in series if "wc" in s]
+        return _sustained_verdict(values, rule)
+
     from apps.metrics.models import WifiApStats
 
     timestamps = list(
@@ -446,6 +593,11 @@ def _wifi_ap_offline_at_ts(device: Device, ts) -> float:
 
 
 def _sustained_wifi_ap_offline_count(device: Device, rule: AlertRule, window_since) -> float | None:
+    if _use_cache():
+        series = metrics_cache.get_sys_series(device.id, window_since)
+        values = [float(s["wao"]) for s in series if "wao" in s]
+        return _sustained_verdict(values, rule)
+
     from apps.metrics.models import WifiApStats
 
     timestamps = list(
@@ -480,6 +632,15 @@ def _wifi_ap_offline_count(device: Device, since) -> float | None:
     (bỏ qua), tránh báo AP offline giả khi chính AC đang down (AC down đã có
     rule device_online riêng).
     """
+    if _use_cache():
+        snap = _fresh_latest(device, since)
+        if not snap:
+            return None
+        aps = snap.get("wifi_aps")
+        if not aps:  # AC không có AP ghi nhận → None (đồng nhất DB path)
+            return None
+        return float(sum(1 for a in aps if not a.get("is_online")))
+
     from apps.metrics.models import WifiApStats
     latest_ts = (WifiApStats.objects
                  .filter(device=device, timestamp__gte=since)
@@ -493,6 +654,16 @@ def _wifi_ap_offline_count(device: Device, since) -> float | None:
 
 def _wifi_offline_ap_names(device: Device) -> list[str]:
     """Tên các AP đang offline ở snapshot WifiApStats mới nhất (cho message cảnh báo)."""
+    if _use_cache():
+        snap = metrics_cache.get_latest(device.id)
+        if not snap:
+            return []
+        return sorted(
+            str(a.get("name") or "")
+            for a in (snap.get("wifi_aps") or [])
+            if not a.get("is_online")
+        )
+
     from apps.metrics.models import WifiApStats
     latest_ts = (WifiApStats.objects
                  .filter(device=device)
@@ -593,6 +764,34 @@ def check_device_alerts(device: Device, since) -> None:
         # "hold" (trong vùng đệm hysteresis) / "none" (không có alert active): không làm gì
 
 
+def _persist_incident_snapshot(device: Device) -> None:
+    """Cache-mode: ghi 1 SystemHealth từ snapshot Redis làm bằng chứng lúc alert fire.
+
+    Nhờ đó sự cố có điểm dữ liệu CPU/mem trong Postgres (chart/điều tra sau này) dù
+    metrics thường xuyên không còn ghi raw. Bỏ qua nếu đã có row cùng timestamp.
+    """
+    if not _use_cache():
+        return
+    snap = metrics_cache.get_latest(device.id)
+    if not snap or snap.get("ts") is None:
+        return
+    from apps.metrics.models import SystemHealth
+    try:
+        ts = metrics_cache.epoch_to_dt(snap["ts"])
+        if SystemHealth.objects.filter(device=device, timestamp=ts).exists():
+            return
+        SystemHealth.objects.create(
+            device=device,
+            timestamp=ts,
+            cpu_percent=snap.get("cpu") or 0,
+            mem_percent=snap.get("mem") or 0,
+            uptime_secs=snap.get("uptime"),
+            extra=snap.get("extra") or {},
+        )
+    except Exception as exc:
+        logger.warning("persist incident snapshot (dev=%s) failed: %s", device.name, exc)
+
+
 def _fire_alert(device: Device, rule: AlertRule, value: float) -> None:
     def _fmt_metric(metric: str, v: float) -> str:
         if metric in ("cpu_percent", "mem_percent"):
@@ -634,6 +833,8 @@ def _fire_alert(device: Device, rule: AlertRule, value: float) -> None:
             metric_value=float(value),
             is_active=True,
         )
+    # Cache-mode: lưu bằng chứng CPU/mem vào Postgres cho sự cố này.
+    _persist_incident_snapshot(device)
     if _is_flapping(device, rule):
         logger.warning("ALERT flapping — bỏ qua notification: %s", alert.message)
     else:

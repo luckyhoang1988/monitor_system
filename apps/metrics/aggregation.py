@@ -8,6 +8,7 @@ Chiến lược:
   (giữ lại raw data trong 48 giờ gần nhất).
 """
 import logging
+from collections import defaultdict
 from datetime import timedelta
 
 from django.conf import settings
@@ -15,11 +16,109 @@ from django.db.models import Avg, Max, Count, Sum
 from django.db.models.functions import TruncHour, TruncDate
 from django.utils import timezone
 
+from . import cache as metrics_cache
+
 logger = logging.getLogger(__name__)
 
 RAW_RETENTION_HOURS = 48
 HOURLY_BUFFER_HOURS = getattr(settings, "HOURLY_ROLLUP_BUFFER_HOURS", 2)
 DAILY_BUFFER_DAYS   = getattr(settings, "DAILY_ROLLUP_BUFFER_DAYS", 1)
+# Cache-mode: mỗi lần rollup gom vài giờ đã hoàn tất gần nhất (idempotent upsert,
+# tự lành nếu 1 lần chạy bị trượt). Không cần quét hết buffer 26h.
+ROLLUP_EXTRA_LOOKBACK_HOURS = 3
+
+
+def _hour_floor(dt):
+    return dt.replace(minute=0, second=0, microsecond=0)
+
+
+def _rollup_system_health_hourly_cache() -> int:
+    """Cache-mode: gom ring-buffer sys (Redis) → SystemHealthHourly."""
+    from .models import SystemHealthHourly
+    from apps.devices.models import Device
+
+    now = timezone.now()
+    cutoff_ts = (now - timedelta(hours=HOURLY_BUFFER_HOURS)).timestamp()
+    window_start = now - timedelta(hours=HOURLY_BUFFER_HOURS + ROLLUP_EXTRA_LOOKBACK_HOURS)
+
+    objs = []
+    for dev_id in Device.objects.filter(enabled=True).values_list("id", flat=True):
+        buckets: dict = defaultdict(list)
+        for s in metrics_cache.get_sys_series(dev_id, window_start):
+            ts = s.get("ts")
+            if ts is None or ts >= cutoff_ts:
+                continue
+            buckets[_hour_floor(metrics_cache.epoch_to_dt(ts))].append(s)
+        for hour, rows in buckets.items():
+            cpus = [r["cpu"] for r in rows if r.get("cpu") is not None]
+            mems = [r["mem"] for r in rows if r.get("mem") is not None]
+            if not cpus and not mems:
+                continue
+            objs.append(SystemHealthHourly(
+                device_id=dev_id,
+                hour=hour,
+                cpu_avg=round(sum(cpus) / len(cpus), 2) if cpus else 0,
+                cpu_max=round(max(cpus), 2) if cpus else 0,
+                mem_avg=round(sum(mems) / len(mems), 2) if mems else 0,
+                mem_max=round(max(mems), 2) if mems else 0,
+                sample_count=len(rows),
+            ))
+    if objs:
+        SystemHealthHourly.objects.bulk_create(
+            objs,
+            update_conflicts=True,
+            unique_fields=["device", "hour"],
+            update_fields=["cpu_avg", "cpu_max", "mem_avg", "mem_max", "sample_count"],
+        )
+    logger.info("Hourly rollup SystemHealth (cache): %d records processed", len(objs))
+    return len(objs)
+
+
+def _rollup_interface_stats_hourly_cache() -> int:
+    """Cache-mode: gom ring-buffer interface (Redis) → InterfaceStatsHourly."""
+    from .models import InterfaceStatsHourly
+    from apps.devices.models import Interface
+
+    now = timezone.now()
+    cutoff_ts = (now - timedelta(hours=HOURLY_BUFFER_HOURS)).timestamp()
+    window_start = now - timedelta(hours=HOURLY_BUFFER_HOURS + ROLLUP_EXTRA_LOOKBACK_HOURS)
+
+    objs = []
+    for if_id in Interface.objects.values_list("id", flat=True):
+        series = metrics_cache.get_if_series(if_id, window_start)
+        if not series:
+            continue
+        buckets: dict = defaultdict(list)
+        for s in series:
+            ts = s.get("ts")
+            if ts is None or ts >= cutoff_ts:
+                continue
+            buckets[_hour_floor(metrics_cache.epoch_to_dt(ts))].append(s)
+        for hour, rows in buckets.items():
+            ins = [r.get("in_mbps") or 0.0 for r in rows]
+            outs = [r.get("out_mbps") or 0.0 for r in rows]
+            objs.append(InterfaceStatsHourly(
+                interface_id=if_id,
+                hour=hour,
+                in_mbps_avg=round(sum(ins) / len(ins), 3),
+                in_mbps_max=round(max(ins), 3),
+                out_mbps_avg=round(sum(outs) / len(outs), 3),
+                out_mbps_max=round(max(outs), 3),
+                # errors là counter tích luỹ → lấy max (giá trị mới nhất trong giờ).
+                in_errors=max((r.get("in_errors") or 0) for r in rows),
+                out_errors=max((r.get("out_errors") or 0) for r in rows),
+                sample_count=len(rows),
+            ))
+    if objs:
+        InterfaceStatsHourly.objects.bulk_create(
+            objs,
+            update_conflicts=True,
+            unique_fields=["interface", "hour"],
+            update_fields=["in_mbps_avg", "in_mbps_max", "out_mbps_avg",
+                           "out_mbps_max", "in_errors", "out_errors", "sample_count"],
+        )
+    logger.info("Hourly rollup InterfaceStats (cache): %d records processed", len(objs))
+    return len(objs)
 
 
 def rollup_system_health_hourly() -> int:
@@ -27,6 +126,9 @@ def rollup_system_health_hourly() -> int:
 
     Returns: số lượng hourly records đã tạo/cập nhật.
     """
+    if metrics_cache.is_cache_mode():
+        return _rollup_system_health_hourly_cache()
+
     from .models import SystemHealth, SystemHealthHourly
 
     cutoff = timezone.now() - timedelta(hours=HOURLY_BUFFER_HOURS)
@@ -76,6 +178,9 @@ def rollup_interface_stats_hourly() -> int:
 
     Returns: số lượng hourly records đã tạo/cập nhật.
     """
+    if metrics_cache.is_cache_mode():
+        return _rollup_interface_stats_hourly_cache()
+
     from .models import InterfaceStats, InterfaceStatsHourly
 
     cutoff = timezone.now() - timedelta(hours=HOURLY_BUFFER_HOURS)

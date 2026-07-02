@@ -108,6 +108,13 @@ REALTIME_REDIS_URL = env(
     "REALTIME_REDIS_URL",
     default=env("REDIS_URL", default="redis://localhost:6379/0").rsplit("/", 1)[0] + "/2",
 )
+
+# Cache metrics — Redis DB riêng (/1) tách khỏi Celery /0 & realtime /2.
+# Lưu "latest snapshot" + ring-buffer time-series thay cho ghi raw mỗi poll.
+CACHE_REDIS_URL = env(
+    "CACHE_REDIS_URL",
+    default=env("REDIS_URL", default="redis://localhost:6379/0").rsplit("/", 1)[0] + "/1",
+)
 CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
 CELERY_TIMEZONE = TIME_ZONE
@@ -202,6 +209,23 @@ METRICS_RETENTION_DAYS = env.int("METRICS_RETENTION_DAYS", default=90)
 # Tự động xóa metrics cũ (cleanup_old_metrics + dọn raw đã rollup).
 # False = TẮT auto-delete, quản lý dung lượng thủ công qua trang Cảnh báo → Dung lượng.
 METRICS_AUTO_CLEANUP = env.bool("METRICS_AUTO_CLEANUP", default=False)
+
+# ── Cache-first metrics ───────────────────────────────────────────────────────
+# METRICS_WRITE_MODE:
+#   "db"    = (mặc định) ghi raw InterfaceStats/SystemHealth/... mỗi poll như cũ.
+#   "cache" = metrics thường xuyên vào Redis (latest snapshot + ring-buffer);
+#             Postgres CHỈ ghi khi có sự cố (alert fire) hoặc đổi trạng thái quan
+#             trọng (interface up/down, online/offline, VM/repl đổi trạng thái).
+# Alert engine, tính Mbps, dashboard/chart raw-tier tự đọc từ cache khi mode="cache".
+# Redis lỗi → tự degrade sang ghi DB (fallback) để không mất dữ liệu/cảnh báo.
+METRICS_WRITE_MODE = env("METRICS_WRITE_MODE", default="db")
+
+# TTL (giây) cho snapshot mới nhất — nên > vài chu kỳ poll để dashboard/alert đọc được.
+METRICS_LATEST_TTL_SECS = env.int("METRICS_LATEST_TTL_SECS", default=1800)
+# TTL (giây) cho ring-buffer time-series (chart ngắn hạn + sustained alert).
+METRICS_SERIES_TTL_SECS = env.int("METRICS_SERIES_TTL_SECS", default=90000)  # ~25h
+# Số mẫu tối đa giữ trong mỗi ring-buffer (~800 mẫu ≈ 26h @120s → phủ chart raw-tier 24h).
+METRICS_SERIES_MAX_SAMPLES = env.int("METRICS_SERIES_MAX_SAMPLES", default=800)
 
 # Đường dẫn để theo dõi dung lượng disk (trang Cảnh báo → Dung lượng).
 # Mặc định "/" — trong container, overlay fs phản ánh disk host nơi đặt volume DB.

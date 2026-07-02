@@ -52,6 +52,7 @@ Quy trình chuẩn (đã dùng để bắt bug 504 phiên đầu):
   (cisco_business/cisco_ios không expose LLDP, hoặc walk ra partial table). Fix: trả `[]`.
   Quy tắc chung: hàm "filter X" mà caller coi output là "danh sách X" thì nhánh rỗng phải trả `[]`.
   Soi link giả: AP link `is_stale=False` có MAC **không** thuộc snapshot AC = giả (xem CLAUDE.md).
+- **Cache-first metrics (`METRICS_WRITE_MODE=cache`)**: khi bỏ ghi raw phải chuyển **cả 3 nguồn đọc** sang cache cùng lúc — alert engine, tính Mbps (prev counter), dashboard/chart raw-tier. Bỏ sót 1 → getter trả None (alert im lặng KHÔNG lỗi rõ) / Mbps=0 / chart trống. Redis lỗi phải **fallback ghi DB** (không mất alert). Sustained/latest getter phải giữ nguyên hysteresis + sentinel mem=0. Xem CLAUDE.md "Cache-first metrics". Bật/tắt qua cờ env, mặc định `db` → rollback nhanh.
 - **Không hard-code** IP/password/community. Type hints bắt buộc cho collector/adapter.
 
 ## 2. Deploy
@@ -67,6 +68,7 @@ origin → server pull được code CŨ và build lại bản cũ (HEAD lệch,
 - View/template/dashboard/realtime → rebuild **app**.
 - Collector/adapter/OID/tasks → rebuild **worker** (collector chạy trong worker).
 - Beat schedule (`config/settings/base.py` CELERYBEAT) → rebuild **beat**.
+- `METRICS_WRITE_MODE` / cache-first (writer/engine/aggregation/dashboard/api) → chạm cả web + worker + beat → rebuild **app+worker+beat**. Đổi cờ trong `.env.production` cũng phải recreate 3 container.
 - `deploy.sh` build cả app+worker+beat nên thường an toàn; nginx chỉ reload.
 - Đổi JS/template → user cần **Empty-Cache-Hard-Reload 1 lần**.
 
