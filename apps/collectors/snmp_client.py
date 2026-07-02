@@ -86,6 +86,59 @@ class PySnmpSession:
         return asyncio.run(self._walk(oid_prefix))
 
     async def _walk(self, oid_prefix: str) -> list[SnmpResult]:
+        # SNMPv2c+ → dùng getBulk (lấy nhiều row/request, nhanh hơn nhiều).
+        # SNMPv1 không hỗ trợ getBulk → fallback getNext.
+        if self.mp_model >= 1:  # v2c hoặc v3
+            return await self._walk_bulk(oid_prefix)
+        return await self._walk_next(oid_prefix)
+
+    async def _walk_bulk(self, oid_prefix: str, max_repetitions: int = 25) -> list[SnmpResult]:
+        """Walk dùng getBulk — lấy tối đa max_repetitions row mỗi request."""
+        from pysnmp.hlapi.v1arch import (
+            CommunityData,
+            ObjectIdentity,
+            ObjectType,
+            SnmpDispatcher,
+            bulk_cmd,
+        )
+        dispatcher = SnmpDispatcher()
+        try:
+            target = await self._build_target()
+            results: list[SnmpResult] = []
+            current_oid = oid_prefix
+            max_steps = 4096
+            prefix_dot = f"{oid_prefix}."
+            for _ in range(max_steps):
+                err_ind, err_status, err_index, var_binds = await bulk_cmd(
+                    dispatcher,
+                    CommunityData(self.community, mpModel=self.mp_model),
+                    target,
+                    0,  # nonRepeaters
+                    max_repetitions,
+                    ObjectType(ObjectIdentity(current_oid)),
+                )
+                if err_ind:
+                    raise ConnectionError(str(err_ind))
+                if err_status:
+                    raise ConnectionError(f"{err_status.prettyPrint()} at {err_index}")
+                if not var_binds:
+                    break
+                done = False
+                for var_bind in var_binds:
+                    oid = str(var_bind[0])
+                    if not oid.startswith(prefix_dot):
+                        done = True
+                        break
+                    results.append(SnmpResult(oid=oid, value=str(var_bind[1])))
+                    current_oid = oid
+                if done or len(var_binds) < max_repetitions:
+                    break
+            return results
+        finally:
+            _safe_close(dispatcher)
+
+    async def _walk_next(self, oid_prefix: str) -> list[SnmpResult]:
+        """Walk dùng getNext — fallback cho SNMPv1."""
         from pysnmp.hlapi.v1arch import (
             CommunityData,
             ObjectIdentity,
