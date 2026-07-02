@@ -160,7 +160,8 @@ celery -A config beat -l info
 Phase 1–7 **đã hoàn thành** (setup/models → collector SNMP/SSH + tests → Celery + HyperV WinRM → dashboard + Chart.js → alert Email/Telegram + Rule CRUD → Docker/prod deploy → RBAC 2 cấp).
 
 ### Thay đổi quan trọng
-- **2026-07-02**: Nâng SNMP polling interval **60s → 90s** (wall-clock poll 20 thiết bị ~56.5s/60s quá sát ngưỡng, biên chỉ 3.5s; nâng lên 90s cho biên ~33.5s an toàn). Kèm theo: `ALERT_EVAL_INTERVAL_SECS` 60→90, `ALERT_GRACE_PERIOD_SECS` 90→135 (1.5× interval), `METRICS_SERIES_MAX_SAMPLES` 1500→1000 (giữ 25h chart @90s). Các setting đọc từ env, override qua `.env` nếu cần rollback.
+- **2026-07-02**: **SNMP walk chuyển sang getBulk** (pysnmp `bulk_cmd`, `max_repetitions=25`) thay vì getNext tuần tự. PFVN_Router giảm **40s → 8s** (−80%), CORE 13s→6s, ACL_Wlan 20s→3s. Wall-clock cả cycle 20 thiết bị: **56.5s → ~30s**. SNMPv1 fallback getNext. Commit `bab0aa8`.
+- **2026-07-02**: Nâng SNMP polling interval **60s → 90s** (trước getBulk, wall-clock ~56.5s/60s quá sát). Kèm theo: `ALERT_EVAL_INTERVAL_SECS` 60→90, `ALERT_GRACE_PERIOD_SECS` 90→135, `METRICS_SERIES_MAX_SAMPLES` 1500→1000. Sau getBulk wall-clock ~30s — có thể hạ lại 60s nếu cần.
 - **2026-07-02 (trước đó)**: Hạ SNMP polling interval **120s → 60s** (fleet ≤30 thiết bị, 4 Celery workers đủ throughput). Kèm theo: `ALERT_EVAL_INTERVAL_SECS` 120→60, `ALERT_GRACE_PERIOD_SECS` 120→90 (1.5× interval), `METRICS_SERIES_MAX_SAMPLES` 800→1500 (giữ 24h chart @60s). Các setting đọc từ env, override qua `.env` nếu cần rollback. Commit `0e4258c`.
 
 ### Production (đang chạy)
