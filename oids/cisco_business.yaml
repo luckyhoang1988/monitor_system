@@ -25,14 +25,23 @@ ssh_commands:
   interface: "show interfaces"
   version: "show version"
 
-# Access VLAN (PVID) cho từng port
+# Access VLAN (PVID) + trunk/access mode cho từng port
 vlan:
-  # C1200/C1300/CBS thường KHÔNG expose vmVlan (enterprise) → để rỗng, dùng dot1q chuẩn.
+  # ✅ Nguồn THẬT cho CBS250/350, Catalyst 1200/1300 = MIB riêng CISCOSB (RADLAN),
+  #    index = ifIndex TRỰC TIẾP. Verify runtime 2026-07-02 trên CBS250-8FP-E-2G:
+  #    - Q-BRIDGE dot1qVlanStaticEgress trả bitmap TOÀN 0x00 (126 byte) → vô dụng.
+  #    - dot1qPvid trả 1 cho MỌI cổng (kể cả cổng access VLAN thật ≠ 1) → SAI, không tin được.
+  #    → phải đọc CISCOSB. Chỉ khai báo trong file này (không đụng vendor khác).
+  # CISCOSB-vlan-MIB::vlanPortModeState (vlan .48.22.1.1): 11=access, 12=trunk (verify gi9 trunk-link=12).
+  ciscosb_port_mode:  "1.3.6.1.4.1.9.6.1.101.48.22.1.1"
+  # CISCOSB-vlan-MIB::vlanAccessPortModeVlanId (vlan .48.62.1.1): access VLAN thật/cổng (port gi1=VLAN5).
+  ciscosb_access_vlan: "1.3.6.1.4.1.9.6.1.101.48.62.1.1"
+
+  # Fallback chuẩn (giữ cho model CBS khác nếu CISCOSB rỗng) — trên CBS250 các OID này vô dụng (xem trên).
+  # C1200/C1300/CBS KHÔNG expose vmVlan (enterprise) lẫn CISCO-VTP-MIB.
   vm_vlan: ""
   # Q-BRIDGE-MIB::dot1qPvid — index = dot1dBasePort
   dot1q_pvid: "1.3.6.1.2.1.17.7.1.4.5.1.1"
   dot1d_baseport_ifindex: "1.3.6.1.2.1.17.1.4.1.2"
-  # ⚠️ Trunk/access mode: C1200/C1300/CBS KHÔNG expose CISCO-VTP-MIB lẫn dot1qVlanStaticTable
-  # (verify 2026-06-26 đều trả rỗng) → port_mode luôn rỗng, dùng heuristic fallback (giới hạn HW).
   dot1q_static_egress:   "1.3.6.1.2.1.17.7.1.4.3.1.2"
   dot1q_static_untagged: "1.3.6.1.2.1.17.7.1.4.3.1.4"

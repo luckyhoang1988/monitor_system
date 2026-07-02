@@ -291,6 +291,19 @@ class SwitchSNMPCollector(BaseCollector):
         if not vlan_oids:
             return {}
 
+        # 0. Cisco Business (CBS/Catalyst 1200/1300) — CISCOSB vlanAccessPortModeVlanId,
+        #    index = ifIndex trực tiếp. Nguồn THẬT: dot1qPvid trên CBS trả 1 cho mọi cổng (sai).
+        cisco_sb_vlan_oid = vlan_oids.get("ciscosb_access_vlan")
+        if cisco_sb_vlan_oid:
+            result = {}
+            for oid, val in self._snmp_walk(cisco_sb_vlan_oid):
+                try:
+                    result[int(oid.split(".")[-1])] = int(val)
+                except (ValueError, TypeError):
+                    continue
+            if result:
+                return result
+
         # 1. Cisco vmVlan — index = ifIndex
         vm_vlan_oid = vlan_oids.get("vm_vlan")
         if vm_vlan_oid:
@@ -346,6 +359,25 @@ class SwitchSNMPCollector(BaseCollector):
         static table theo cách chuẩn. Cisco Business expose cả hai đều rỗng → heuristic.
         """
         vlan_oids = oid_profile.get("vlan", {})
+
+        # 0. Cisco Business (CBS/Catalyst 1200/1300) — CISCOSB vlanPortModeState, index = ifIndex.
+        #    11=access, 12=trunk (verify runtime 2026-07-02 CBS250: gi9 trunk-link=12, access=11).
+        #    CBS KHÔNG expose CISCO-VTP-MIB lẫn dot1qVlanStaticTable (bitmap toàn 0) → phải đọc MIB này.
+        #    Giá trị khác 11/12 (general/customer…) → để rỗng, rơi về heuristic (không khẳng định sai).
+        cisco_sb_mode_oid = vlan_oids.get("ciscosb_port_mode")
+        if cisco_sb_mode_oid:
+            modes: dict[int, str] = {}
+            for oid, val in self._snmp_walk(cisco_sb_mode_oid):
+                try:
+                    ifidx, mode_code = int(oid.split(".")[-1]), int(val)
+                except (ValueError, TypeError):
+                    continue
+                if mode_code == 11:
+                    modes[ifidx] = "access"
+                elif mode_code == 12:
+                    modes[ifidx] = "trunk"
+            if modes:
+                return modes
 
         # 1. Cisco — CISCO-VTP-MIB vlanTrunkPortDynamicStatus, index = ifIndex.
         trunk_status_oid = vlan_oids.get("vlan_trunk_status")
