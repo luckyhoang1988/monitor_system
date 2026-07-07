@@ -129,6 +129,17 @@
         },
       },
       {
+        // Switch cha mất kết nối (ICMP/SNMP fail) → dữ liệu AC về AP này không
+        // còn đáng tin (AC có thể chưa kịp phát hiện AP mất do lag chu kỳ poll
+        // riêng) → xám "không xác định" thay vì tin theo online=true/false của AC.
+        selector: "node[type='ap'].ap-parent-offline",
+        style: {
+          "background-color": "#f3f4f6",
+          "border-color": "#9ca3af",
+          "border-style": "dotted",
+        },
+      },
+      {
         selector: "edge[type='uplink']",
         style: {
           width: 2.5,
@@ -172,6 +183,14 @@
         style: { "line-color": "#fca5a5", "target-arrow-color": "#fca5a5" },
       },
       {
+        selector: "edge[type='ap'].edge-parent-offline",
+        style: {
+          "line-color": "#9ca3af",
+          "target-arrow-color": "#9ca3af",
+          "line-style": "dotted",
+        },
+      },
+      {
         selector: "edge[inferred='true']",
         style: {
           "line-style": "dashed",
@@ -204,7 +223,8 @@
     function applyOfflineFilter() {
       if (!cy) return;
       cy.nodes("[type='ap']").forEach(function (n) {
-        if (offlineOnly && n.data("online") !== false && n.data("online") !== "false") {
+        var isOffline = n.data("online") === false || n.data("online") === "false" || n.hasClass("ap-parent-offline");
+        if (offlineOnly && !isOffline) {
           n.addClass("hidden-offline-filter");
         } else {
           n.removeClass("hidden-offline-filter");
@@ -217,8 +237,20 @@
       if (!cy) return;
       cy.nodes("[type='ap']").forEach(function (n) {
         var off = n.data("online") === false || n.data("online") === "false";
-        if (off) n.addClass("topo-offline-pulse");
+        if (off || n.hasClass("ap-parent-offline")) n.addClass("topo-offline-pulse");
         else n.removeClass("topo-offline-pulse");
+      });
+    }
+
+    // Switch cha offline → AP con (1 edge type='ap' / AP, theo ap_owner ở backend)
+    // chuyển "không xác định" thay vì tin online=true/false từ AC.
+    function updateSwitchOfflineDependents() {
+      if (!cy) return;
+      cy.edges("[type='ap']").forEach(function (e) {
+        var src = e.source();
+        var parentOffline = src.data("online") === false || src.data("online") === "false";
+        e.toggleClass("edge-parent-offline", parentOffline);
+        e.target().toggleClass("ap-parent-offline", parentOffline);
       });
     }
 
@@ -267,10 +299,15 @@
           lines.push('<div class="text-warning">Chưa map — chưa biết switch/port</div>');
         }
         lines.push("<div><strong>Client:</strong> " + (d.client_count != null ? d.client_count : "—") + "</div>");
-        lines.push("<div><strong>Trạng thái:</strong> " +
-          (d.online === false || d.online === "false"
-            ? '<span class="text-danger">Offline</span>'
-            : '<span class="text-success">Online</span>') + "</div>");
+        var statusHtml;
+        if (node.hasClass("ap-parent-offline")) {
+          statusHtml = '<span class="text-secondary">Không xác định (switch mất kết nối)</span>';
+        } else if (d.online === false || d.online === "false") {
+          statusHtml = '<span class="text-danger">Offline</span>';
+        } else {
+          statusHtml = '<span class="text-success">Online</span>';
+        }
+        lines.push("<div><strong>Trạng thái:</strong> " + statusHtml + "</div>");
         if (lastMeta.ac_id) {
           lines.push('<div class="mt-2"><a href="' + opts.wlanDetailBase + lastMeta.ac_id + '/">WLAN AC</a></div>');
         }
@@ -346,6 +383,7 @@
             cy.json({ elements: elements });
           }
           updateMeta(data.meta);
+          updateSwitchOfflineDependents();
           updatePulseClasses();
           applyOfflineFilter();
           setTimeout(runLayout, 80);
@@ -370,6 +408,8 @@
         var node = cy.getElementById(nid);
         if (node.length) {
           node.data("online", payload.online ? "true" : "false");
+          updateSwitchOfflineDependents();
+          updatePulseClasses();
         }
       }
     }
