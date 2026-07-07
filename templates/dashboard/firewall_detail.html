@@ -69,7 +69,7 @@
 
 <div class="row g-3 mb-4">
   <!-- ===== CPU + Sessions Chart ===== -->
-  <div class="col-xl-6">
+  <div class="col-xl-4">
     <div class="card">
       <div class="card-header bg-white py-2 d-flex align-items-center justify-content-between">
         <span class="fw-semibold"><i class="bi bi-cpu me-2 text-danger"></i>CPU & RAM (%)</span>
@@ -94,18 +94,16 @@
       </div>
     </div>
   </div>
-</div>
 
-<div class="row g-3 mb-4">
-  <!-- ===== Traffic Chart (autosize full width — nhiều interface uplink, half-width dễ chật legend) ===== -->
-  <div class="col-12">
+  <!-- ===== Traffic Chart (cùng dòng, chiếm phần rộng hơn — nhiều interface uplink) ===== -->
+  <div class="col-xl-8">
     <div class="card">
       <div class="card-header bg-white py-2 d-flex align-items-center justify-content-between">
         <span class="fw-semibold"><i class="bi bi-activity me-2 text-success"></i>Traffic (Mbps)</span>
         <span class="text-muted small" id="trafficRange">1h</span>
       </div>
       <div class="card-body">
-        <div class="chart-wrap chart-wrap-wide"><canvas id="trafficChart"></canvas></div>
+        <div class="chart-wrap"><canvas id="trafficChart"></canvas></div>
       </div>
     </div>
   </div>
