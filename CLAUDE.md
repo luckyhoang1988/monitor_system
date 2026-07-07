@@ -236,6 +236,18 @@ Phase 1–7 **đã hoàn thành** (setup/models → collector SNMP/SSH + tests �
   alert fire (`_persist_incident_snapshot` mở rộng bulk_create `VolumeStats` cùng lúc với
   `SystemHealth`). **KHÔNG rollup Hourly/Daily cho VolumeStats** (out of scope MVP — bảng hiện trạng
   để soi nhanh, không phải chart lịch sử; N volume động khiến rollup phức tạp hơn nhiều).
+- **Per-volume mở rộng (2026-07-07, đợt 3, cùng ngày)**: đối chiếu với danh sách 8 counter chuẩn
+  Windows `LogicalDisk` (`Disk Read/Write Bytes/sec`, `Avg. Disk sec/Read/Write` đã có sẵn từ đợt 2;
+  bổ sung `Current Disk Queue Length`, `Disk Transfers/sec`, `Split IO/sec`, `% Idle Time`).
+  `Disk Transfers/sec` **KHÔNG query counter riêng** — suy ra bằng `read_iops + write_iops` (đúng công
+  thức chuẩn Windows, không cần verify runtime vì là identity toán học cố định chứ không phải giá trị
+  đo riêng theo thiết bị). 3 counter còn lại query thật qua `Get-Counter`. ⚠️ `Current Disk Queue
+  Length` (raw/instantaneous, lấy **mẫu cuối** trong `MaxSamples=3`) là counter **khác**
+  `Avg. Disk Queue Length` đã có (avg theo sample interval) — 2 field riêng biệt (`current_queue_length`
+  vs `queue_length`), không gộp/thay thế nhau. Field JSON rút gọn `cql/tps/sio/idt` trong
+  `PS_SCRIPT_VOLUME` (margin base64 8191/8191), map lại tên đầy đủ ở Python
+  `HyperVCollector._normalize_volumes()` — cùng kiểu rtm/wtm/dql/aio ở `PS_SCRIPT` host. Base64 cuối
+  7880/8191 (margin ~3.8%). Migration `0008_volumestats_current_queue_length_and_more`.
 - **KHÔNG có alerting per-volume** trong lần này (out of scope, quyết định có chủ đích) — `AlertRule`
   hiện là scalar-per-device, alert theo "volume tệ nhất/host" cần thiết kế riêng (đề xuất: alert theo
   max latency across volumes + kèm tên VM trong message, không đổi kiến trúc `AlertRule`). Bảng
@@ -250,6 +262,7 @@ Phase 1–7 **đã hoàn thành** (setup/models → collector SNMP/SSH + tests �
   Hourly/Daily + model `VolumeStats`). Commit `21da8e0`.
 
 ### Thay đổi quan trọng
+- **2026-07-07**: Bổ sung 4 chỉ số per-volume (`Current Disk Queue Length`, `Disk Transfers/sec` suy ra bằng cộng thay vì query, `Split IO/sec`, `% Idle Time`) sau khi đối chiếu danh sách counter chuẩn Windows `LogicalDisk` với code hiện có. `PS_SCRIPT_VOLUME` nén thêm (biến prefix `$dp`, regex rút gọn, field JSON viết tắt `cql/tps/sio/idt`) để giữ dưới giới hạn base64 8191. Migration `0008_volumestats_current_queue_length_and_more`.
 - **2026-07-07**: Thêm disk throughput/queue/io-size (4 metric) + per-volume disk stats mapped theo VM (model `VolumeStats`). PS_SCRIPT tách 2 script (host+volume) do vượt giới hạn base64 khi gộp chung. Fix bug helper function `R` trùng alias PowerShell `Invoke-History`. Migration `0007_systemhealth_avg_io_size_kb_and_more`. Commit `21da8e0`.
 - **2026-07-07**: Thêm 7 HyperV host performance counter (xem mục "HyperV Host Performance Counters" ở trên). Migration `0006_systemhealth_cpu_hv_percent_and_more`. `POLL_HYPERV_INTERVAL_SECS` 300→120. Commit `3bc46a4`.
 - **2026-07-02**: **SNMP walk chuyển sang getBulk** (pysnmp `bulk_cmd`, `max_repetitions=25`) thay vì getNext tuần tự. PFVN_Router giảm **40s → 8s** (−80%), CORE 13s→6s, ACL_Wlan 20s→3s. Wall-clock cả cycle 20 thiết bị: **56.5s → ~30s**. SNMPv1 fallback getNext. Commit `bab0aa8`.

@@ -71,6 +71,22 @@ Quy trình chuẩn (đã dùng để bắt bug 504 phiên đầu):
   (`try/except` quanh lệnh gọi script thứ 2) để script 1 không bị ảnh hưởng nếu script 2 lỗi. Đo lại
   timing tổng sau khi tách (đã tăng ~32.8s→~52.5s cho 2 host khi thêm per-volume, vẫn dưới ngưỡng
   cảnh báo 50%×`POLL_HYPERV_INTERVAL_SECS` nhưng margin mỏng đi nhiều — theo dõi log cảnh báo sau deploy).
+  Đo tương tự cho `PS_SCRIPT_VOLUME`:
+  `python -c "from apps.collectors.hyperv import PS_SCRIPT_VOLUME; import base64; print(len(base64.b64encode(PS_SCRIPT_VOLUME.encode('utf-16-le'))))"`.
+  Khi thêm 4 counter `LogicalDisk` nữa (2026-07-07, đợt 3): script vượt ngay 8764/8191 → nén bằng 3 cách
+  (thứ tự ưu tiên, đã áp dụng thật): (1) **suy ra counter thay vì query** khi có công thức chuẩn Windows
+  đã tài liệu hoá — `Disk Transfers/sec = Disk Reads/sec + Disk Writes/sec`, tính cộng trong PS thay vì
+  thêm 1 Get-Counter path mới (bớt hẳn 1 path + 1 regex branch); (2) biến prefix `$dp='\LogicalDisk(*)\'`
+  rồi nối chuỗi `$dp+'...'` thay vì lặp lại `\LogicalDisk(*)\` nguyên văn mỗi path (bỏ luôn dấu ngoặc
+  bọc ngoài `($dp+'x')`→`$dp+'x'` trong `@(...)`, dấu phẩy vẫn tách đúng phần tử); (3) regex match rút
+  về substring tối thiểu vẫn unique (`'disk reads/sec'`→`'reads/sec'`, `'avg\. disk queue length'`→
+  `'avg\. disk queue'` để còn phân biệt với `'current disk queue'` mới thêm) — PHẢI soát lại từng cặp
+  path không cho substring rút gọn của path này vô tình khớp path khác (đã soát thủ công toàn bộ 11
+  path trong `PS_SCRIPT_VOLUME`, xem comment tại khai báo). Field JSON mới (`current_queue_length`,
+  `transfers_per_sec`, `split_io_per_sec`, `idle_time_percent`) cũng rút gọn thành `cql/tps/sio/idt`
+  trong PS (cùng kiểu rtm/wtm/dql/aio ở `PS_SCRIPT` host) — map lại tên đầy đủ ở
+  `HyperVCollector._normalize_volumes()` (Python, không tốn base64). Kết quả cuối: 7880/8191 (margin
+  ~3.8%, tương đương margin ~3.5% của `PS_SCRIPT` host đã chạy ổn định production).
 - **PowerShell helper function 1 ký tự có thể trùng alias built-in** (`r`=`Invoke-History`,
   `h`=`Get-History`, v.v.) — PowerShell resolve alias TRƯỚC function cùng tên trong 1 số trường hợp,
   khiến hàm tự định nghĩa `function R(...)` bị gọi nhầm thành `Invoke-History`, ném lỗi mơ hồ

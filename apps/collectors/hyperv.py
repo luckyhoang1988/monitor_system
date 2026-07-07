@@ -107,23 +107,27 @@ if(-not $vm2.ContainsKey($k)){$vm2[$k]=@()}
 if($vm2[$k] -notcontains $vh.VMName){$vm2[$k]+=$vh.VMName}
 }
 }
-$lp=@('\LogicalDisk(*)\Disk Reads/sec','\LogicalDisk(*)\Disk Writes/sec','\LogicalDisk(*)\Disk Read Bytes/sec','\LogicalDisk(*)\Disk Write Bytes/sec','\LogicalDisk(*)\Avg. Disk sec/Read','\LogicalDisk(*)\Avg. Disk sec/Write','\LogicalDisk(*)\Avg. Disk Queue Length','\LogicalDisk(*)\Avg. Disk Bytes/Transfer')
+$dp='\LogicalDisk(*)\'
+$lp=@($dp+'Disk Reads/sec',$dp+'Disk Writes/sec',$dp+'Disk Read Bytes/sec',$dp+'Disk Write Bytes/sec',$dp+'Avg. Disk sec/Read',$dp+'Avg. Disk sec/Write',$dp+'Avg. Disk Queue Length',$dp+'Avg. Disk Bytes/Transfer',$dp+'Current Disk Queue Length',$dp+'Split IO/sec',$dp+'% Idle Time')
 $vs=Get-Counter -Counter $lp -SampleInterval 2 -MaxSamples 3 -ErrorAction Stop
 $vd=@{}
 foreach($s in $vs){
 foreach($cs in $s.CounterSamples){
 $inst=$cs.InstanceName
 if($inst -eq '_total'){continue}
-if(-not $vd.ContainsKey($inst)){$vd[$inst]=@{ri=@();wi=@();rb=@();wb=@();rl=@();wl=@();ql=@();io=@()}}
+if(-not $vd.ContainsKey($inst)){$vd[$inst]=@{ri=@();wi=@();rb=@();wb=@();rl=@();wl=@();ql=@();io=@();cq=@();sp=@();it=@()}}
 $pth=$cs.Path
-if($pth -match 'disk reads/sec'){$vd[$inst].ri+=$cs.CookedValue}
-elseif($pth -match 'disk writes/sec'){$vd[$inst].wi+=$cs.CookedValue}
-elseif($pth -match 'disk read bytes/sec'){$vd[$inst].rb+=$cs.CookedValue}
-elseif($pth -match 'disk write bytes/sec'){$vd[$inst].wb+=$cs.CookedValue}
-elseif($pth -match 'avg\. disk sec/read'){$vd[$inst].rl+=$cs.CookedValue}
-elseif($pth -match 'avg\. disk sec/write'){$vd[$inst].wl+=$cs.CookedValue}
-elseif($pth -match 'avg\. disk queue length'){$vd[$inst].ql+=$cs.CookedValue}
-elseif($pth -match 'avg\. disk bytes/transfer'){$vd[$inst].io+=$cs.CookedValue}
+if($pth -match 'reads/sec'){$vd[$inst].ri+=$cs.CookedValue}
+elseif($pth -match 'writes/sec'){$vd[$inst].wi+=$cs.CookedValue}
+elseif($pth -match 'read bytes'){$vd[$inst].rb+=$cs.CookedValue}
+elseif($pth -match 'write bytes'){$vd[$inst].wb+=$cs.CookedValue}
+elseif($pth -match 'sec/read'){$vd[$inst].rl+=$cs.CookedValue}
+elseif($pth -match 'sec/write'){$vd[$inst].wl+=$cs.CookedValue}
+elseif($pth -match 'avg\. disk queue'){$vd[$inst].ql+=$cs.CookedValue}
+elseif($pth -match 'bytes/transfer'){$vd[$inst].io+=$cs.CookedValue}
+elseif($pth -match 'current disk queue'){$vd[$inst].cq+=$cs.CookedValue}
+elseif($pth -match 'split io'){$vd[$inst].sp+=$cs.CookedValue}
+elseif($pth -match 'idle time'){$vd[$inst].it+=$cs.CookedValue}
 }
 }
 $vol=@($vd.Keys|ForEach-Object{
@@ -138,6 +142,10 @@ read_latency_ms=if($v.rl.Count -gt 0){[math]::Round((M $v.rl)*1000,2)}else{$null
 write_latency_ms=if($v.wl.Count -gt 0){[math]::Round((M $v.wl)*1000,2)}else{$null}
 queue_length=if($v.ql.Count -gt 0){[math]::Round((A $v.ql),2)}else{$null}
 avg_io_size_kb=if($v.io.Count -gt 0){[math]::Round((A $v.io)/1024,1)}else{$null}
+cql=if($v.cq.Count -gt 0){[math]::Round($v.cq[$v.cq.Count-1],2)}else{$null}
+tps=if($v.ri.Count -gt 0 -and $v.wi.Count -gt 0){[math]::Round((A $v.ri)+(A $v.wi),1)}else{$null}
+sio=if($v.sp.Count -gt 0){[math]::Round((A $v.sp),2)}else{$null}
+idt=if($v.it.Count -gt 0){[math]::Round((A $v.it),1)}else{$null}
 vm_names=@(if($vm2.ContainsKey($k)){$vm2[$k]}else{@()})
 }
 })
@@ -254,5 +262,20 @@ class HyperVCollector(BaseCollector):
             disk_queue_length=host_perf.get("dql"),
             avg_io_size_kb=host_perf.get("aio"),
             net_mbps_total=host_perf.get("net_mbps_total"),
-            extra={"vms": raw.get("vms", []), "volumes": raw.get("volumes") or []},
+            extra={"vms": raw.get("vms", []), "volumes": self._normalize_volumes(raw.get("volumes"))},
         )
+
+    @staticmethod
+    def _normalize_volumes(volumes: list | None) -> list:
+        # cql/tps/sio/idt: key JSON rút gọn trong PS_SCRIPT_VOLUME (margin base64 ~8191 ký
+        # tự) — map lại sang tên field đầy đủ current_queue_length/transfers_per_sec/
+        # split_io_per_sec/idle_time_percent trước khi lưu DB/cache.
+        out = []
+        for vol in volumes or []:
+            v = dict(vol)
+            v["current_queue_length"] = v.pop("cql", None)
+            v["transfers_per_sec"] = v.pop("tps", None)
+            v["split_io_per_sec"] = v.pop("sio", None)
+            v["idle_time_percent"] = v.pop("idt", None)
+            out.append(v)
+        return out

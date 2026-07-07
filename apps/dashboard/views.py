@@ -370,6 +370,10 @@ def hyperv_detail(request, pk):
                 write_latency_ms=v.get("write_latency_ms"),
                 queue_length=v.get("queue_length"),
                 avg_io_size_kb=v.get("avg_io_size_kb"),
+                current_queue_length=v.get("current_queue_length"),
+                transfers_per_sec=v.get("transfers_per_sec"),
+                split_io_per_sec=v.get("split_io_per_sec"),
+                idle_time_percent=v.get("idle_time_percent"),
                 vm_names=v.get("vm_names") or [],
             )
             for v in (snap.get("volumes") or [])

@@ -261,6 +261,10 @@
           <th class="text-end">Write Latency</th>
           <th class="text-end">Queue Length</th>
           <th class="text-end">Avg I/O (KB)</th>
+          <th class="text-end">Current Queue</th>
+          <th class="text-end">Transfers/s</th>
+          <th class="text-end">Split IO/s</th>
+          <th class="text-end">% Idle</th>
           <th class="pe-3">VM(s)</th>
         </tr>
       </thead>
@@ -284,6 +288,10 @@
           </td>
           <td class="text-end font-monospace">{{ vol.queue_length|default_if_none:"—"|floatformat:2 }}</td>
           <td class="text-end font-monospace">{{ vol.avg_io_size_kb|default_if_none:"—"|floatformat:1 }}</td>
+          <td class="text-end font-monospace">{{ vol.current_queue_length|default_if_none:"—"|floatformat:2 }}</td>
+          <td class="text-end font-monospace">{{ vol.transfers_per_sec|default_if_none:"—"|floatformat:1 }}</td>
+          <td class="text-end font-monospace">{{ vol.split_io_per_sec|default_if_none:"—"|floatformat:2 }}</td>
+          <td class="text-end font-monospace">{{ vol.idle_time_percent|default_if_none:"—"|floatformat:1 }}</td>
           <td class="pe-3">
             {% for vm_name in vol.vm_names %}
               <span class="badge bg-secondary rounded-pill px-2 mb-1">{{ vm_name }}</span>

@@ -69,6 +69,10 @@ class VolumeStats(models.Model):
     write_latency_ms = models.FloatField(null=True, blank=True)
     queue_length    = models.FloatField(null=True, blank=True)
     avg_io_size_kb  = models.FloatField(null=True, blank=True)
+    current_queue_length = models.FloatField(null=True, blank=True)
+    transfers_per_sec     = models.FloatField(null=True, blank=True)
+    split_io_per_sec      = models.FloatField(null=True, blank=True)
+    idle_time_percent     = models.FloatField(null=True, blank=True)
     vm_names        = models.JSONField(default=list, blank=True)
 
     class Meta:

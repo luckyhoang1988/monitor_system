@@ -557,6 +557,10 @@ def _save_volume_stats(device: Device, data: NormalizedData) -> None:
                 write_latency_ms=vol.get("write_latency_ms"),
                 queue_length=vol.get("queue_length"),
                 avg_io_size_kb=vol.get("avg_io_size_kb"),
+                current_queue_length=vol.get("current_queue_length"),
+                transfers_per_sec=vol.get("transfers_per_sec"),
+                split_io_per_sec=vol.get("split_io_per_sec"),
+                idle_time_percent=vol.get("idle_time_percent"),
                 vm_names=vol.get("vm_names") or [],
             ))
         except (TypeError, ValueError) as exc:
