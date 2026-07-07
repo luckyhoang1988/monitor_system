@@ -187,6 +187,16 @@ Phase 1–7 **đã hoàn thành** (setup/models → collector SNMP/SSH + tests �
   burst + ~4s WMI cũ ≈ 30s/tick cho 2 host, duty cycle ~25%, margin ~4x — tránh lặp "poll queue
   snowball", xem memory `poll-queue-snowball-slow-device.md`). `poll_all_hyperv()` tự log cảnh báo nếu
   1 tick vượt 50% interval.
+- ⚠️ **Batch KHÔNG có timeout tổng cho tới 2026-07-07** ([apps/collectors/tasks.py](apps/collectors/tasks.py)
+  `poll_all_hyperv`): task này chạy inline nhiều host trong 1 lời gọi (lý do: tránh mất task
+  `poll_device` trên môi trường Celery/Windows không ổn định), KHÔNG qua `poll_device` nên không có
+  soft/hard `time_limit` per-device như switch/router. 1 host WinRM treo có thể chiếm ~280s (2 script
+  host+volume × 2 endpoint http/https × operation 60s/read 70s timeout mỗi cái) — đủ nuốt hết chu kỳ,
+  y hệt cơ chế "poll queue snowball" đã fix cho `poll_device` (commit `fe1dac1`) nhưng CHƯA từng áp
+  cho nhánh hyperv. **Đã fix**: thêm `soft_time_limit=100s`/`time_limit=110s` thẳng lên
+  `poll_all_hyperv` (bắt `SoftTimeLimitExceeded`, log rồi return — host chưa poll kịp chờ chu kỳ sau,
+  host đã poll xong trong vòng vẫn giữ kết quả vì `save_metrics` chạy ngay trong từng host, không đợi
+  hết loop).
 - **Alert engine**: không tái dùng `_sustained_cpu_mem` (hardcode field cpu/mem) — dict riêng
   `_HOST_PERF_FIELD_MAP` (metric → short-key ring-buffer + field SystemHealth) + `_latest_host_perf`/
   `_sustained_host_perf` dùng chung `_sustained_verdict`. 4 seed `AlertRule` (`device_type=hyperv`):
@@ -261,7 +271,38 @@ Phase 1–7 **đã hoàn thành** (setup/models → collector SNMP/SSH + tests �
 - Migration `0007_systemhealth_avg_io_size_kb_and_more` (4 cột `SystemHealth` + 8 cột mỗi
   Hourly/Daily + model `VolumeStats`). Commit `21da8e0`.
 
+## Celery Beat — `expire_seconds` bị reset mỗi lần `beat` restart (fix gốc 2026-07-07)
+> Phát hiện khi audit lại điều kiện poll HyperV — không phải bug riêng HyperV, ảnh hưởng
+> **mọi** `PeriodicTask` có khai báo `options.expires` trong `CELERY_BEAT_SCHEDULE`
+> ([config/settings/base.py](config/settings/base.py)): `poll-all-hyperv`,
+> `poll-all-network-devices`, `poll-all-ping-devices`, `evaluate-alert-rules`,
+> `discover-topology-links`.
+
+- **ROOT CAUSE** (đọc source `django_celery_beat.schedulers`, không đoán): `ModelEntry._unpack_options()`
+  chỉ đọc key **`expire_seconds`** trong `options` — KHÔNG đọc `expires` (đó là key celery gốc
+  dùng cho `apply_async`, django-celery-beat không biết tới). `DatabaseScheduler.setup_schedule()`
+  gọi `update_from_dict(beat_schedule)` **mỗi lần process `beat` khởi động** (không chỉ lần tạo
+  đầu) → `update_or_create(defaults=_unpack_fields(...))` ghi `expire_seconds=None` vào DB vì
+  `options` code cũ chỉ có `expires`. Hệ quả: management command `sync_beat_expires` (thêm
+  2026-07-07 sau 1 regression trước đó, xem memory `poll-queue-snowball-slow-device.md`) set đúng
+  `expire_seconds` lúc container boot (trong `entrypoint.sh`), nhưng **NGAY SAU ĐÓ** trong CÙNG
+  container `beat` tự `exec celery beat` → `setup_schedule()` ghi đè lại `None` — verify runtime
+  prod: log entrypoint in "None -> 120" rồi `SELECT expire_seconds FROM
+  django_celery_beat_periodictask` vẫn NULL vài phút sau khi container đã "healthy". `every`/
+  `period` (khoảng lặp thật) KHÔNG bị ảnh hưởng (đường riêng, đã đúng lúc verify).
+- **Đã fix tại gốc**: thêm key `expire_seconds` (song song `expires`) vào từng `options` trong
+  `CELERY_BEAT_SCHEDULE` → `update_from_dict` giờ tự ghi đúng giá trị mỗi lần `beat` boot, không
+  còn phụ thuộc thứ tự chạy `sync_beat_expires` vs `exec celery beat` trong entrypoint. Command
+  `sync_beat_expires` giữ lại làm lớp phòng thủ idempotent, không còn là cơ chế chính.
+- ⚠️ Ai đổi/thêm entry mới vào `CELERY_BEAT_SCHEDULE` có `options.expires` → nhớ thêm luôn
+  `expire_seconds` cùng giá trị, nếu không entry đó lặp lại đúng bug này.
+
 ### Thay đổi quan trọng
+- **2026-07-07**: Audit lại poll HyperV: fix `poll_all_hyperv` thiếu soft/hard `time_limit` batch
+  (thêm 100s/110s, xem mục "HyperV Host Performance Counters" ⚠️ Batch); fix root cause
+  `expire_seconds` bị `beat` reset mỗi lần restart (xem mục "Celery Beat" ở trên) — thêm key
+  `expire_seconds` vào `CELERY_BEAT_SCHEDULE` cho 5 periodic task (poll-all-hyperv/network/ping,
+  evaluate-alert-rules, discover-topology-links).
 - **2026-07-07**: Bổ sung 4 chỉ số per-volume (`Current Disk Queue Length`, `Disk Transfers/sec` suy ra bằng cộng thay vì query, `Split IO/sec`, `% Idle Time`) sau khi đối chiếu danh sách counter chuẩn Windows `LogicalDisk` với code hiện có. `PS_SCRIPT_VOLUME` nén thêm (biến prefix `$dp`, regex rút gọn, field JSON viết tắt `cql/tps/sio/idt`) để giữ dưới giới hạn base64 8191. Migration `0008_volumestats_current_queue_length_and_more`.
 - **2026-07-07**: Thêm disk throughput/queue/io-size (4 metric) + per-volume disk stats mapped theo VM (model `VolumeStats`). PS_SCRIPT tách 2 script (host+volume) do vượt giới hạn base64 khi gộp chung. Fix bug helper function `R` trùng alias PowerShell `Invoke-History`. Migration `0007_systemhealth_avg_io_size_kb_and_more`. Commit `21da8e0`.
 - **2026-07-07**: Thêm 7 HyperV host performance counter (xem mục "HyperV Host Performance Counters" ở trên). Migration `0006_systemhealth_cpu_hv_percent_and_more`. `POLL_HYPERV_INTERVAL_SECS` 300→120. Commit `3bc46a4`.

@@ -193,7 +193,25 @@ def poll_all_ping_devices() -> None:
     logger.info("Dispatched poll tasks for %d ping devices", len(device_ids))
 
 
-@shared_task
+# Trần cho TOÀN BỘ batch poll_all_hyperv — task chạy inline nhiều host trong 1 lời gọi,
+# KHÔNG qua poll_device nên không có soft/hard time_limit per-device bảo vệ. 1 host WinRM
+# treo có thể chiếm tới ~280s (2 script host+volume × 2 endpoint http/https × operation
+# 60s/read 70s timeout mỗi cái) — không giới hạn tổng thì 1 host xấu đủ nuốt hết chu kỳ,
+# y hệt cơ chế "poll queue snowball" đã fix cho poll_device (commit fe1dac1) nhưng CHƯA
+# từng áp cho nhánh hyperv (gap ghi nhận ở memory poll-queue-snowball-slow-device.md
+# 2026-07-07, chưa fix). 100s/110s: gấp ~2x runtime bình thường đo thật (~52.5s/2 host,
+# CLAUDE.md "HyperV — Disk Throughput/Queue/IO-size"), vẫn dưới POLL_HYPERV_INTERVAL_SECS
+# mặc định 120s để không đè lên chu kỳ kế tiếp. SoftTimeLimitExceeded chỉ dừng batch ở
+# host đang xử lý — host đã poll xong trong vòng này vẫn giữ kết quả (mỗi host tự
+# save_metrics ngay trong _poll_device_once, không đợi hết loop).
+POLL_HYPERV_BATCH_SOFT_LIMIT = 100
+POLL_HYPERV_BATCH_HARD_LIMIT = 110
+
+
+@shared_task(
+    soft_time_limit=POLL_HYPERV_BATCH_SOFT_LIMIT,
+    time_limit=POLL_HYPERV_BATCH_HARD_LIMIT,
+)
 def poll_all_hyperv() -> None:
     from django.conf import settings
     from apps.devices.models import Device
@@ -205,13 +223,22 @@ def poll_all_hyperv() -> None:
     success = 0
     failed = 0
     t0 = timezone.now()
-    for pk in device_ids:
-        try:
-            _poll_device_once(pk)
-            success += 1
-        except Exception as exc:
-            failed += 1
-            logger.warning("Inline HyperV poll failed for device %s: %s", pk, exc)
+    try:
+        for pk in device_ids:
+            try:
+                _poll_device_once(pk)
+                success += 1
+            except Exception as exc:
+                failed += 1
+                logger.warning("Inline HyperV poll failed for device %s: %s", pk, exc)
+    except SoftTimeLimitExceeded:
+        elapsed = (timezone.now() - t0).total_seconds()
+        logger.warning(
+            "poll_all_hyperv vượt soft_time_limit %ds sau %d/%d host (elapsed=%.1fs) — "
+            "dừng batch, host còn lại chờ chu kỳ sau",
+            POLL_HYPERV_BATCH_SOFT_LIMIT, success + failed, len(device_ids), elapsed,
+        )
+        return
     elapsed = (timezone.now() - t0).total_seconds()
     logger.info("Polled %d/%d hyperv hosts inline (failed=%d, elapsed=%.1fs)",
                 success, len(device_ids), failed, elapsed)

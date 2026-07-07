@@ -132,28 +132,42 @@ POLL_HYPERV_INTERVAL_SECS  = env.int("POLL_HYPERV_INTERVAL_SECS", default=120)
 ALERT_EVAL_INTERVAL_SECS   = env.int("ALERT_EVAL_INTERVAL_SECS", default=90)
 TOPOLOGY_DISCOVER_INTERVAL_SECS = env.int("TOPOLOGY_DISCOVER_INTERVAL_SECS", default=1800)
 
-# options.expires: bản điều phối tồn quá 1 chu kỳ trong queue sẽ tự rớt,
-# tránh tích nhiều bản trùng (snowball) khi worker bị dồn.
+# options: bản điều phối tồn quá 1 chu kỳ trong queue sẽ tự rớt, tránh tích nhiều bản
+# trùng (snowball) khi worker bị dồn.
+# ⚠️ PHẢI khai báo CẢ 2 key `expires` (celery gốc) VÀ `expire_seconds` (django-celery-beat
+# model field). `DatabaseScheduler.setup_schedule()` gọi `update_from_dict(beat_schedule)`
+# **mỗi lần beat process khởi động** (không chỉ lần đầu) → `ModelEntry._unpack_options()`
+# CHỈ đọc key `expire_seconds` trong `options` (bỏ qua `expires` qua `**kwargs`) rồi
+# `update_or_create` ghi thẳng field `PeriodicTask.expire_seconds` — thiếu key này, mọi
+# lần beat restart sẽ RESET expire_seconds về None, xoá tác dụng chống snowball ở tầng
+# điều phối (dù `poll_device` vẫn còn soft/hard time_limit riêng bảo vệ 1 phần).
+# Verify runtime prod 2026-07-07: management command `sync_beat_expires` (chạy trong
+# entrypoint.sh mọi container) set đúng expire_seconds lúc container boot, nhưng NGAY SAU
+# ĐÓ container `beat` tự `exec celery beat` → `setup_schedule()` ghi đè lại None (do thiếu
+# key `expire_seconds` ở đây) — confirm bằng cách đọc source `_unpack_options()` +
+# query DB `django_celery_beat_periodictask.expire_seconds` = NULL dù `sync_beat_expires`
+# vừa log "None -> 120" vài giây trước. `expires` giữ lại cho rõ ý định + phòng khi đổi
+# sang scheduler không phải DB (Scheduler gốc dùng thẳng `options.expires` cho apply_async).
 CELERY_BEAT_SCHEDULE = {
     "poll-all-network-devices": {
         "task": "apps.collectors.tasks.poll_all_network_devices",
         "schedule": POLL_NETWORK_INTERVAL_SECS,  # switch, router, firewall (SNMP/SSH)
-        "options": {"expires": POLL_NETWORK_INTERVAL_SECS},
+        "options": {"expires": POLL_NETWORK_INTERVAL_SECS, "expire_seconds": POLL_NETWORK_INTERVAL_SECS},
     },
     "poll-all-ping-devices": {
         "task": "apps.collectors.tasks.poll_all_ping_devices",
         "schedule": POLL_PING_INTERVAL_SECS,  # devices using ping/icmp
-        "options": {"expires": POLL_PING_INTERVAL_SECS},
+        "options": {"expires": POLL_PING_INTERVAL_SECS, "expire_seconds": POLL_PING_INTERVAL_SECS},
     },
     "poll-all-hyperv": {
         "task": "apps.collectors.tasks.poll_all_hyperv",
         "schedule": POLL_HYPERV_INTERVAL_SECS,
-        "options": {"expires": POLL_HYPERV_INTERVAL_SECS},
+        "options": {"expires": POLL_HYPERV_INTERVAL_SECS, "expire_seconds": POLL_HYPERV_INTERVAL_SECS},
     },
     "evaluate-alert-rules": {
         "task": "apps.alerts.tasks.evaluate_alert_rules",
         "schedule": ALERT_EVAL_INTERVAL_SECS,
-        "options": {"expires": ALERT_EVAL_INTERVAL_SECS},
+        "options": {"expires": ALERT_EVAL_INTERVAL_SECS, "expire_seconds": ALERT_EVAL_INTERVAL_SECS},
     },
     "cleanup-old-metrics": {
         "task": "apps.metrics.tasks.cleanup_old_metrics",
@@ -166,7 +180,7 @@ CELERY_BEAT_SCHEDULE = {
     "discover-topology-links": {
         "task": "apps.collectors.tasks.discover_topology_links",
         "schedule": TOPOLOGY_DISCOVER_INTERVAL_SECS,
-        "options": {"expires": TOPOLOGY_DISCOVER_INTERVAL_SECS},
+        "options": {"expires": TOPOLOGY_DISCOVER_INTERVAL_SECS, "expire_seconds": TOPOLOGY_DISCOVER_INTERVAL_SECS},
     },
     "rollup-daily-metrics": {
         "task": "apps.metrics.tasks.rollup_daily_metrics",

@@ -87,6 +87,20 @@ Quy trình chuẩn (đã dùng để bắt bug 504 phiên đầu):
   trong PS (cùng kiểu rtm/wtm/dql/aio ở `PS_SCRIPT` host) — map lại tên đầy đủ ở
   `HyperVCollector._normalize_volumes()` (Python, không tốn base64). Kết quả cuối: 7880/8191 (margin
   ~3.8%, tương đương margin ~3.5% của `PS_SCRIPT` host đã chạy ổn định production).
+- **`CELERY_BEAT_SCHEDULE[...]["options"]` phải có key `expire_seconds`, KHÔNG chỉ `expires`.**
+  django-celery-beat (`ModelEntry._unpack_options`) chỉ đọc `expire_seconds` từ `options` — key
+  `expires` (celery gốc) bị nó bỏ qua qua `**kwargs`. `DatabaseScheduler.setup_schedule()` gọi
+  `update_from_dict(beat_schedule)` **mỗi lần `beat` process khởi động** (không chỉ lần đầu) →
+  nếu thiếu `expire_seconds`, mỗi lần `beat` restart sẽ RESET `PeriodicTask.expire_seconds` về
+  `None` ngay sau khi entrypoint/`sync_beat_expires` vừa set đúng — verify bằng cách đọc source
+  + query DB prod thấy `expire_seconds=NULL` dù log entrypoint in "None -> 120" vài phút trước
+  (dính thật 2026-07-07, xem CLAUDE.md "Celery Beat — expire_seconds bị reset"). Thêm entry mới
+  có `options.expires` → PHẢI thêm luôn `options.expire_seconds` cùng giá trị.
+- **`poll_all_hyperv` (và mọi task chạy inline nhiều thiết bị trong 1 lời gọi, không qua
+  `poll_device`) phải có `soft_time_limit`/`time_limit` riêng ở tầng `@shared_task`.** Không có
+  thì 1 thiết bị treo (WinRM/SNMP/SSH) có thể chiếm toàn bộ task tới hàng trăm giây, y hệt cơ chế
+  "poll queue snowball" — `poll_device` đã có từ commit `fe1dac1`, `poll_all_hyperv` thiếu tới
+  2026-07-07 mới fix (100s/110s, bắt `SoftTimeLimitExceeded` để dừng batch sạch).
 - **PowerShell helper function 1 ký tự có thể trùng alias built-in** (`r`=`Invoke-History`,
   `h`=`Get-History`, v.v.) — PowerShell resolve alias TRƯỚC function cùng tên trong 1 số trường hợp,
   khiến hàm tự định nghĩa `function R(...)` bị gọi nhầm thành `Invoke-History`, ném lỗi mơ hồ

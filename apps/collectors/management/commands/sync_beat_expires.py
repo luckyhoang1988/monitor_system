@@ -1,11 +1,18 @@
 """Đồng bộ options.expires trong CELERY_BEAT_SCHEDULE vào PeriodicTask.expire_seconds.
 
-DatabaseScheduler (django-celery-beat) chỉ ghi options.expires -> expire_seconds
-lúc PeriodicTask được TẠO MỚI lần đầu; sửa CELERY_BEAT_SCHEDULE trong code sau đó
-KHÔNG tự re-sync cho entry đã tồn tại sẵn trong DB (regression phát hiện 2026-07-07:
-expire_seconds=None dù code đã khai báo expires cho poll-all-hyperv/network/ping
-từ commit fe1dac1 — mất tác dụng chống snowball khi 1 batch chạy quá 1 chu kỳ).
-Idempotent, chạy an toàn mỗi lần deploy (xem entrypoint.sh).
+⚠️ ROOT CAUSE thật (tìm ra 2026-07-07 bằng cách đọc source `django_celery_beat.schedulers`):
+`ModelEntry._unpack_options()` chỉ đọc key `expire_seconds` trong `options` (KHÔNG phải
+`expires` — đó là key celery gốc dùng cho `apply_async`, django-celery-beat không đọc).
+`DatabaseScheduler.setup_schedule()` gọi `update_from_dict(beat_schedule)` **mỗi lần beat
+process khởi động** (không chỉ lần tạo đầu) → nếu `options` chỉ có `expires` mà thiếu
+`expire_seconds`, mỗi lần beat restart sẽ RESET `expire_seconds` về None ngay sau khi
+command này vừa set đúng giá trị vài giây trước (verify runtime: log entrypoint container
+`beat` in "None -> 120" lúc boot, nhưng `SELECT expire_seconds` ngay sau đó vẫn NULL vì
+`exec celery beat` chạy `setup_schedule()` đè lại). **Đã fix tại gốc**: thêm key
+`expire_seconds` vào từng `options` trong `config/settings/base.py` `CELERY_BEAT_SCHEDULE`
+— giờ `update_from_dict` tự ghi đúng giá trị mỗi lần beat boot, không cần command này nữa
+về mặt lý thuyết. Giữ lại làm lớp phòng thủ idempotent (chạy vô hại, không ai xoá nếu lỡ
+quên đồng bộ `options` sau này) — chạy an toàn mỗi lần deploy (xem entrypoint.sh).
 """
 from django.conf import settings
 from django.core.management.base import BaseCommand
