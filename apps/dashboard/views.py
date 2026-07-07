@@ -239,6 +239,21 @@ def poll_status(request):
     })
 
 
+@login_required
+@never_cache
+def self_health(request):
+    """CPU/RAM/Disk của server đang chạy app này (topbar widget).
+
+    interval=None (non-blocking) — so với lần gọi trước đó của cùng process;
+    lần gọi đầu tiên sau khi worker khởi động có thể trả 0.0, các lần sau đúng.
+    """
+    import psutil
+    cpu = psutil.cpu_percent(interval=None)
+    mem = psutil.virtual_memory().percent
+    disk = psutil.disk_usage("/").percent
+    return JsonResponse({"cpu": cpu, "mem": mem, "disk": disk})
+
+
 def _cache_latest_health(device):
     """SystemHealth (chưa lưu) dựng từ cache snapshot cho template detail. None nếu chưa có."""
     from apps.metrics.models import SystemHealth

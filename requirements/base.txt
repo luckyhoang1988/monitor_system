@@ -22,6 +22,7 @@ pysnmp>=6.0                   # SNMP v2c/v3
 pywinrm>=0.4                  # WinRM cho HyperV
 
 # Utilities
+psutil>=5.9                   # CPU/RAM/Disk của server chạy app (topbar self-health)
 pyyaml>=6.0                   # đọc OID YAML profiles
 cryptography>=42              # mã hóa credentials trong DB
 requests>=2.31                # Telegram Bot API

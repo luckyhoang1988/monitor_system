@@ -72,6 +72,14 @@
     /* Chart */
     .chart-wrap { position: relative; height: 200px; }
 
+    /* Self-health widget (CPU/RAM/Disk của server) */
+    #self-health { font-size: .8rem; color: #475569; }
+    #self-health .sh-item { display: inline-flex; align-items: center; gap: .35rem; }
+    #self-health .sh-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+    #self-health .sh-dot.cpu  { background: #22c55e; }
+    #self-health .sh-dot.mem  { background: #3b82f6; }
+    #self-health .sh-dot.disk { background: #f59e0b; }
+
     /* Table */
     .table th { font-size: .8rem; text-transform: uppercase; color: #6b7280; font-weight: 600; }
     .table td { vertical-align: middle; font-size: .875rem; }
@@ -169,6 +177,11 @@
   <div id="topbar">
     <span class="text-muted small fw-semibold">{% block breadcrumb %}Monitor System{% endblock %}</span>
     <div class="d-flex align-items-center gap-3">
+      <span id="self-health" class="d-none d-md-flex align-items-center gap-3">
+        <span class="sh-item"><span class="sh-dot cpu"></span>CPU <b class="sh-cpu">—</b></span>
+        <span class="sh-item"><span class="sh-dot mem"></span>RAM <b class="sh-mem">—</b></span>
+        <span class="sh-item"><span class="sh-dot disk"></span>Disk <b class="sh-disk">—</b></span>
+      </span>
       <span class="text-muted small">
         <i class="bi bi-person-circle me-1"></i>{{ request.user.username }}
         {% if user_role == "admin" %}
@@ -203,6 +216,26 @@
 
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+<script>
+  (function () {
+    var el = document.getElementById('self-health');
+    if (!el) return;
+    var cpuEl = el.querySelector('.sh-cpu'), memEl = el.querySelector('.sh-mem'), diskEl = el.querySelector('.sh-disk');
+    function refresh() {
+      fetch("{% url 'dashboard:self_health' %}", { credentials: 'same-origin' })
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (d) {
+          if (!d) return;
+          cpuEl.textContent = d.cpu.toFixed(0) + '%';
+          memEl.textContent = d.mem.toFixed(0) + '%';
+          diskEl.textContent = d.disk.toFixed(0) + '%';
+        })
+        .catch(function () {});
+    }
+    refresh();
+    setInterval(refresh, 15000);
+  })();
+</script>
 {% block extra_js %}{% endblock %}
 </body>
 </html>
