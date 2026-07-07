@@ -54,6 +54,16 @@ Quy trình chuẩn (đã dùng để bắt bug 504 phiên đầu):
   Soi link giả: AP link `is_stale=False` có MAC **không** thuộc snapshot AC = giả (xem CLAUDE.md).
 - **Cache-first metrics (`METRICS_WRITE_MODE=cache`)**: khi bỏ ghi raw phải chuyển **cả 3 nguồn đọc** sang cache cùng lúc — alert engine, tính Mbps (prev counter), dashboard/chart raw-tier. Bỏ sót 1 → getter trả None (alert im lặng KHÔNG lỗi rõ) / Mbps=0 / chart trống. Redis lỗi phải **fallback ghi DB** (không mất alert). Sustained/latest getter phải giữ nguyên hysteresis + sentinel mem=0. Xem CLAUDE.md "Cache-first metrics". Bật/tắt qua cờ env, mặc định `db` → rollback nhanh.
 - **Không hard-code** IP/password/community. Type hints bắt buộc cho collector/adapter.
+- **WinRM `run_ps` (HyperV collector) giới hạn dòng lệnh ~8191 ký tự** (base64-encode UTF-16LE
+  script rồi truyền qua cmd.exe). `PS_SCRIPT` trong `apps/collectors/hyperv.py` thêm counter/logic mới
+  mà viết đầy đủ comment + tên biến dài (vd `Avg-List`, match theo `$cs.Path -like`) dễ vượt giới hạn
+  → lỗi **"The command line is too long"** (exit 1), mất luôn cả phần VM/CPU/mem cũ trong cùng poll.
+  Đã dính thật 2026-07-07 khi thêm 7 host-perf counter. Fix: nén script (bỏ comment, tên biến 1-2 ký
+  tự, dùng positional index `$c[0..7]` thay vì string-match `Path` — đã verify `Get-Counter` giữ
+  nguyên thứ tự request trên 2 host thật). Trước khi deploy thay đổi `PS_SCRIPT`, đo lại:
+  `python -c "from apps.collectors.hyperv import PS_SCRIPT; import base64; print(len(base64.b64encode(PS_SCRIPT.encode('utf-16-le'))))"`
+  — phải < ~8000 (có margin). Bản đầy đủ dễ đọc (comment, tên biến rõ nghĩa) lưu ở
+  `scratchpad/plan_hyperv.md` để tham khảo logic, KHÔNG paste thẳng vào `PS_SCRIPT`.
 
 ## 2. Deploy
 ```

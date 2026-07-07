@@ -159,7 +159,44 @@ celery -A config beat -l info
 ## Trạng thái
 Phase 1–7 **đã hoàn thành** (setup/models → collector SNMP/SSH + tests → Celery + HyperV WinRM → dashboard + Chart.js → alert Email/Telegram + Rule CRUD → Docker/prod deploy → RBAC 2 cấp).
 
+## HyperV Host Performance Counters (Phase 1 MVP, từ 2026-07-07)
+> 7 metric bổ sung ngoài CPU/mem cũ để phát hiện host quá tải sớm hơn: `cpu_hv_percent`,
+> `mem_available_mb`, `disk_read_iops`, `disk_write_iops`, `disk_read_latency_ms`,
+> `disk_write_latency_ms`, `net_mbps_total` — cột riêng `SystemHealth`/`Hourly`/`Daily` (nullable),
+> KHÔNG dùng JSON `extra`.
+
+- **Thu thập**: `Get-Counter -SampleInterval 2 -MaxSamples 5` (~10-12s/host, verify runtime 2 host thật)
+  trong **cùng phiên WinRM** với `Get-VM`/CPU/mem WMI cũ (không tách phiên thứ 2), cô lập lỗi bằng
+  try/catch riêng — hỏng Get-Counter không ảnh hưởng phần VM/CPU/mem đã chạy ổn định.
+- ⚠️ **WinRM/cmd.exe giới hạn độ dài dòng lệnh ~8191 ký tự** (`run_ps` base64-encode UTF-16LE rồi
+  truyền qua cmd.exe). Bản PS_SCRIPT đầy đủ comment + tên biến dài (`cpuUtil`, `Avg-List`, match theo
+  `$cs.Path -like '*...*'`) vượt giới hạn → lỗi **"The command line is too long"** (exit 1), toàn bộ
+  poll host đó fail (kể cả VM/CPU/mem cũ). Fix: nén script (không comment, tên biến 1-2 ký tự) +
+  **positional index thay vì string-match Path** — đã verify runtime trên cả 2 host thật rằng
+  `Get-Counter -Counter $paths` trả `CounterSamples` **đúng thứ tự request**, nên `$c[0..7]` là 8
+  counter scalar theo đúng thứ tự khai báo trong `$paths`, `$c[8..]` luôn là các instance
+  `Network Interface(*)` (do path đó xếp cuối mảng). ⚠️ Nếu sau này thêm counter mới vào `PS_SCRIPT`
+  của `hyperv.py`, phải đo lại kích thước base64 trước khi deploy (`len(base64.b64encode(PS_SCRIPT.encode('utf-16-le')))`
+  phải < ~8000 để có margin) — script đầy đủ có comment/tên biến rõ nghĩa xem `scratchpad/plan_hyperv.md`.
+- **Network throughput**: `\Network Interface(*)\Bytes Total/sec`, loại isatap/teredo/loopback/pseudo-
+  interface/qos/wfp/kernel-debug bằng regex. Verify runtime: NIC vật lý (kể cả bị teaming) đã có traffic
+  thật, **không cần fallback** `Hyper-V Virtual Switch(*)\Bytes/sec`.
+- **Aggregation trong PS trước khi trả JSON**: CPU/hypervisor%/mem committed%/disk IOPS/network Mbps →
+  **average** 5 mẫu; disk latency (read/write) → **max** 5 mẫu (spike-sensitive).
+- **Poll interval**: hạ `POLL_HYPERV_INTERVAL_SECS` **300s → 120s** sau khi đo timing thật (~10-12s
+  burst + ~4s WMI cũ ≈ 30s/tick cho 2 host, duty cycle ~25%, margin ~4x — tránh lặp "poll queue
+  snowball", xem memory `poll-queue-snowball-slow-device.md`). `poll_all_hyperv()` tự log cảnh báo nếu
+  1 tick vượt 50% interval.
+- **Alert engine**: không tái dùng `_sustained_cpu_mem` (hardcode field cpu/mem) — dict riêng
+  `_HOST_PERF_FIELD_MAP` (metric → short-key ring-buffer + field SystemHealth) + `_latest_host_perf`/
+  `_sustained_host_perf` dùng chung `_sustained_verdict`. 4 seed `AlertRule` (`device_type=hyperv`):
+  CPU hypervisor >80%, RAM available <2048MB, disk read/write latency >20ms (duration 5 phút).
+- ✅ Verify runtime 2026-07-07 (Hyperv-01/02 thật, cả local dev DB-mode lẫn prod cache-mode Redis):
+  dữ liệu non-null hợp lý cả 7 field, alert fire đúng trên spike latency thật (33ms/549ms), Telegram
+  gửi thành công trên prod.
+
 ### Thay đổi quan trọng
+- **2026-07-07**: Thêm 7 HyperV host performance counter (xem mục "HyperV Host Performance Counters" ở trên). Migration `0006_systemhealth_cpu_hv_percent_and_more`. `POLL_HYPERV_INTERVAL_SECS` 300→120. Commit `3bc46a4`.
 - **2026-07-02**: **SNMP walk chuyển sang getBulk** (pysnmp `bulk_cmd`, `max_repetitions=25`) thay vì getNext tuần tự. PFVN_Router giảm **40s → 8s** (−80%), CORE 13s→6s, ACL_Wlan 20s→3s. Wall-clock cả cycle 20 thiết bị: **56.5s → ~30s**. SNMPv1 fallback getNext. Commit `bab0aa8`.
 - **2026-07-02**: Nâng SNMP polling interval **60s → 90s** (trước getBulk, wall-clock ~56.5s/60s quá sát). Kèm theo: `ALERT_EVAL_INTERVAL_SECS` 60→90, `ALERT_GRACE_PERIOD_SECS` 90→135, `METRICS_SERIES_MAX_SAMPLES` 1500→1000. Sau getBulk wall-clock ~30s — có thể hạ lại 60s nếu cần.
 - **2026-07-02 (trước đó)**: Hạ SNMP polling interval **120s → 60s** (fleet ≤30 thiết bị, 4 Celery workers đủ throughput). Kèm theo: `ALERT_EVAL_INTERVAL_SECS` 120→60, `ALERT_GRACE_PERIOD_SECS` 120→90 (1.5× interval), `METRICS_SERIES_MAX_SAMPLES` 800→1500 (giữ 24h chart @60s). Các setting đọc từ env, override qua `.env` nếu cần rollback. Commit `0e4258c`.
