@@ -4,6 +4,9 @@ set -e
 echo "Running database migrations..."
 python manage.py migrate --noinput
 
+echo "Syncing celery beat expire_seconds..."
+python manage.py sync_beat_expires
+
 echo "Collecting static files..."
 python manage.py collectstatic --noinput --clear
 
