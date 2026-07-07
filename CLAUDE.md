@@ -247,9 +247,10 @@ Phase 1–7 **đã hoàn thành** (setup/models → collector SNMP/SSH + tests �
   (trước ~2.6x margin, nay ~1.15x) — nếu fleet HyperV tăng số host, cân nhắc tăng
   `POLL_HYPERV_INTERVAL_SECS` hoặc giảm `MaxSamples` volume script trước khi thêm host mới.
 - Migration `0007_systemhealth_avg_io_size_kb_and_more` (4 cột `SystemHealth` + 8 cột mỗi
-  Hourly/Daily + model `VolumeStats`).
+  Hourly/Daily + model `VolumeStats`). Commit `21da8e0`.
 
 ### Thay đổi quan trọng
+- **2026-07-07**: Thêm disk throughput/queue/io-size (4 metric) + per-volume disk stats mapped theo VM (model `VolumeStats`). PS_SCRIPT tách 2 script (host+volume) do vượt giới hạn base64 khi gộp chung. Fix bug helper function `R` trùng alias PowerShell `Invoke-History`. Migration `0007_systemhealth_avg_io_size_kb_and_more`. Commit `21da8e0`.
 - **2026-07-07**: Thêm 7 HyperV host performance counter (xem mục "HyperV Host Performance Counters" ở trên). Migration `0006_systemhealth_cpu_hv_percent_and_more`. `POLL_HYPERV_INTERVAL_SECS` 300→120. Commit `3bc46a4`.
 - **2026-07-02**: **SNMP walk chuyển sang getBulk** (pysnmp `bulk_cmd`, `max_repetitions=25`) thay vì getNext tuần tự. PFVN_Router giảm **40s → 8s** (−80%), CORE 13s→6s, ACL_Wlan 20s→3s. Wall-clock cả cycle 20 thiết bị: **56.5s → ~30s**. SNMPv1 fallback getNext. Commit `bab0aa8`.
 - **2026-07-02**: Nâng SNMP polling interval **60s → 90s** (trước getBulk, wall-clock ~56.5s/60s quá sát). Kèm theo: `ALERT_EVAL_INTERVAL_SECS` 60→90, `ALERT_GRACE_PERIOD_SECS` 90→135, `METRICS_SERIES_MAX_SAMPLES` 1500→1000. Sau getBulk wall-clock ~30s — có thể hạ lại 60s nếu cần.

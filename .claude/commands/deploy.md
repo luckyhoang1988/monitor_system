@@ -64,6 +64,21 @@ Quy trình chuẩn (đã dùng để bắt bug 504 phiên đầu):
   `python -c "from apps.collectors.hyperv import PS_SCRIPT; import base64; print(len(base64.b64encode(PS_SCRIPT.encode('utf-16-le'))))"`
   — phải < ~8000 (có margin). Bản đầy đủ dễ đọc (comment, tên biến rõ nghĩa) lưu ở
   `scratchpad/plan_hyperv.md` để tham khảo logic, KHÔNG paste thẳng vào `PS_SCRIPT`.
+  ⚠️ **Nếu vẫn vượt giới hạn dù đã nén hết mức** (dính thật 2026-07-07 khi thêm per-volume —
+  cardinality động N volume/host buộc match theo `Path`/`InstanceName` tốn ký tự, không nén nổi
+  bằng positional index): tách thành **2 script riêng, gọi `_run_ps()` 2 lần** (2 phiên WinRM/NTLM
+  handshake) thay vì cố nhét vào 1 script — chấp nhận thêm ~1 handshake/host, cô lập lỗi ở Python
+  (`try/except` quanh lệnh gọi script thứ 2) để script 1 không bị ảnh hưởng nếu script 2 lỗi. Đo lại
+  timing tổng sau khi tách (đã tăng ~32.8s→~52.5s cho 2 host khi thêm per-volume, vẫn dưới ngưỡng
+  cảnh báo 50%×`POLL_HYPERV_INTERVAL_SECS` nhưng margin mỏng đi nhiều — theo dõi log cảnh báo sau deploy).
+- **PowerShell helper function 1 ký tự có thể trùng alias built-in** (`r`=`Invoke-History`,
+  `h`=`Get-History`, v.v.) — PowerShell resolve alias TRƯỚC function cùng tên trong 1 số trường hợp,
+  khiến hàm tự định nghĩa `function R(...)` bị gọi nhầm thành `Invoke-History`, ném lỗi mơ hồ
+  **"Cannot convert 'System.Object[]' to the type 'System.String' required by parameter 'Id'"** —
+  bị `try/catch` nuốt im lặng nếu không có debug output riêng, rất khó dò (dính thật 2026-07-07 khi
+  nén `PS_SCRIPT`). Trước khi đặt tên helper function ngắn, tránh dùng 1 ký tự đơn lẻ hay kiểm tra
+  `Get-Alias <tên>` trên máy Windows thật; ưu tiên tên 2+ ký tự (`RA`, `RS`, `RX`) dù tốn thêm vài
+  chục ký tự base64.
 
 ## 2. Deploy
 ```
