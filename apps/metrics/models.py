@@ -37,11 +37,44 @@ class SystemHealth(models.Model):
     disk_read_latency_ms  = models.FloatField(null=True, blank=True)
     disk_write_latency_ms = models.FloatField(null=True, blank=True)
     net_mbps_total        = models.FloatField(null=True, blank=True)
+    # HyperV disk throughput/queue/io-size bổ sung (2026-07-07, cùng đợt per-volume).
+    disk_read_throughput_mbps  = models.FloatField(null=True, blank=True)
+    disk_write_throughput_mbps = models.FloatField(null=True, blank=True)
+    disk_queue_length          = models.FloatField(null=True, blank=True)
+    avg_io_size_kb             = models.FloatField(null=True, blank=True)
 
     class Meta:
         indexes = [models.Index(fields=["device", "-timestamp"])]
         ordering = ["-timestamp"]
         verbose_name = "System Health"
+
+
+class VolumeStats(models.Model):
+    """Time-series: disk perf per-volume/LUN của HyperV host + VM(s) đang lưu trên đó.
+
+    Mirror VMStats (cùng index shape [device, name, -timestamp]) để tái dùng pattern
+    DISTINCT ON "latest per group" (đã fix bug 504 Subquery trên VMStats trước đây).
+    Ghi mỗi poll ở DB-mode (số volume/host thấp, rẻ); cache-mode chỉ ghi khi alert fire
+    (xem apps.metrics.writer._save_volume_stats). KHÔNG rollup Hourly/Daily (MVP — bảng
+    hiện trạng để soi VM bị ảnh hưởng, không phải chart lịch sử; N volume động).
+    """
+    device          = models.ForeignKey(Device, on_delete=models.CASCADE, related_name="volume_stats")
+    timestamp       = models.DateTimeField(db_index=True)
+    volume_name     = models.CharField(max_length=100)
+    read_iops       = models.FloatField(null=True, blank=True)
+    write_iops      = models.FloatField(null=True, blank=True)
+    read_mbps       = models.FloatField(null=True, blank=True)
+    write_mbps      = models.FloatField(null=True, blank=True)
+    read_latency_ms = models.FloatField(null=True, blank=True)
+    write_latency_ms = models.FloatField(null=True, blank=True)
+    queue_length    = models.FloatField(null=True, blank=True)
+    avg_io_size_kb  = models.FloatField(null=True, blank=True)
+    vm_names        = models.JSONField(default=list, blank=True)
+
+    class Meta:
+        indexes = [models.Index(fields=["device", "volume_name", "-timestamp"])]
+        ordering = ["-timestamp"]
+        verbose_name = "Volume Stats"
 
 
 class VMStats(models.Model):
@@ -137,6 +170,15 @@ class SystemHealthHourly(models.Model):
     disk_write_latency_ms_max = models.FloatField(null=True, blank=True)
     net_mbps_total_avg     = models.FloatField(null=True, blank=True)
     net_mbps_total_max     = models.FloatField(null=True, blank=True)
+    # Disk throughput/queue/io-size bổ sung (2026-07-07, cùng đợt per-volume).
+    disk_read_throughput_mbps_avg  = models.FloatField(null=True, blank=True)
+    disk_read_throughput_mbps_max  = models.FloatField(null=True, blank=True)
+    disk_write_throughput_mbps_avg = models.FloatField(null=True, blank=True)
+    disk_write_throughput_mbps_max = models.FloatField(null=True, blank=True)
+    disk_queue_length_avg          = models.FloatField(null=True, blank=True)
+    disk_queue_length_max          = models.FloatField(null=True, blank=True)
+    avg_io_size_kb_avg             = models.FloatField(null=True, blank=True)
+    avg_io_size_kb_max             = models.FloatField(null=True, blank=True)
 
     class Meta:
         unique_together = ("device", "hour")
@@ -169,6 +211,15 @@ class SystemHealthDaily(models.Model):
     disk_write_latency_ms_max = models.FloatField(null=True, blank=True)
     net_mbps_total_avg     = models.FloatField(null=True, blank=True)
     net_mbps_total_max     = models.FloatField(null=True, blank=True)
+    # Disk throughput/queue/io-size bổ sung (2026-07-07, cùng đợt per-volume).
+    disk_read_throughput_mbps_avg  = models.FloatField(null=True, blank=True)
+    disk_read_throughput_mbps_max  = models.FloatField(null=True, blank=True)
+    disk_write_throughput_mbps_avg = models.FloatField(null=True, blank=True)
+    disk_write_throughput_mbps_max = models.FloatField(null=True, blank=True)
+    disk_queue_length_avg          = models.FloatField(null=True, blank=True)
+    disk_queue_length_max          = models.FloatField(null=True, blank=True)
+    avg_io_size_kb_avg             = models.FloatField(null=True, blank=True)
+    avg_io_size_kb_max             = models.FloatField(null=True, blank=True)
 
     class Meta:
         unique_together = ("device", "day")

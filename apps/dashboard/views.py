@@ -273,6 +273,10 @@ def _cache_latest_health(device):
         disk_read_latency_ms=snap.get("disk_read_latency_ms"),
         disk_write_latency_ms=snap.get("disk_write_latency_ms"),
         net_mbps_total=snap.get("net_mbps_total"),
+        disk_read_throughput_mbps=snap.get("disk_read_throughput_mbps"),
+        disk_write_throughput_mbps=snap.get("disk_write_throughput_mbps"),
+        disk_queue_length=snap.get("disk_queue_length"),
+        avg_io_size_kb=snap.get("avg_io_size_kb"),
     )
     if snap.get("ts"):
         sh.timestamp = metrics_cache.epoch_to_dt(snap["ts"])
@@ -332,7 +336,7 @@ def switch_detail(request, pk):
 
 @login_required
 def hyperv_detail(request, pk):
-    from apps.metrics.models import VMStats
+    from apps.metrics.models import VMStats, VolumeStats
 
     device = get_object_or_404(Device, pk=pk, device_type="hyperv")
     latest_health = _detail_health(device)
@@ -352,26 +356,47 @@ def hyperv_detail(request, pk):
             for v in (snap.get("vms") or [])
         ]
         latest_vms.sort(key=lambda v: v.vm_name)
+        # Volumes cũng từ snapshot "hiện tại" (không có history riêng ở cache-mode —
+        # DB chỉ ghi evidence khi alert fire, xem apps.alerts.engine._persist_incident_snapshot).
+        latest_volumes = [
+            VolumeStats(
+                device=device,
+                volume_name=str(v.get("name") or ""),
+                read_iops=v.get("read_iops"),
+                write_iops=v.get("write_iops"),
+                read_mbps=v.get("read_mbps"),
+                write_mbps=v.get("write_mbps"),
+                read_latency_ms=v.get("read_latency_ms"),
+                write_latency_ms=v.get("write_latency_ms"),
+                queue_length=v.get("queue_length"),
+                avg_io_size_kb=v.get("avg_io_size_kb"),
+                vm_names=v.get("vm_names") or [],
+            )
+            for v in (snap.get("volumes") or [])
+        ]
+        latest_volumes.sort(key=lambda v: v.volume_name)
     else:
-        # Lấy snapshot mới nhất mỗi VM bằng Postgres DISTINCT ON — dùng đúng index
-        # (device_id, vm_name, timestamp DESC) → 1 lần index-scan, ~0.04s.
+        # Lấy snapshot mới nhất mỗi VM/volume bằng Postgres DISTINCT ON — dùng đúng
+        # index (device_id, name, timestamp DESC) → 1 lần index-scan, ~0.04s.
         # (Trước đây dùng pk__in + correlated Subquery → Postgres bỏ index, quét
         #  lặp trên toàn bộ rows của device → ~240s → nginx 504 Gateway Time-out.)
         from django.db import connection
 
-        base_qs = VMStats.objects.filter(device=device)
-        if connection.vendor == "postgresql":
-            latest_vms = list(
-                base_qs.order_by("vm_name", "-timestamp").distinct("vm_name")
-            )
-        else:
-            # SQLite (dev): DISTINCT ON không hỗ trợ → dedup theo vm_name trong Python.
+        def _latest_per_name(qs, name_field: str):
+            if connection.vendor == "postgresql":
+                return list(qs.order_by(name_field, "-timestamp").distinct(name_field))
+            # SQLite (dev): DISTINCT ON không hỗ trợ → dedup trong Python.
             seen: set[str] = set()
-            latest_vms = []
-            for v in base_qs.order_by("vm_name", "-timestamp"):
-                if v.vm_name not in seen:
-                    seen.add(v.vm_name)
-                    latest_vms.append(v)
+            out = []
+            for row in qs.order_by(name_field, "-timestamp"):
+                key = getattr(row, name_field)
+                if key not in seen:
+                    seen.add(key)
+                    out.append(row)
+            return out
+
+        latest_vms = _latest_per_name(VMStats.objects.filter(device=device), "vm_name")
+        latest_volumes = _latest_per_name(VolumeStats.objects.filter(device=device), "volume_name")
 
     running_count = sum(1 for v in latest_vms if v.state == "Running")
     unhealthy_vms = [v for v in latest_vms if v.repl_health not in ("", "Normal", "NotConfigured")]
@@ -379,6 +404,7 @@ def hyperv_detail(request, pk):
     return render(request, "dashboard/hyperv_detail.html", {
         "device":         device,
         "vms":            latest_vms,
+        "volumes":        latest_volumes,
         "latest_health":  latest_health,
         "running_count":  running_count,
         "unhealthy_vms":  unhealthy_vms,

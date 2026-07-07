@@ -255,12 +255,16 @@ def _device_metrics_raw(device: Device, since, until) -> JsonResponse:
 _HOST_PERF_DB_FIELDS = (
     "cpu_hv_percent", "mem_available_mb", "disk_read_iops", "disk_write_iops",
     "disk_read_latency_ms", "disk_write_latency_ms", "net_mbps_total",
+    "disk_read_throughput_mbps", "disk_write_throughput_mbps",
+    "disk_queue_length", "avg_io_size_kb",
 )
 _HOST_PERF_CACHE_KEYS = {
     "cpu_hv_percent": "chv", "mem_available_mb": "mav",
     "disk_read_iops": "dri", "disk_write_iops": "dwi",
     "disk_read_latency_ms": "drl", "disk_write_latency_ms": "dwl",
     "net_mbps_total": "nmb",
+    "disk_read_throughput_mbps": "drt", "disk_write_throughput_mbps": "dwt",
+    "disk_queue_length": "dql", "avg_io_size_kb": "aio",
 }
 
 
@@ -288,6 +292,10 @@ _HOST_PERF_HOURLY_DAILY_FIELDS = (
     "disk_read_latency_ms_avg", "disk_read_latency_ms_max",
     "disk_write_latency_ms_avg", "disk_write_latency_ms_max",
     "net_mbps_total_avg", "net_mbps_total_max",
+    "disk_read_throughput_mbps_avg", "disk_read_throughput_mbps_max",
+    "disk_write_throughput_mbps_avg", "disk_write_throughput_mbps_max",
+    "disk_queue_length_avg", "disk_queue_length_max",
+    "avg_io_size_kb_avg", "avg_io_size_kb_max",
 )
 
 
@@ -310,6 +318,10 @@ def _attach_host_perf_agg(data: dict, rows: list[dict]) -> None:
         "disk_read_latency_ms":  "disk_read_latency_ms_max",
         "disk_write_latency_ms": "disk_write_latency_ms_max",
         "net_mbps_total":        "net_mbps_total_avg",
+        "disk_read_throughput_mbps":  "disk_read_throughput_mbps_avg",
+        "disk_write_throughput_mbps": "disk_write_throughput_mbps_avg",
+        "disk_queue_length":          "disk_queue_length_avg",
+        "avg_io_size_kb":             "avg_io_size_kb_avg",
     }
     for plain_field, src_field in _PLAIN_ALIAS.items():
         series = [r.get(src_field) for r in rows]

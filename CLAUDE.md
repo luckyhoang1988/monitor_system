@@ -195,6 +195,60 @@ Phase 1–7 **đã hoàn thành** (setup/models → collector SNMP/SSH + tests �
   dữ liệu non-null hợp lý cả 7 field, alert fire đúng trên spike latency thật (33ms/549ms), Telegram
   gửi thành công trên prod.
 
+### HyperV — Disk Throughput/Queue/IO-size + Per-Volume mapped theo VM (từ 2026-07-07, cùng ngày)
+> Vòng 2 cùng ngày: thêm 4 metric host-level (`disk_read_throughput_mbps`, `disk_write_throughput_mbps`,
+> `disk_queue_length`, `avg_io_size_kb` — cùng pipeline cột `SystemHealth`/Hourly/Daily như 7 metric
+> trên) **và** bảng **Per-Volume Disk Stats** mapped theo VM (model mới `VolumeStats`) để trả lời "volume
+> nào đang bị latency cao, VM nào bị ảnh hưởng".
+
+- **PS_SCRIPT phải TÁCH THÀNH 2 SCRIPT RIÊNG** (`PS_SCRIPT` host + `PS_SCRIPT_VOLUME`, `apps/collectors/hyperv.py`):
+  gộp chung vào 1 script đo được **15408 ký tự base64** (gần gấp đôi giới hạn ~8191) vì per-volume
+  cardinality động (N volume/host) buộc match theo `Path`/`InstanceName` (tốn ký tự) thay vì positional
+  index như khối scalar host cố định. `collect_raw()` gọi `_run_ps()` **2 lần** (2 phiên WinRM/NTLM
+  handshake riêng, cô lập lỗi ở Python — hỏng volume script không ảnh hưởng host script đã chạy được).
+  Đây là ngoại lệ so với nguyên tắc cũ "không tách phiên WinRM thứ 2" — chấp nhận đổi lấy việc tránh
+  vượt giới hạn hoàn toàn. Sau khi nén helper function (xem bẫy `R`/alias bên dưới) + rút gọn `$bd`
+  path-prefix: `PS_SCRIPT` (host) 7908/8191 base64, `PS_SCRIPT_VOLUME` 6672/8191.
+- ⚠️ **BẪY MỚI: helper function PowerShell tên `R` bị PowerShell resolve nhầm thành alias built-in
+  `r` (= `Invoke-History`, có tham số positional `-Id`)** — gọi `R $arr 1` không gọi function của mình
+  mà gọi `Invoke-History` với `$arr` bind vào `-Id`, ném lỗi runtime **"Cannot convert 'System.Object[]'
+  to the type 'System.String' required by parameter 'Id'. Specified method is not supported."**. Lỗi
+  này bị `try/catch` trong `PS_SCRIPT` nuốt im lặng → `$hp=$null` → toàn bộ 13 host-perf field trả
+  `None` mà KHÔNG có exception nào lộ ra ngoài (verify: bug xảy ra thật khi đổi từ if/else dài dòng
+  sang helper `function R(...)` để nén script, phát hiện bằng cách bisect từng biến thể qua
+  `manage.py shell` + thêm `$err=$_.Exception.Message` debug tạm). Fix: đổi tên hàm thành `RA` (không
+  trùng alias). **Quy tắc chung**: đặt tên helper function PowerShell 1 ký tự phải kiểm tra trước
+  bằng `Get-Alias <tên>` (alias built-in phổ biến 1 ký tự: `r`=Invoke-History, `h`=Get-History,
+  `d`=Get-ChildItem, `l`=Get-ChildItem, `p`=Set-Location trên 1 số profile...) — hàm dài ≥2 ký tự
+  không mô tả rõ (`RA`, `RS`, `RX`) an toàn hơn hàm 1 ký tự dù tốn thêm vài chục ký tự base64.
+- **Per-volume**: `Get-VM|Get-VMHardDiskDrive|Select VMName,Path` (2 host thật: toàn ổ cục bộ
+  `D:\...`/`E:\...`, KHÔNG CSV/cluster) map sang `LogicalDisk(*)` bằng cách rút drive-letter từ Path
+  (`^([A-Za-z]):\\`) rồi lowercase — **verify runtime**: `InstanceName` của `LogicalDisk(*)` trả về
+  **lowercase** (`"c:"`, `"d:"`, `"harddiskvolume1"`, `"_total"`), phải chuẩn hoá 2 bên khi join. Loại
+  instance `_total` (tổng host, trùng khối scalar). Instance `harddiskvolumeN` (system reserved/không
+  gắn VM) vẫn hiện trong bảng với `vm_names=[]`. `MaxSamples=3` (không phải 5 như host) — chấp nhận độ
+  mượt thấp hơn vì mục đích là "xác định VM bị ảnh hưởng" chứ không phải alert chính xác cao.
+- **Model mới `VolumeStats`** (mirror `VMStats`, index `[device,volume_name,-timestamp]` — tái dùng
+  pattern DISTINCT ON đã fix bug 504 cho VMStats). Ghi **mỗi poll** ở DB-mode (số volume/host thấp,
+  rẻ) — KHÁC `VMStats` (event-driven, chỉ ghi khi state đổi) vì đây là scalar liên tục cần lịch sử như
+  `SystemHealth`, không phải state cần dedup. Cache-mode: KHÔNG ghi DB mỗi poll (theo triết lý
+  cache-first) — chỉ snapshot "hiện tại" trong `m:latest:<id>["volumes"]` cho dashboard, DB chỉ ghi khi
+  alert fire (`_persist_incident_snapshot` mở rộng bulk_create `VolumeStats` cùng lúc với
+  `SystemHealth`). **KHÔNG rollup Hourly/Daily cho VolumeStats** (out of scope MVP — bảng hiện trạng
+  để soi nhanh, không phải chart lịch sử; N volume động khiến rollup phức tạp hơn nhiều).
+- **KHÔNG có alerting per-volume** trong lần này (out of scope, quyết định có chủ đích) — `AlertRule`
+  hiện là scalar-per-device, alert theo "volume tệ nhất/host" cần thiết kế riêng (đề xuất: alert theo
+  max latency across volumes + kèm tên VM trong message, không đổi kiến trúc `AlertRule`). Bảng
+  dashboard "Per-Volume Disk Stats" (`templates/dashboard/hyperv_detail.html`) đã đáp ứng đúng nhu cầu
+  gốc: nhìn thấy ngay volume nào latency cao + VM nào đang nằm trên đó.
+- ⚠️ **Timing tăng đáng kể do 2 WinRM session/host**: elapsed đo runtime 2 host thật tăng từ
+  ~32.8s → **~52.5s tổng cho 2 host** (2nd WinRM handshake + burst thêm ~15-20s/host). Vẫn dưới
+  ngưỡng cảnh báo 50%×120s=60s trong `poll_all_hyperv()` nhưng margin mỏng hơn nhiều so với trước
+  (trước ~2.6x margin, nay ~1.15x) — nếu fleet HyperV tăng số host, cân nhắc tăng
+  `POLL_HYPERV_INTERVAL_SECS` hoặc giảm `MaxSamples` volume script trước khi thêm host mới.
+- Migration `0007_systemhealth_avg_io_size_kb_and_more` (4 cột `SystemHealth` + 8 cột mỗi
+  Hourly/Daily + model `VolumeStats`).
+
 ### Thay đổi quan trọng
 - **2026-07-07**: Thêm 7 HyperV host performance counter (xem mục "HyperV Host Performance Counters" ở trên). Migration `0006_systemhealth_cpu_hv_percent_and_more`. `POLL_HYPERV_INTERVAL_SECS` 300→120. Commit `3bc46a4`.
 - **2026-07-02**: **SNMP walk chuyển sang getBulk** (pysnmp `bulk_cmd`, `max_repetitions=25`) thay vì getNext tuần tự. PFVN_Router giảm **40s → 8s** (−80%), CORE 13s→6s, ACL_Wlan 20s→3s. Wall-clock cả cycle 20 thiết bị: **56.5s → ~30s**. SNMPv1 fallback getNext. Commit `bab0aa8`.

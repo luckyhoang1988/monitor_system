@@ -7,7 +7,7 @@ from django.utils import timezone
 from apps.collectors.base import NormalizedData, InterfaceData
 from apps.devices.models import Device, Interface
 from . import cache as metrics_cache
-from .models import InterfaceStats, SystemHealth, VMStats, WifiApStats, WifiClientStats
+from .models import InterfaceStats, SystemHealth, VMStats, VolumeStats, WifiApStats, WifiClientStats
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +39,7 @@ TRUNK_DESC_KEYWORDS = (
 )
 
 
-_EXTRA_SKIP_KEYS = ("vms", "wifi_aps", "wifi_clients")
+_EXTRA_SKIP_KEYS = ("vms", "volumes", "wifi_aps", "wifi_clients")
 
 
 def save_metrics(device: Device, data: NormalizedData) -> None:
@@ -63,6 +63,8 @@ def _save_metrics_db(device: Device, data: NormalizedData) -> None:
             _save_interface_stats(device, data)
         if data.extra.get("vms"):
             _save_vm_stats(device, data)
+        if data.extra.get("volumes"):
+            _save_volume_stats(device, data)
         if data.extra.get("wifi_aps"):
             _save_wifi_ap_stats(device, data)
         if data.extra.get("wifi_clients"):
@@ -128,6 +130,7 @@ def _save_metrics_cache(device: Device, data: NormalizedData) -> bool:
         "extra": extra,
         "interfaces": snap_ifaces,
         "vms": data.extra.get("vms", []),
+        "volumes": data.extra.get("volumes", []),
         "wifi_aps": data.extra.get("wifi_aps", []),
         "wifi_clients": data.extra.get("wifi_clients", []),
         "cpu_hv_percent": data.cpu_hv_percent,
@@ -137,6 +140,10 @@ def _save_metrics_cache(device: Device, data: NormalizedData) -> bool:
         "disk_read_latency_ms": data.disk_read_latency_ms,
         "disk_write_latency_ms": data.disk_write_latency_ms,
         "net_mbps_total": data.net_mbps_total,
+        "disk_read_throughput_mbps": data.disk_read_throughput_mbps,
+        "disk_write_throughput_mbps": data.disk_write_throughput_mbps,
+        "disk_queue_length": data.disk_queue_length,
+        "avg_io_size_kb": data.avg_io_size_kb,
     }
 
     ok_latest = metrics_cache.set_latest(device.id, snapshot)
@@ -185,6 +192,10 @@ def _device_scalar_sample(data: NormalizedData, ts_epoch: float) -> dict:
         ("drl", data.disk_read_latency_ms),
         ("dwl", data.disk_write_latency_ms),
         ("nmb", data.net_mbps_total),
+        ("drt", data.disk_read_throughput_mbps),
+        ("dwt", data.disk_write_throughput_mbps),
+        ("dql", data.disk_queue_length),
+        ("aio", data.avg_io_size_kb),
     )
     for short_key, value in _HOST_PERF_SHORT_KEYS:
         if value is not None:
@@ -258,6 +269,10 @@ def _save_system_health(device: Device, data: NormalizedData) -> None:
         disk_read_latency_ms=data.disk_read_latency_ms,
         disk_write_latency_ms=data.disk_write_latency_ms,
         net_mbps_total=data.net_mbps_total,
+        disk_read_throughput_mbps=data.disk_read_throughput_mbps,
+        disk_write_throughput_mbps=data.disk_write_throughput_mbps,
+        disk_queue_length=data.disk_queue_length,
+        avg_io_size_kb=data.avg_io_size_kb,
     )
 
 
@@ -524,6 +539,31 @@ def _save_vm_stats(device: Device, data: NormalizedData) -> None:
                            device.name, vm.get("name"), exc)
     if vms_to_create:
         VMStats.objects.bulk_create(vms_to_create)
+
+
+def _save_volume_stats(device: Device, data: NormalizedData) -> None:
+    volumes_to_create = []
+    for vol in data.extra.get("volumes", []):
+        try:
+            volumes_to_create.append(VolumeStats(
+                device=device,
+                timestamp=data.timestamp,
+                volume_name=str(vol.get("name") or "")[:100],
+                read_iops=vol.get("read_iops"),
+                write_iops=vol.get("write_iops"),
+                read_mbps=vol.get("read_mbps"),
+                write_mbps=vol.get("write_mbps"),
+                read_latency_ms=vol.get("read_latency_ms"),
+                write_latency_ms=vol.get("write_latency_ms"),
+                queue_length=vol.get("queue_length"),
+                avg_io_size_kb=vol.get("avg_io_size_kb"),
+                vm_names=vol.get("vm_names") or [],
+            ))
+        except (TypeError, ValueError) as exc:
+            logger.warning("Device %s: skip volume %r — bad data: %s",
+                           device.name, vol.get("name"), exc)
+    if volumes_to_create:
+        VolumeStats.objects.bulk_create(volumes_to_create)
 
 
 def _save_wifi_ap_stats(device: Device, data: NormalizedData) -> None:

@@ -87,6 +87,10 @@ _HOST_PERF_ROLLUP_SPEC = [
     ("drl", "disk_read_latency_ms_avg", "disk_read_latency_ms_max", "max"),
     ("dwl", "disk_write_latency_ms_avg", "disk_write_latency_ms_max", "max"),
     ("nmb", "net_mbps_total_avg", "net_mbps_total_max", "max"),
+    ("drt", "disk_read_throughput_mbps_avg", "disk_read_throughput_mbps_max", "max"),
+    ("dwt", "disk_write_throughput_mbps_avg", "disk_write_throughput_mbps_max", "max"),
+    ("dql", "disk_queue_length_avg", "disk_queue_length_max", "max"),
+    ("aio", "avg_io_size_kb_avg", "avg_io_size_kb_max", "max"),
 ]
 _HOST_PERF_HOURLY_FIELDS = [f for _, avg_f, extra_f, _ in _HOST_PERF_ROLLUP_SPEC for f in (avg_f, extra_f)]
 
@@ -191,6 +195,14 @@ def rollup_system_health_hourly() -> int:
             disk_write_latency_ms_max=Max("disk_write_latency_ms"),
             net_mbps_total_avg=Avg("net_mbps_total"),
             net_mbps_total_max=Max("net_mbps_total"),
+            disk_read_throughput_mbps_avg=Avg("disk_read_throughput_mbps"),
+            disk_read_throughput_mbps_max=Max("disk_read_throughput_mbps"),
+            disk_write_throughput_mbps_avg=Avg("disk_write_throughput_mbps"),
+            disk_write_throughput_mbps_max=Max("disk_write_throughput_mbps"),
+            disk_queue_length_avg=Avg("disk_queue_length"),
+            disk_queue_length_max=Max("disk_queue_length"),
+            avg_io_size_kb_avg=Avg("avg_io_size_kb"),
+            avg_io_size_kb_max=Max("avg_io_size_kb"),
         )
     )
 
@@ -318,6 +330,14 @@ def rollup_system_health_daily() -> int:
             disk_write_latency_ms_max=Max("disk_write_latency_ms_max"),
             net_mbps_total_avg=Avg("net_mbps_total_avg"),
             net_mbps_total_max=Max("net_mbps_total_max"),
+            disk_read_throughput_mbps_avg=Avg("disk_read_throughput_mbps_avg"),
+            disk_read_throughput_mbps_max=Max("disk_read_throughput_mbps_max"),
+            disk_write_throughput_mbps_avg=Avg("disk_write_throughput_mbps_avg"),
+            disk_write_throughput_mbps_max=Max("disk_write_throughput_mbps_max"),
+            disk_queue_length_avg=Avg("disk_queue_length_avg"),
+            disk_queue_length_max=Max("disk_queue_length_max"),
+            avg_io_size_kb_avg=Avg("avg_io_size_kb_avg"),
+            avg_io_size_kb_max=Max("avg_io_size_kb_max"),
         )
     )
 

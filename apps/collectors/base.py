@@ -43,6 +43,11 @@ class NormalizedData:
     disk_read_latency_ms:  float | None = None
     disk_write_latency_ms: float | None = None
     net_mbps_total:        float | None = None
+    # HyperV disk throughput/queue/io-size bổ sung (2026-07-07, cùng đợt per-volume).
+    disk_read_throughput_mbps:  float | None = None
+    disk_write_throughput_mbps: float | None = None
+    disk_queue_length:          float | None = None
+    avg_io_size_kb:              float | None = None
 
 
 class BaseCollector(ABC):

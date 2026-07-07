@@ -62,6 +62,10 @@ class AlertRule(models.Model):
             "disk_read_latency_ms": "Disk Read Latency (ms)",
             "disk_write_latency_ms": "Disk Write Latency (ms)",
             "net_mbps_total": "Network Throughput (Mbps)",
+            "disk_read_throughput_mbps": "Disk Read Throughput (MB/s)",
+            "disk_write_throughput_mbps": "Disk Write Throughput (MB/s)",
+            "disk_queue_length": "Disk Queue Length",
+            "avg_io_size_kb": "Avg I/O Size (KB/IO)",
         }
         return labels.get(self.metric, self.metric)
 
@@ -91,6 +95,12 @@ class AlertRule(models.Model):
             return f"{t:.1f} ms"
         if m == "net_mbps_total":
             return f"{t:.1f} Mbps"
+        if m in ("disk_read_throughput_mbps", "disk_write_throughput_mbps"):
+            return f"{t:.1f} MB/s"
+        if m == "disk_queue_length":
+            return f"{t:.2f}"
+        if m == "avg_io_size_kb":
+            return f"{t:.1f} KB"
         return f"{t:.2f}"
 
 

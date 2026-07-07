@@ -122,9 +122,17 @@ class TestHyperVCollectorCollectRaw:
         mock_session = _make_winrm_mock(mocker, _make_raw())
         collector.collect_raw()
         import winrm as _winrm
-        _winrm.Session.assert_called_once()
-        call_kwargs = _winrm.Session.call_args
-        assert call_kwargs.kwargs.get("transport") == "ntlm" or "ntlm" in str(call_kwargs)
+        # collect_raw() gọi _run_ps 2 lần (PS_SCRIPT host + PS_SCRIPT_VOLUME riêng —
+        # tách WinRM call vì gộp chung vượt giới hạn base64, xem hyperv.py comment).
+        assert _winrm.Session.call_count == 2
+        for call in _winrm.Session.call_args_list:
+            assert call.kwargs.get("transport") == "ntlm"
+
+    def test_collect_raw_calls_run_ps_for_both_scripts(self, collector, mocker):
+        """collect_raw() phải gọi run_ps 2 lần: host script + volume script riêng."""
+        mock_session = _make_winrm_mock(mocker, _make_raw())
+        collector.collect_raw()
+        assert mock_session.run_ps.call_count == 2
 
     def test_collect_raw_returns_parsed_dict(self, collector, mocker):
         raw = _make_raw(cpu=80.0, mem=55.0, boot_time=_boot_time_str(1))
@@ -154,17 +162,27 @@ class TestHyperVCollectorCollectRaw:
         mock_result.std_out = json.dumps(_make_raw()).encode()
         mock_result.std_err = b""
 
+        vol_result = mocker.MagicMock()
+        vol_result.status_code = 0
+        vol_result.std_out = json.dumps({"volumes": None}).encode()
+        vol_result.std_err = b""
+
         session_5985 = mocker.MagicMock()
         session_5985.run_ps.side_effect = req_exc.ConnectTimeout("5985 timeout")
         session_5986 = mocker.MagicMock()
         session_5986.run_ps.return_value = mock_result
+        # Volume script (2nd _run_ps call riêng) — thành công ngay ở target đầu.
+        session_vol = mocker.MagicMock()
+        session_vol.run_ps.return_value = vol_result
 
-        session_factory = mocker.patch("winrm.Session", side_effect=[session_5985, session_5986])
+        session_factory = mocker.patch(
+            "winrm.Session", side_effect=[session_5985, session_5986, session_vol]
+        )
 
         result = collector.collect_raw()
 
         assert result["host_cpu_percent"] == 50.0
-        assert session_factory.call_count == 2
+        assert session_factory.call_count == 3
         first_target = session_factory.call_args_list[0].kwargs["target"]
         second_target = session_factory.call_args_list[1].kwargs["target"]
         assert first_target.startswith(f"http://{collector.device.ip_address}:5985")

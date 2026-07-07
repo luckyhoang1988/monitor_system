@@ -147,6 +147,16 @@
       </div>
     </div>
   </div>
+  <div class="col-12">
+    <div class="card">
+      <div class="card-header bg-white py-2">
+        <span class="fw-semibold"><i class="bi bi-speedometer2 me-2 text-primary"></i>Disk Throughput & Queue</span>
+      </div>
+      <div class="card-body">
+        <div class="chart-wrap"><canvas id="throughputChart"></canvas></div>
+      </div>
+    </div>
+  </div>
 </div>
 
 <!-- ===== Host Online/Offline Timeline ===== -->
@@ -230,6 +240,69 @@
     {% endif %}
   </div>
 </div>
+
+<!-- ===== Per-Volume Disk Stats ===== -->
+<div class="card mt-4">
+  <div class="card-header bg-white py-2">
+    <span class="fw-semibold"><i class="bi bi-hdd me-2 text-warning"></i>Per-Volume Disk Stats ({{ volumes|length }})</span>
+  </div>
+  <div class="card-body p-0">
+    {% if volumes %}
+    <div class="table-responsive">
+    <table class="table table-hover mb-0">
+      <thead class="table-light">
+        <tr>
+          <th class="ps-3">Volume</th>
+          <th class="text-end">Read IOPS</th>
+          <th class="text-end">Write IOPS</th>
+          <th class="text-end">Read MB/s</th>
+          <th class="text-end">Write MB/s</th>
+          <th class="text-end">Read Latency</th>
+          <th class="text-end">Write Latency</th>
+          <th class="text-end">Queue Length</th>
+          <th class="text-end">Avg I/O (KB)</th>
+          <th class="pe-3">VM(s)</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for vol in volumes %}
+        <tr>
+          <td class="ps-3 fw-medium font-monospace">{{ vol.volume_name }}</td>
+          <td class="text-end font-monospace">{{ vol.read_iops|default_if_none:"—"|floatformat:1 }}</td>
+          <td class="text-end font-monospace">{{ vol.write_iops|default_if_none:"—"|floatformat:1 }}</td>
+          <td class="text-end font-monospace">{{ vol.read_mbps|default_if_none:"—"|floatformat:2 }}</td>
+          <td class="text-end font-monospace">{{ vol.write_mbps|default_if_none:"—"|floatformat:2 }}</td>
+          <td class="text-end font-monospace">
+            <span class="{% if vol.read_latency_ms > 20 %}text-danger fw-bold{% elif vol.read_latency_ms > 10 %}text-warning{% endif %}">
+              {{ vol.read_latency_ms|default_if_none:"—"|floatformat:1 }}
+            </span>
+          </td>
+          <td class="text-end font-monospace">
+            <span class="{% if vol.write_latency_ms > 20 %}text-danger fw-bold{% elif vol.write_latency_ms > 10 %}text-warning{% endif %}">
+              {{ vol.write_latency_ms|default_if_none:"—"|floatformat:1 }}
+            </span>
+          </td>
+          <td class="text-end font-monospace">{{ vol.queue_length|default_if_none:"—"|floatformat:2 }}</td>
+          <td class="text-end font-monospace">{{ vol.avg_io_size_kb|default_if_none:"—"|floatformat:1 }}</td>
+          <td class="pe-3">
+            {% for vm_name in vol.vm_names %}
+              <span class="badge bg-secondary rounded-pill px-2 mb-1">{{ vm_name }}</span>
+            {% empty %}
+              <span class="text-muted small">—</span>
+            {% endfor %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    </div>
+    {% else %}
+      <div class="text-center text-muted py-4">
+        <i class="bi bi-hdd fs-2 d-block mb-2"></i>Chưa có dữ liệu volume. Chạy poll để thu thập.
+      </div>
+    {% endif %}
+  </div>
+</div>
 {% endblock %}
 
 {% block extra_js %}
@@ -309,6 +382,32 @@ const netChart = new Chart(netCtx, {
   },
 });
 
+// Disk Throughput & Queue chart (MB/s trục trái, Queue Length + Avg IO Size trục phải)
+const throughputCtx = document.getElementById("throughputChart").getContext("2d");
+const throughputChart = new Chart(throughputCtx, {
+  type: "line",
+  data: { labels: [], datasets: [
+    { label: "Read (MB/s)", data: [], borderColor: "#3b82f6", backgroundColor: "rgba(59,130,246,.1)",
+      tension: .3, fill: false, pointRadius: 2 },
+    { label: "Write (MB/s)", data: [], borderColor: "#10b981", backgroundColor: "rgba(16,185,129,.1)",
+      tension: .3, fill: false, pointRadius: 2 },
+    { label: "Queue Length", data: [], borderColor: "#ef4444", backgroundColor: "rgba(239,68,68,.1)",
+      tension: .3, fill: false, pointRadius: 2, yAxisID: "y1", borderDash: [4, 3] },
+    { label: "Avg I/O Size (KB)", data: [], borderColor: "#8b5cf6", backgroundColor: "rgba(139,92,246,.1)",
+      tension: .3, fill: false, pointRadius: 2, yAxisID: "y1", borderDash: [4, 3] },
+  ]},
+  options: {
+    responsive: true, maintainAspectRatio: false,
+    plugins: { legend: { position: "top", labels: { boxWidth: 12, font: { size: 11 } } } },
+    scales: {
+      x: { ticks: { maxTicksLimit: 8, font: { size: 10 } }, grid: { display: false } },
+      y: { beginAtZero: true, title: { display: true, text: "MB/s", font: { size: 10 } }, ticks: { font: { size: 10 } } },
+      y1: { position: "right", beginAtZero: true, grid: { display: false },
+            title: { display: true, text: "Queue / KB", font: { size: 10 } }, ticks: { font: { size: 10 } } },
+    },
+  },
+});
+
 // Online/Offline status timeline chart
 const statusCtx = document.getElementById("statusChart").getContext("2d");
 const statusChart = new Chart(statusCtx, {
@@ -355,6 +454,13 @@ function loadHostMetrics() {
       netChart.data.labels = d.labels;
       netChart.data.datasets[0].data = d.net_mbps_total || [];
       netChart.update();
+
+      throughputChart.data.labels = d.labels;
+      throughputChart.data.datasets[0].data = d.disk_read_throughput_mbps || [];
+      throughputChart.data.datasets[1].data = d.disk_write_throughput_mbps || [];
+      throughputChart.data.datasets[2].data = d.disk_queue_length || [];
+      throughputChart.data.datasets[3].data = d.avg_io_size_kb || [];
+      throughputChart.update();
     })
     .catch(() => {});
 }

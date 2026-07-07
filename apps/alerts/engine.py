@@ -51,6 +51,10 @@ _HOST_PERF_FIELD_MAP = {
     "disk_read_latency_ms":  ("drl", "disk_read_latency_ms"),
     "disk_write_latency_ms": ("dwl", "disk_write_latency_ms"),
     "net_mbps_total":        ("nmb", "net_mbps_total"),
+    "disk_read_throughput_mbps":  ("drt", "disk_read_throughput_mbps"),
+    "disk_write_throughput_mbps": ("dwt", "disk_write_throughput_mbps"),
+    "disk_queue_length":          ("dql", "disk_queue_length"),
+    "avg_io_size_kb":             ("aio", "avg_io_size_kb"),
 }
 
 for _metric in _HOST_PERF_FIELD_MAP:
@@ -829,26 +833,50 @@ def _persist_incident_snapshot(device: Device) -> None:
     snap = metrics_cache.get_latest(device.id)
     if not snap or snap.get("ts") is None:
         return
-    from apps.metrics.models import SystemHealth
+    from apps.metrics.models import SystemHealth, VolumeStats
     try:
         ts = metrics_cache.epoch_to_dt(snap["ts"])
-        if SystemHealth.objects.filter(device=device, timestamp=ts).exists():
-            return
-        SystemHealth.objects.create(
-            device=device,
-            timestamp=ts,
-            cpu_percent=snap.get("cpu") or 0,
-            mem_percent=snap.get("mem") or 0,
-            uptime_secs=snap.get("uptime"),
-            extra=snap.get("extra") or {},
-            cpu_hv_percent=snap.get("cpu_hv_percent"),
-            mem_available_mb=snap.get("mem_available_mb"),
-            disk_read_iops=snap.get("disk_read_iops"),
-            disk_write_iops=snap.get("disk_write_iops"),
-            disk_read_latency_ms=snap.get("disk_read_latency_ms"),
-            disk_write_latency_ms=snap.get("disk_write_latency_ms"),
-            net_mbps_total=snap.get("net_mbps_total"),
-        )
+        if not SystemHealth.objects.filter(device=device, timestamp=ts).exists():
+            SystemHealth.objects.create(
+                device=device,
+                timestamp=ts,
+                cpu_percent=snap.get("cpu") or 0,
+                mem_percent=snap.get("mem") or 0,
+                uptime_secs=snap.get("uptime"),
+                extra=snap.get("extra") or {},
+                cpu_hv_percent=snap.get("cpu_hv_percent"),
+                mem_available_mb=snap.get("mem_available_mb"),
+                disk_read_iops=snap.get("disk_read_iops"),
+                disk_write_iops=snap.get("disk_write_iops"),
+                disk_read_latency_ms=snap.get("disk_read_latency_ms"),
+                disk_write_latency_ms=snap.get("disk_write_latency_ms"),
+                net_mbps_total=snap.get("net_mbps_total"),
+                disk_read_throughput_mbps=snap.get("disk_read_throughput_mbps"),
+                disk_write_throughput_mbps=snap.get("disk_write_throughput_mbps"),
+                disk_queue_length=snap.get("disk_queue_length"),
+                avg_io_size_kb=snap.get("avg_io_size_kb"),
+            )
+        # Per-volume evidence (nếu host có volumes) — bằng chứng cho "VM nào bị ảnh hưởng"
+        # tại đúng thời điểm alert fire. Bỏ qua nếu đã có row cùng timestamp.
+        volumes = snap.get("volumes") or []
+        if volumes and not VolumeStats.objects.filter(device=device, timestamp=ts).exists():
+            VolumeStats.objects.bulk_create([
+                VolumeStats(
+                    device=device,
+                    timestamp=ts,
+                    volume_name=str(vol.get("name") or "")[:100],
+                    read_iops=vol.get("read_iops"),
+                    write_iops=vol.get("write_iops"),
+                    read_mbps=vol.get("read_mbps"),
+                    write_mbps=vol.get("write_mbps"),
+                    read_latency_ms=vol.get("read_latency_ms"),
+                    write_latency_ms=vol.get("write_latency_ms"),
+                    queue_length=vol.get("queue_length"),
+                    avg_io_size_kb=vol.get("avg_io_size_kb"),
+                    vm_names=vol.get("vm_names") or [],
+                )
+                for vol in volumes
+            ])
     except Exception as exc:
         logger.warning("persist incident snapshot (dev=%s) failed: %s", device.name, exc)
 
@@ -879,6 +907,12 @@ def _fire_alert(device: Device, rule: AlertRule, value: float) -> None:
             return f"{v:.1f} ms"
         if metric == "net_mbps_total":
             return f"{v:.1f} Mbps"
+        if metric in ("disk_read_throughput_mbps", "disk_write_throughput_mbps"):
+            return f"{v:.1f} MB/s"
+        if metric == "disk_queue_length":
+            return f"{v:.2f}"
+        if metric == "avg_io_size_kb":
+            return f"{v:.1f} KB"
         return f"{v:.2f}"
 
     metric_value_str = _fmt_metric(rule.metric, float(value))
