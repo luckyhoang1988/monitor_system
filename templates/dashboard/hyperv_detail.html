@@ -125,6 +125,30 @@
   </div>
 </div>
 
+<!-- ===== HyperV Host Performance Counters (Phase 1 MVP) ===== -->
+<div class="row g-3 mb-4">
+  <div class="col-xl-6">
+    <div class="card">
+      <div class="card-header bg-white py-2">
+        <span class="fw-semibold"><i class="bi bi-hdd-stack me-2 text-warning"></i>Disk IOPS & Latency</span>
+      </div>
+      <div class="card-body">
+        <div class="chart-wrap"><canvas id="diskChart"></canvas></div>
+      </div>
+    </div>
+  </div>
+  <div class="col-xl-6">
+    <div class="card">
+      <div class="card-header bg-white py-2">
+        <span class="fw-semibold"><i class="bi bi-ethernet me-2 text-info"></i>Network Throughput (Mbps)</span>
+      </div>
+      <div class="card-body">
+        <div class="chart-wrap"><canvas id="netChart"></canvas></div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- ===== Host Online/Offline Timeline ===== -->
 <div class="row g-3 mb-4">
   <div class="col-12">
@@ -216,7 +240,7 @@ const DEVICE_ID  = {{ device.pk|unlocalize }};
 const API_METRICS = `/api/metrics/${DEVICE_ID}/`;
 const API_STATUS = `/api/metrics/${DEVICE_ID}/status/`;
 
-// Host CPU/RAM chart
+// Host CPU/RAM chart (+ CPU Hypervisor % cùng trục %, RAM available MB trục phụ y1)
 const hostCtx = document.getElementById("hostChart").getContext("2d");
 const hostChart = new Chart(hostCtx, {
   type: "line",
@@ -225,6 +249,10 @@ const hostChart = new Chart(hostCtx, {
       tension: .3, fill: true, pointRadius: 2 },
     { label: "RAM %", data: [], borderColor: "#10b981", backgroundColor: "rgba(16,185,129,.1)",
       tension: .3, fill: true, pointRadius: 2 },
+    { label: "CPU Hypervisor %", data: [], borderColor: "#f59e0b", backgroundColor: "rgba(245,158,11,.1)",
+      tension: .3, fill: false, pointRadius: 2, borderDash: [4, 3] },
+    { label: "RAM Available (MB)", data: [], borderColor: "#8b5cf6", backgroundColor: "rgba(139,92,246,.1)",
+      tension: .3, fill: false, pointRadius: 2, yAxisID: "y1" },
   ]},
   options: {
     responsive: true, maintainAspectRatio: false,
@@ -232,6 +260,51 @@ const hostChart = new Chart(hostCtx, {
     scales: {
       x: { ticks: { maxTicksLimit: 8, font: { size: 10 } }, grid: { display: false } },
       y: { beginAtZero: true, max: 100, ticks: { font: { size: 10 } } },
+      y1: { position: "right", beginAtZero: true, grid: { display: false }, ticks: { font: { size: 10 } } },
+    },
+  },
+});
+
+// Disk IOPS & Latency chart (IOPS trục trái, latency ms trục phải)
+const diskCtx = document.getElementById("diskChart").getContext("2d");
+const diskChart = new Chart(diskCtx, {
+  type: "line",
+  data: { labels: [], datasets: [
+    { label: "Read IOPS", data: [], borderColor: "#3b82f6", backgroundColor: "rgba(59,130,246,.1)",
+      tension: .3, fill: false, pointRadius: 2 },
+    { label: "Write IOPS", data: [], borderColor: "#10b981", backgroundColor: "rgba(16,185,129,.1)",
+      tension: .3, fill: false, pointRadius: 2 },
+    { label: "Read Latency (ms)", data: [], borderColor: "#ef4444", backgroundColor: "rgba(239,68,68,.1)",
+      tension: .3, fill: false, pointRadius: 2, yAxisID: "y1", borderDash: [4, 3] },
+    { label: "Write Latency (ms)", data: [], borderColor: "#f59e0b", backgroundColor: "rgba(245,158,11,.1)",
+      tension: .3, fill: false, pointRadius: 2, yAxisID: "y1", borderDash: [4, 3] },
+  ]},
+  options: {
+    responsive: true, maintainAspectRatio: false,
+    plugins: { legend: { position: "top", labels: { boxWidth: 12, font: { size: 11 } } } },
+    scales: {
+      x: { ticks: { maxTicksLimit: 8, font: { size: 10 } }, grid: { display: false } },
+      y: { beginAtZero: true, title: { display: true, text: "IOPS", font: { size: 10 } }, ticks: { font: { size: 10 } } },
+      y1: { position: "right", beginAtZero: true, grid: { display: false },
+            title: { display: true, text: "ms", font: { size: 10 } }, ticks: { font: { size: 10 } } },
+    },
+  },
+});
+
+// Network Throughput chart
+const netCtx = document.getElementById("netChart").getContext("2d");
+const netChart = new Chart(netCtx, {
+  type: "line",
+  data: { labels: [], datasets: [
+    { label: "Network (Mbps)", data: [], borderColor: "#06b6d4", backgroundColor: "rgba(6,182,212,.15)",
+      tension: .3, fill: true, pointRadius: 2 },
+  ]},
+  options: {
+    responsive: true, maintainAspectRatio: false,
+    plugins: { legend: { position: "top", labels: { boxWidth: 12, font: { size: 11 } } } },
+    scales: {
+      x: { ticks: { maxTicksLimit: 8, font: { size: 10 } }, grid: { display: false } },
+      y: { beginAtZero: true, ticks: { font: { size: 10 } } },
     },
   },
 });
@@ -268,7 +341,20 @@ function loadHostMetrics() {
       hostChart.data.labels = d.labels;
       hostChart.data.datasets[0].data = d.cpu_percent;
       hostChart.data.datasets[1].data = d.mem_percent;
+      hostChart.data.datasets[2].data = d.cpu_hv_percent || [];
+      hostChart.data.datasets[3].data = d.mem_available_mb || [];
       hostChart.update();
+
+      diskChart.data.labels = d.labels;
+      diskChart.data.datasets[0].data = d.disk_read_iops || [];
+      diskChart.data.datasets[1].data = d.disk_write_iops || [];
+      diskChart.data.datasets[2].data = d.disk_read_latency_ms || [];
+      diskChart.data.datasets[3].data = d.disk_write_latency_ms || [];
+      diskChart.update();
+
+      netChart.data.labels = d.labels;
+      netChart.data.datasets[0].data = d.net_mbps_total || [];
+      netChart.update();
     })
     .catch(() => {});
 }

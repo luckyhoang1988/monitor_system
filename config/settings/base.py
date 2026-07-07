@@ -125,7 +125,10 @@ from celery.schedules import crontab  # noqa: E402
 # Chu kỳ poll (giây) — override qua .env nếu cần. Mọi mục 90s trừ HyperV.
 POLL_NETWORK_INTERVAL_SECS = env.int("POLL_NETWORK_INTERVAL_SECS", default=90)
 POLL_PING_INTERVAL_SECS    = env.int("POLL_PING_INTERVAL_SECS", default=90)
-POLL_HYPERV_INTERVAL_SECS  = env.int("POLL_HYPERV_INTERVAL_SECS", default=300)
+# 2026-07-07: hạ 300s→120s sau khi đo timing thật (Hyperv-01/02): burst Get-Counter
+# ~10-12s/host + WMI cũ ~4s ⇒ ~30s/tick cho 2 host, duty cycle ~25% ở 120s (margin ~4x,
+# tránh lặp sự cố "poll queue snowball" — xem memory poll-queue-snowball-slow-device.md).
+POLL_HYPERV_INTERVAL_SECS  = env.int("POLL_HYPERV_INTERVAL_SECS", default=120)
 ALERT_EVAL_INTERVAL_SECS   = env.int("ALERT_EVAL_INTERVAL_SECS", default=90)
 TOPOLOGY_DISCOVER_INTERVAL_SECS = env.int("TOPOLOGY_DISCOVER_INTERVAL_SECS", default=1800)
 

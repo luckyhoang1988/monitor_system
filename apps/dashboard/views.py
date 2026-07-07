@@ -266,6 +266,13 @@ def _cache_latest_health(device):
         mem_percent=snap.get("mem") or 0,
         uptime_secs=snap.get("uptime"),
         extra=snap.get("extra") or {},
+        cpu_hv_percent=snap.get("cpu_hv_percent"),
+        mem_available_mb=snap.get("mem_available_mb"),
+        disk_read_iops=snap.get("disk_read_iops"),
+        disk_write_iops=snap.get("disk_write_iops"),
+        disk_read_latency_ms=snap.get("disk_read_latency_ms"),
+        disk_write_latency_ms=snap.get("disk_write_latency_ms"),
+        net_mbps_total=snap.get("net_mbps_total"),
     )
     if snap.get("ts"):
         sh.timestamp = metrics_cache.epoch_to_dt(snap["ts"])

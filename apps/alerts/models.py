@@ -55,6 +55,13 @@ class AlertRule(models.Model):
             "device_online": "Trạng thái online (0=OFFLINE, 1=ONLINE)",
             "wifi_client_count": "Số client WiFi (WLAN controller)",
             "wifi_ap_offline": "Số AP offline (WLAN controller)",
+            "cpu_hv_percent": "CPU Hypervisor (%)",
+            "mem_available_mb": "RAM available (MB)",
+            "disk_read_iops": "Disk Read IOPS",
+            "disk_write_iops": "Disk Write IOPS",
+            "disk_read_latency_ms": "Disk Read Latency (ms)",
+            "disk_write_latency_ms": "Disk Write Latency (ms)",
+            "net_mbps_total": "Network Throughput (Mbps)",
         }
         return labels.get(self.metric, self.metric)
 
@@ -74,6 +81,16 @@ class AlertRule(models.Model):
             return "DOWN" if t == 0 else "UP"
         if m == "device_online":
             return "OFFLINE" if t == 0 else "ONLINE"
+        if m == "cpu_hv_percent":
+            return f"{t:.1f}%"
+        if m == "mem_available_mb":
+            return f"{t:.0f} MB"
+        if m in ("disk_read_iops", "disk_write_iops"):
+            return f"{t:.0f} IOPS"
+        if m in ("disk_read_latency_ms", "disk_write_latency_ms"):
+            return f"{t:.1f} ms"
+        if m == "net_mbps_total":
+            return f"{t:.1f} Mbps"
         return f"{t:.2f}"
 
 

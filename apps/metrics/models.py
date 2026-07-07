@@ -28,6 +28,15 @@ class SystemHealth(models.Model):
     mem_percent = models.FloatField()
     uptime_secs = models.BigIntegerField(null=True, blank=True)
     extra       = models.JSONField(default=dict, blank=True)  # vendor-specific: session_count, v.v.
+    # HyperV host performance counters (Phase 1 MVP, apps.collectors.hyperv Get-Counter burst).
+    # null = collector không hỗ trợ hoặc Get-Counter lỗi cho poll đó.
+    cpu_hv_percent        = models.FloatField(null=True, blank=True)
+    mem_available_mb      = models.FloatField(null=True, blank=True)
+    disk_read_iops        = models.FloatField(null=True, blank=True)
+    disk_write_iops       = models.FloatField(null=True, blank=True)
+    disk_read_latency_ms  = models.FloatField(null=True, blank=True)
+    disk_write_latency_ms = models.FloatField(null=True, blank=True)
+    net_mbps_total        = models.FloatField(null=True, blank=True)
 
     class Meta:
         indexes = [models.Index(fields=["device", "-timestamp"])]
@@ -113,6 +122,21 @@ class SystemHealthHourly(models.Model):
     mem_avg      = models.FloatField()
     mem_max      = models.FloatField()
     sample_count = models.IntegerField(default=0, verbose_name="Số mẫu raw")
+    # HyperV host performance counters (Phase 1 MVP) — null nếu giờ đó không có mẫu nào.
+    cpu_hv_avg             = models.FloatField(null=True, blank=True)
+    cpu_hv_max             = models.FloatField(null=True, blank=True)
+    mem_available_mb_avg   = models.FloatField(null=True, blank=True)
+    mem_available_mb_min   = models.FloatField(null=True, blank=True)
+    disk_read_iops_avg     = models.FloatField(null=True, blank=True)
+    disk_read_iops_max     = models.FloatField(null=True, blank=True)
+    disk_write_iops_avg    = models.FloatField(null=True, blank=True)
+    disk_write_iops_max    = models.FloatField(null=True, blank=True)
+    disk_read_latency_ms_avg  = models.FloatField(null=True, blank=True)
+    disk_read_latency_ms_max  = models.FloatField(null=True, blank=True)
+    disk_write_latency_ms_avg = models.FloatField(null=True, blank=True)
+    disk_write_latency_ms_max = models.FloatField(null=True, blank=True)
+    net_mbps_total_avg     = models.FloatField(null=True, blank=True)
+    net_mbps_total_max     = models.FloatField(null=True, blank=True)
 
     class Meta:
         unique_together = ("device", "hour")
@@ -130,6 +154,21 @@ class SystemHealthDaily(models.Model):
     mem_avg      = models.FloatField()
     mem_max      = models.FloatField()
     sample_count = models.IntegerField(default=0, verbose_name="Số mẫu hourly")
+    # HyperV host performance counters (Phase 1 MVP) — null nếu ngày đó không có mẫu nào.
+    cpu_hv_avg             = models.FloatField(null=True, blank=True)
+    cpu_hv_max             = models.FloatField(null=True, blank=True)
+    mem_available_mb_avg   = models.FloatField(null=True, blank=True)
+    mem_available_mb_min   = models.FloatField(null=True, blank=True)
+    disk_read_iops_avg     = models.FloatField(null=True, blank=True)
+    disk_read_iops_max     = models.FloatField(null=True, blank=True)
+    disk_write_iops_avg    = models.FloatField(null=True, blank=True)
+    disk_write_iops_max    = models.FloatField(null=True, blank=True)
+    disk_read_latency_ms_avg  = models.FloatField(null=True, blank=True)
+    disk_read_latency_ms_max  = models.FloatField(null=True, blank=True)
+    disk_write_latency_ms_avg = models.FloatField(null=True, blank=True)
+    disk_write_latency_ms_max = models.FloatField(null=True, blank=True)
+    net_mbps_total_avg     = models.FloatField(null=True, blank=True)
+    net_mbps_total_max     = models.FloatField(null=True, blank=True)
 
     class Meta:
         unique_together = ("device", "day")

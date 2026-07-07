@@ -229,12 +229,13 @@ def _device_metrics_raw(device: Device, since, until) -> JsonResponse:
         sc_series = [r.get("sc") for r in rows]
         if any(v is not None for v in sc_series):
             data["session_count"] = [float(v) if v is not None else None for v in sc_series]
+        _attach_host_perf_cache(data, rows)
         return JsonResponse(data)
 
     qs = (SystemHealth.objects
           .filter(device=device, timestamp__gte=since, timestamp__lte=until)
           .order_by("timestamp")
-          .values("timestamp", "cpu_percent", "mem_percent", "extra"))
+          .values("timestamp", "cpu_percent", "mem_percent", "extra", *_HOST_PERF_DB_FIELDS))
 
     rows = _downsample(list(qs))
     span = until - since
@@ -246,7 +247,74 @@ def _device_metrics_raw(device: Device, since, until) -> JsonResponse:
     }
     # Optional vendor metric: Fortinet session count stored in JSON extra
     _attach_session_count(data, rows)
+    _attach_host_perf_db(data, rows)
     return JsonResponse(data)
+
+
+# HyperV host performance counters (Phase 1 MVP) — short-key ring-buffer → field name DB/model.
+_HOST_PERF_DB_FIELDS = (
+    "cpu_hv_percent", "mem_available_mb", "disk_read_iops", "disk_write_iops",
+    "disk_read_latency_ms", "disk_write_latency_ms", "net_mbps_total",
+)
+_HOST_PERF_CACHE_KEYS = {
+    "cpu_hv_percent": "chv", "mem_available_mb": "mav",
+    "disk_read_iops": "dri", "disk_write_iops": "dwi",
+    "disk_read_latency_ms": "drl", "disk_write_latency_ms": "dwl",
+    "net_mbps_total": "nmb",
+}
+
+
+def _attach_host_perf_db(data: dict, rows: list[dict]) -> None:
+    """Gắn 7 host-perf series vào response (DB-mode raw) — chỉ khi có ít nhất 1 giá trị non-null."""
+    for field in _HOST_PERF_DB_FIELDS:
+        series = [r.get(field) for r in rows]
+        if any(v is not None for v in series):
+            data[field] = series
+
+
+def _attach_host_perf_cache(data: dict, rows: list[dict]) -> None:
+    """Gắn 7 host-perf series vào response (cache-mode raw, đọc theo short-key)."""
+    for field, short_key in _HOST_PERF_CACHE_KEYS.items():
+        series = [r.get(short_key) for r in rows]
+        if any(v is not None for v in series):
+            data[field] = series
+
+
+_HOST_PERF_HOURLY_DAILY_FIELDS = (
+    "cpu_hv_avg", "cpu_hv_max",
+    "mem_available_mb_avg", "mem_available_mb_min",
+    "disk_read_iops_avg", "disk_read_iops_max",
+    "disk_write_iops_avg", "disk_write_iops_max",
+    "disk_read_latency_ms_avg", "disk_read_latency_ms_max",
+    "disk_write_latency_ms_avg", "disk_write_latency_ms_max",
+    "net_mbps_total_avg", "net_mbps_total_max",
+)
+
+
+def _attach_host_perf_agg(data: dict, rows: list[dict]) -> None:
+    """Gắn 14 host-perf series (avg+max/min) vào response hourly/daily — chỉ khi có giá trị.
+
+    Đồng thời alias sang tên field "phẳng" (vd cpu_hv_percent) giống raw-mode, để
+    frontend dùng chung 1 bộ key bất kể nguồn (giống cpu_percent <- cpu_avg hiện có).
+    Disk latency alias theo *_max (spike-sensitive), các metric khác alias theo *_avg.
+    """
+    for field in _HOST_PERF_HOURLY_DAILY_FIELDS:
+        series = [r.get(field) for r in rows]
+        if any(v is not None for v in series):
+            data[field] = series
+    _PLAIN_ALIAS = {
+        "cpu_hv_percent":        "cpu_hv_avg",
+        "mem_available_mb":      "mem_available_mb_avg",
+        "disk_read_iops":        "disk_read_iops_avg",
+        "disk_write_iops":       "disk_write_iops_avg",
+        "disk_read_latency_ms":  "disk_read_latency_ms_max",
+        "disk_write_latency_ms": "disk_write_latency_ms_max",
+        "net_mbps_total":        "net_mbps_total_avg",
+    }
+    for plain_field, src_field in _PLAIN_ALIAS.items():
+        series = [r.get(src_field) for r in rows]
+        if any(v is not None for v in series):
+            data[plain_field] = series
 
 
 def _device_metrics_hourly(device: Device, since, until) -> JsonResponse:
@@ -254,7 +322,7 @@ def _device_metrics_hourly(device: Device, since, until) -> JsonResponse:
     qs = (SystemHealthHourly.objects
           .filter(device=device, hour__gte=since, hour__lte=until)
           .order_by("hour")
-          .values("hour", "cpu_avg", "cpu_max", "mem_avg", "mem_max"))
+          .values("hour", "cpu_avg", "cpu_max", "mem_avg", "mem_max", *_HOST_PERF_HOURLY_DAILY_FIELDS))
 
     rows = list(qs)
     data = {
@@ -265,6 +333,7 @@ def _device_metrics_hourly(device: Device, since, until) -> JsonResponse:
         "mem_max":     [r["mem_max"] for r in rows],
         "source":      "hourly",
     }
+    _attach_host_perf_agg(data, rows)
     return JsonResponse(data)
 
 
@@ -273,7 +342,7 @@ def _device_metrics_daily(device: Device, since, until) -> JsonResponse:
     qs = (SystemHealthDaily.objects
           .filter(device=device, day__gte=since.date(), day__lte=until.date())
           .order_by("day")
-          .values("day", "cpu_avg", "cpu_max", "mem_avg", "mem_max"))
+          .values("day", "cpu_avg", "cpu_max", "mem_avg", "mem_max", *_HOST_PERF_HOURLY_DAILY_FIELDS))
 
     rows = list(qs)
     data = {
@@ -284,6 +353,7 @@ def _device_metrics_daily(device: Device, since, until) -> JsonResponse:
         "mem_max":     [r["mem_max"] for r in rows],
         "source":      "daily",
     }
+    _attach_host_perf_agg(data, rows)
     return JsonResponse(data)
 
 

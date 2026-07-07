@@ -12,7 +12,7 @@ from collections import defaultdict
 from datetime import timedelta
 
 from django.conf import settings
-from django.db.models import Avg, Max, Count, Sum
+from django.db.models import Avg, Max, Min, Count, Sum
 from django.db.models.functions import TruncHour, TruncDate
 from django.utils import timezone
 
@@ -54,6 +54,7 @@ def _rollup_system_health_hourly_cache() -> int:
             mems = [r["mem"] for r in rows if r.get("mem") is not None]
             if not cpus and not mems:
                 continue
+            host_perf_aggs = _host_perf_aggs_from_rows(rows)
             objs.append(SystemHealthHourly(
                 device_id=dev_id,
                 hour=hour,
@@ -62,16 +63,46 @@ def _rollup_system_health_hourly_cache() -> int:
                 mem_avg=round(sum(mems) / len(mems), 2) if mems else 0,
                 mem_max=round(max(mems), 2) if mems else 0,
                 sample_count=len(rows),
+                **host_perf_aggs,
             ))
     if objs:
         SystemHealthHourly.objects.bulk_create(
             objs,
             update_conflicts=True,
             unique_fields=["device", "hour"],
-            update_fields=["cpu_avg", "cpu_max", "mem_avg", "mem_max", "sample_count"],
+            update_fields=["cpu_avg", "cpu_max", "mem_avg", "mem_max", "sample_count",
+                            *_HOST_PERF_HOURLY_FIELDS],
         )
     logger.info("Hourly rollup SystemHealth (cache): %d records processed", len(objs))
     return len(objs)
+
+
+# HyperV host performance counters (Phase 1 MVP) — short-key ring-buffer → (avg_field, max_field, agg_kind).
+# agg_kind "min" áp dụng cho mem_available_mb (inverse metric — xấu nhất = thấp nhất).
+_HOST_PERF_ROLLUP_SPEC = [
+    ("chv", "cpu_hv_avg", "cpu_hv_max", "max"),
+    ("mav", "mem_available_mb_avg", "mem_available_mb_min", "min"),
+    ("dri", "disk_read_iops_avg", "disk_read_iops_max", "max"),
+    ("dwi", "disk_write_iops_avg", "disk_write_iops_max", "max"),
+    ("drl", "disk_read_latency_ms_avg", "disk_read_latency_ms_max", "max"),
+    ("dwl", "disk_write_latency_ms_avg", "disk_write_latency_ms_max", "max"),
+    ("nmb", "net_mbps_total_avg", "net_mbps_total_max", "max"),
+]
+_HOST_PERF_HOURLY_FIELDS = [f for _, avg_f, extra_f, _ in _HOST_PERF_ROLLUP_SPEC for f in (avg_f, extra_f)]
+
+
+def _host_perf_aggs_from_rows(rows: list[dict]) -> dict:
+    """Cache-mode: tính avg/max (hoặc avg/min) 7 host-perf metric từ ring-buffer sys rows."""
+    result = {}
+    for short_key, avg_field, extra_field, kind in _HOST_PERF_ROLLUP_SPEC:
+        values = [r[short_key] for r in rows if r.get(short_key) is not None]
+        if not values:
+            result[avg_field] = None
+            result[extra_field] = None
+            continue
+        result[avg_field] = round(sum(values) / len(values), 2)
+        result[extra_field] = round(min(values), 2) if kind == "min" else round(max(values), 2)
+    return result
 
 
 def _rollup_interface_stats_hourly_cache() -> int:
@@ -146,6 +177,20 @@ def rollup_system_health_hourly() -> int:
             mem_avg=Avg("mem_percent"),
             mem_max=Max("mem_percent"),
             sample_count=Count("id"),
+            cpu_hv_avg=Avg("cpu_hv_percent"),
+            cpu_hv_max=Max("cpu_hv_percent"),
+            mem_available_mb_avg=Avg("mem_available_mb"),
+            mem_available_mb_min=Min("mem_available_mb"),
+            disk_read_iops_avg=Avg("disk_read_iops"),
+            disk_read_iops_max=Max("disk_read_iops"),
+            disk_write_iops_avg=Avg("disk_write_iops"),
+            disk_write_iops_max=Max("disk_write_iops"),
+            disk_read_latency_ms_avg=Avg("disk_read_latency_ms"),
+            disk_read_latency_ms_max=Max("disk_read_latency_ms"),
+            disk_write_latency_ms_avg=Avg("disk_write_latency_ms"),
+            disk_write_latency_ms_max=Max("disk_write_latency_ms"),
+            net_mbps_total_avg=Avg("net_mbps_total"),
+            net_mbps_total_max=Max("net_mbps_total"),
         )
     )
 
@@ -158,6 +203,7 @@ def rollup_system_health_hourly() -> int:
             mem_avg=round(row["mem_avg"], 2),
             mem_max=round(row["mem_max"], 2),
             sample_count=row["sample_count"],
+            **_round_host_perf_row(row),
         )
         for row in aggregated
     ]
@@ -166,11 +212,21 @@ def rollup_system_health_hourly() -> int:
             objs,
             update_conflicts=True,
             unique_fields=["device", "hour"],
-            update_fields=["cpu_avg", "cpu_max", "mem_avg", "mem_max", "sample_count"],
+            update_fields=["cpu_avg", "cpu_max", "mem_avg", "mem_max", "sample_count",
+                            *_HOST_PERF_HOURLY_FIELDS],
         )
 
     logger.info("Hourly rollup SystemHealth: %d records processed", len(objs))
     return len(objs)
+
+
+def _round_host_perf_row(row: dict) -> dict:
+    """DB-mode: round 7 host-perf field (Avg/Max/Min annotation) — None giữ nguyên."""
+    return {
+        field: (round(row[field], 2) if row.get(field) is not None else None)
+        for _, avg_f, extra_f, _ in _HOST_PERF_ROLLUP_SPEC
+        for field in (avg_f, extra_f)
+    }
 
 
 def rollup_interface_stats_hourly() -> int:
@@ -248,6 +304,20 @@ def rollup_system_health_daily() -> int:
             mem_avg=Avg("mem_avg"),
             mem_max=Max("mem_max"),
             sample_count=Sum("sample_count"),
+            cpu_hv_avg=Avg("cpu_hv_avg"),
+            cpu_hv_max=Max("cpu_hv_max"),
+            mem_available_mb_avg=Avg("mem_available_mb_avg"),
+            mem_available_mb_min=Min("mem_available_mb_min"),
+            disk_read_iops_avg=Avg("disk_read_iops_avg"),
+            disk_read_iops_max=Max("disk_read_iops_max"),
+            disk_write_iops_avg=Avg("disk_write_iops_avg"),
+            disk_write_iops_max=Max("disk_write_iops_max"),
+            disk_read_latency_ms_avg=Avg("disk_read_latency_ms_avg"),
+            disk_read_latency_ms_max=Max("disk_read_latency_ms_max"),
+            disk_write_latency_ms_avg=Avg("disk_write_latency_ms_avg"),
+            disk_write_latency_ms_max=Max("disk_write_latency_ms_max"),
+            net_mbps_total_avg=Avg("net_mbps_total_avg"),
+            net_mbps_total_max=Max("net_mbps_total_max"),
         )
     )
 
@@ -260,6 +330,7 @@ def rollup_system_health_daily() -> int:
             mem_avg=round(row["mem_avg"], 2),
             mem_max=round(row["mem_max"], 2),
             sample_count=row["sample_count"],
+            **_round_host_perf_row(row),
         )
         for row in aggregated
     ]
@@ -268,7 +339,8 @@ def rollup_system_health_daily() -> int:
             objs,
             update_conflicts=True,
             unique_fields=["device", "day"],
-            update_fields=["cpu_avg", "cpu_max", "mem_avg", "mem_max", "sample_count"],
+            update_fields=["cpu_avg", "cpu_max", "mem_avg", "mem_max", "sample_count",
+                            *_HOST_PERF_HOURLY_FIELDS],
         )
 
     logger.info("Daily rollup SystemHealth: %d records processed", len(objs))

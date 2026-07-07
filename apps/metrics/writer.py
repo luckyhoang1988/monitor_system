@@ -130,6 +130,13 @@ def _save_metrics_cache(device: Device, data: NormalizedData) -> bool:
         "vms": data.extra.get("vms", []),
         "wifi_aps": data.extra.get("wifi_aps", []),
         "wifi_clients": data.extra.get("wifi_clients", []),
+        "cpu_hv_percent": data.cpu_hv_percent,
+        "mem_available_mb": data.mem_available_mb,
+        "disk_read_iops": data.disk_read_iops,
+        "disk_write_iops": data.disk_write_iops,
+        "disk_read_latency_ms": data.disk_read_latency_ms,
+        "disk_write_latency_ms": data.disk_write_latency_ms,
+        "net_mbps_total": data.net_mbps_total,
     }
 
     ok_latest = metrics_cache.set_latest(device.id, snapshot)
@@ -168,6 +175,20 @@ def _device_scalar_sample(data: NormalizedData, ts_epoch: float) -> dict:
         sample["wao"] = sum(1 for a in aps if not a.get("is_online"))
         clients = data.extra.get("wifi_clients")
         sample["wc"] = len(clients) if clients else sum(int(a.get("client_count") or 0) for a in aps)
+    # HyperV host performance counters (short-key ring-buffer m:series:sys) — chỉ thêm
+    # key khi có giá trị (is not None), khác quy ước sentinel-0 của mem_percent.
+    _HOST_PERF_SHORT_KEYS = (
+        ("chv", data.cpu_hv_percent),
+        ("mav", data.mem_available_mb),
+        ("dri", data.disk_read_iops),
+        ("dwi", data.disk_write_iops),
+        ("drl", data.disk_read_latency_ms),
+        ("dwl", data.disk_write_latency_ms),
+        ("nmb", data.net_mbps_total),
+    )
+    for short_key, value in _HOST_PERF_SHORT_KEYS:
+        if value is not None:
+            sample[short_key] = value
     return sample
 
 
@@ -230,6 +251,13 @@ def _save_system_health(device: Device, data: NormalizedData) -> None:
         mem_percent=data.mem_percent,
         uptime_secs=data.uptime_secs or None,
         extra=extra,
+        cpu_hv_percent=data.cpu_hv_percent,
+        mem_available_mb=data.mem_available_mb,
+        disk_read_iops=data.disk_read_iops,
+        disk_write_iops=data.disk_write_iops,
+        disk_read_latency_ms=data.disk_read_latency_ms,
+        disk_write_latency_ms=data.disk_write_latency_ms,
+        net_mbps_total=data.net_mbps_total,
     )
 
 

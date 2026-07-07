@@ -34,6 +34,15 @@ class NormalizedData:
     uptime_secs:  int = 0
     interfaces:   list[InterfaceData] = field(default_factory=list)
     extra:        dict = field(default_factory=dict)  # dữ liệu bổ sung tuỳ vendor
+    # HyperV host performance counters (Phase 1 MVP) — None nếu collector không hỗ trợ
+    # hoặc Get-Counter lỗi. KHÔNG coi 0 là "không đo được" (khác mem_percent==0 sentinel).
+    cpu_hv_percent:        float | None = None
+    mem_available_mb:      float | None = None
+    disk_read_iops:        float | None = None
+    disk_write_iops:       float | None = None
+    disk_read_latency_ms:  float | None = None
+    disk_write_latency_ms: float | None = None
+    net_mbps_total:        float | None = None
 
 
 class BaseCollector(ABC):

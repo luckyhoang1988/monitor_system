@@ -195,6 +195,7 @@ def poll_all_ping_devices() -> None:
 
 @shared_task
 def poll_all_hyperv() -> None:
+    from django.conf import settings
     from apps.devices.models import Device
     device_ids = list(Device.objects.filter(
         device_type="hyperv",
@@ -203,6 +204,7 @@ def poll_all_hyperv() -> None:
     # Chạy inline để tránh mất task poll_device trong môi trường Celery/Windows không ổn định.
     success = 0
     failed = 0
+    t0 = timezone.now()
     for pk in device_ids:
         try:
             _poll_device_once(pk)
@@ -210,7 +212,18 @@ def poll_all_hyperv() -> None:
         except Exception as exc:
             failed += 1
             logger.warning("Inline HyperV poll failed for device %s: %s", pk, exc)
-    logger.info("Polled %d/%d hyperv hosts inline (failed=%d)", success, len(device_ids), failed)
+    elapsed = (timezone.now() - t0).total_seconds()
+    logger.info("Polled %d/%d hyperv hosts inline (failed=%d, elapsed=%.1fs)",
+                success, len(device_ids), failed, elapsed)
+    # Get-Counter burst (~10-12s/host) thêm tải đáng kể — tự cảnh báo nếu tick áp sát
+    # interval, tránh lặp sự cố "poll queue snowball" (memory poll-queue-snowball-slow-device.md).
+    interval = getattr(settings, "POLL_HYPERV_INTERVAL_SECS", 120)
+    if interval and elapsed > interval * 0.5:
+        logger.warning(
+            "HyperV poll tick chiếm %.1fs — vượt 50%% của interval %ds, cân nhắc tăng "
+            "POLL_HYPERV_INTERVAL_SECS hoặc giảm MaxSamples trong Get-Counter burst.",
+            elapsed, interval,
+        )
 
 
 TOPOLOGY_DISCOVER_SOFT_LIMIT = 120

@@ -41,6 +41,22 @@ METRIC_GETTERS = {
 
 SUSTAINABLE_METRICS = {"cpu_percent", "mem_percent"}
 
+# HyperV host performance counters (Phase 1 MVP) — map metric key → (short-key ring-buffer,
+# field name SystemHealth). Không tái dùng _sustained_cpu_mem (hardcode field cpu/mem).
+_HOST_PERF_FIELD_MAP = {
+    "cpu_hv_percent":        ("chv", "cpu_hv_percent"),
+    "mem_available_mb":      ("mav", "mem_available_mb"),
+    "disk_read_iops":        ("dri", "disk_read_iops"),
+    "disk_write_iops":       ("dwi", "disk_write_iops"),
+    "disk_read_latency_ms":  ("drl", "disk_read_latency_ms"),
+    "disk_write_latency_ms": ("dwl", "disk_write_latency_ms"),
+    "net_mbps_total":        ("nmb", "net_mbps_total"),
+}
+
+for _metric in _HOST_PERF_FIELD_MAP:
+    METRIC_GETTERS[_metric] = (lambda device, since, m=_metric: _latest_host_perf(device, since, m))
+del _metric
+
 
 # ── Cache-first: khi METRICS_WRITE_MODE="cache", getters đọc từ Redis thay vì DB ──
 def _use_cache() -> bool:
@@ -124,6 +140,42 @@ def _sustained_cpu_mem(device: Device, rule: AlertRule, window_since) -> float |
     # For eq/ne, fall back to latest-only.
     cond_fn = CONDITION_FN.get(cond)
     return latest if (cond_fn and cond_fn(latest, threshold)) else None
+
+
+def _latest_host_perf(device: Device, since, metric: str) -> float | None:
+    """Latest value cho 1 trong 7 HyperV host performance counter (Phase 1 MVP)."""
+    short_key, field_name = _HOST_PERF_FIELD_MAP[metric]
+    if _use_cache():
+        snap = _fresh_latest(device, since)
+        if not snap:
+            return None
+        val = snap.get(field_name)
+        return float(val) if val is not None else None
+
+    from apps.metrics.models import SystemHealth
+    rec = (SystemHealth.objects
+           .filter(device=device, timestamp__gte=since, **{f"{field_name}__isnull": False})
+           .order_by("-timestamp")
+           .values_list(field_name, flat=True)
+           .first())
+    return float(rec) if rec is not None else None
+
+
+def _sustained_host_perf(device: Device, rule: AlertRule, window_since) -> float | None:
+    """Sustained version cho 7 HyperV host performance counter — tái dùng _sustained_verdict."""
+    short_key, field_name = _HOST_PERF_FIELD_MAP[rule.metric]
+    if _use_cache():
+        series = metrics_cache.get_sys_series(device.id, window_since)
+        values = [float(s[short_key]) for s in series if s.get(short_key) is not None]
+        return _sustained_verdict(values, rule)
+
+    from apps.metrics.models import SystemHealth
+    qs = (SystemHealth.objects
+          .filter(device=device, timestamp__gte=window_since, **{f"{field_name}__isnull": False})
+          .order_by("timestamp")
+          .values_list(field_name, flat=True))
+    values = [float(v) for v in qs]
+    return _sustained_verdict(values, rule)
 
 
 def _latest_cpu(device: Device, since) -> float | None:
@@ -747,6 +799,8 @@ def check_device_alerts(device: Device, since) -> None:
                 value = _sustained_wifi_client_count(device, rule, window_since)
             elif rule.metric == "wifi_ap_offline":
                 value = _sustained_wifi_ap_offline_count(device, rule, window_since)
+            elif rule.metric in _HOST_PERF_FIELD_MAP:
+                value = _sustained_host_perf(device, rule, window_since)
             else:
                 value = getter(device, since)
         else:
@@ -787,6 +841,13 @@ def _persist_incident_snapshot(device: Device) -> None:
             mem_percent=snap.get("mem") or 0,
             uptime_secs=snap.get("uptime"),
             extra=snap.get("extra") or {},
+            cpu_hv_percent=snap.get("cpu_hv_percent"),
+            mem_available_mb=snap.get("mem_available_mb"),
+            disk_read_iops=snap.get("disk_read_iops"),
+            disk_write_iops=snap.get("disk_write_iops"),
+            disk_read_latency_ms=snap.get("disk_read_latency_ms"),
+            disk_write_latency_ms=snap.get("disk_write_latency_ms"),
+            net_mbps_total=snap.get("net_mbps_total"),
         )
     except Exception as exc:
         logger.warning("persist incident snapshot (dev=%s) failed: %s", device.name, exc)
@@ -808,6 +869,16 @@ def _fire_alert(device: Device, rule: AlertRule, value: float) -> None:
             return "DOWN" if v == 0 else "UP"
         if metric == "device_online":
             return "OFFLINE" if v == 0 else "ONLINE"
+        if metric == "cpu_hv_percent":
+            return f"{v:.1f}%"
+        if metric == "mem_available_mb":
+            return f"{v:.0f} MB"
+        if metric in ("disk_read_iops", "disk_write_iops"):
+            return f"{v:.0f} IOPS"
+        if metric in ("disk_read_latency_ms", "disk_write_latency_ms"):
+            return f"{v:.1f} ms"
+        if metric == "net_mbps_total":
+            return f"{v:.1f} Mbps"
         return f"{v:.2f}"
 
     metric_value_str = _fmt_metric(rule.metric, float(value))
