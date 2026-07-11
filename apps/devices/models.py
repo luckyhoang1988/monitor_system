@@ -16,9 +16,6 @@ class Device(models.Model):
     VENDORS = [
         ("cisco",    "Cisco"),
         ("huawei",   "Huawei"),
-        ("hp",       "HP/Aruba"),
-        ("mikrotik", "MikroTik"),
-        ("fortinet", "Fortinet"),
         ("synology", "Synology"),
         ("microsoft","Microsoft"),
     ]

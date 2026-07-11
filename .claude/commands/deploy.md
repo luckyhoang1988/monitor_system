@@ -101,6 +101,40 @@ Quy trình chuẩn (đã dùng để bắt bug 504 phiên đầu):
   thì 1 thiết bị treo (WinRM/SNMP/SSH) có thể chiếm toàn bộ task tới hàng trăm giây, y hệt cơ chế
   "poll queue snowball" — `poll_device` đã có từ commit `fe1dac1`, `poll_all_hyperv` thiếu tới
   2026-07-07 mới fix (100s/110s, bắt `SoftTimeLimitExceeded` để dừng batch sạch).
+- **Vendor/enum choice thêm vào UI (`Device.VENDORS`...) mà KHÔNG có nhánh detect + OID đã verify
+  trên thiết bị thật đứng sau nó → silent-fail âm thầm, không phải lỗi ồn ào.** Dính thật 2026-07-11
+  khi audit CPU/RAM: `VENDORS` có `("hp", "HP/Aruba")` nhưng code chỉ implement HP-Comware (H3C
+  rebrand, `display cpu-usage` VRP-style) — KHÔNG phải ArubaOS thật (CLI/MIB hoàn toàn khác). Vì
+  `detect_os_family()` tự dò qua sysObjectID/sysDescr chứ KHÔNG đọc field `vendor` (trừ Synology),
+  nếu ai chọn "HP/Aruba" cho 1 switch Aruba thật, auto-detect không khớp nhánh nào → rơi về mặc định
+  `cisco_ios` → cpu/mem đọc lặng lẽ **0/0**, không log warning (khác nhánh Huawei có log rõ khi rỗng).
+  Fix: xoá thẳng choice + nhánh detect H3C/Comware + Netmiko driver/commands (không có thiết bị thật
+  nào dùng, verify qua `Device.objects.filter(vendor="hp").count()` trên DB thật = 0) thay vì sửa
+  nhãn — theo nguyên tắc "thiết bị chưa có thật thì bỏ, có thiết bị thật rồi code sau" chứ không giữ
+  code chạy được nhưng không ai verify. **Quy tắc chung**: mỗi lựa chọn trong `VENDORS`/`DEVICE_TYPES`
+  phải có 1 trong 2: (a) nhánh detect + OID/CLI đã verify trên thiết bị thật, hoặc (b) không tồn tại
+  trong UI — không giữ lựa chọn "trông như hoạt động" mà chưa ai chạy thử.
+- **Gỡ 1 vendor chưa verify KHÔNG dừng ở vendor/collector — phải lần theo mọi feature ăn theo
+  dữ liệu riêng của vendor đó, nếu không sẽ tạo ra 1 "silent-fail trap" MỚI y hệt bẫy vừa xoá.**
+  Dính thật 2026-07-11 (cùng đợt gỡ HP/Aruba ở trên, sau đó gỡ tiếp MikroTik/Fortinet): Fortinet là
+  vendor DUY NHẤT từng ghi `extra["session_count"]` (SNMP OID `fgSysSesCount`) — nhưng field này lại
+  được đặt tên + expose thành 1 **alert metric độc lập** `fw_session_count` trong
+  `METRIC_CHOICES`/`AlertRule.metric_label` (UI dropdown chọn được), cộng thêm 1 chuỗi hiển thị
+  (`session_count` trong `dashboard/views.py` → `firewall_detail.html` thẻ "Sessions" + Chart.js
+  dataset, `_attach_session_count()` trong `metrics/api.py`, write-side `sc` key trong
+  `writer.py::_device_scalar_sample`). Nếu chỉ xoá adapter/collector Fortinet mà quên các chỗ này:
+  `fw_session_count` vẫn còn trong dropdown AlertRule nhưng **vĩnh viễn không có dữ liệu** (không
+  hãng nào khác ghi `extra["session_count"]`) → rule tạo ra sẽ không bao giờ fire, không lỗi, không
+  cảnh báo gì — chính xác kiểu bug mà bẫy "vendor/enum choice không có nhánh backing" ở trên mô tả,
+  chỉ khác là lần này nó nằm ở tầng feature/metric chứ không phải tầng vendor. Quy trình đúng: sau
+  khi quyết định xoá 1 vendor, `grep -ri` toàn repo theo os_family key (vd `fortinet_fortios`) VÀ
+  theo tên field đặc thù nó tạo ra trong `extra`/JSON (vd `session_count`) — không chỉ theo tên
+  hãng — để bắt hết các tầng: model choices → collector/adapter → OID profile → alert engine
+  (metric/getter/format) → dashboard view/template/JS → metrics API → seed data (management
+  command). ⚠️ **Seed command (`seed_alert_rules.py`) không tự dọn DB** — nó chỉ create/update
+  theo tên rule, không xoá rule đã bị bỏ khỏi `DEFAULT_RULES`; nếu prod từng chạy seed trước khi
+  xoá, row `AlertRule` cũ (vd "Firewall Sessions High") vẫn còn trong DB thật và cần xoá tay qua
+  `/alerts/rules/` — không phải lỗi code, chỉ là seed script không có nhánh "reconcile/delete".
 - **Field "percent" sẵn có trong MIB chuẩn (vd `ssCpuIdle` UCD-SNMP-MIB) không chắc đúng chuẩn
   trên mọi firmware — phải verify tổng User+System+Idle ≈100 trên thiết bị thật trước khi tin.**
   Dính thật 2026-07-11: Synology DSM trả `ssCpuUser(.9)+ssCpuSystem(.10)+ssCpuIdle(.11)=48`

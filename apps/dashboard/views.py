@@ -518,17 +518,11 @@ def firewall_detail(request, pk):
     device = get_object_or_404(Device, pk=pk, device_type="firewall")
     latest_health = _detail_health(device)
 
-    # Lấy session_count từ extra nếu Fortinet lưu vào SystemHealth
-    session_count = None
-    if latest_health and latest_health.extra:
-        session_count = latest_health.extra.get("session_count")
-
     # Firewall giữ thứ tự if_index (không sort theo traffic như switch).
     return render(request, "dashboard/firewall_detail.html", {
         "device":         device,
         "interfaces":     _detail_interfaces(device, sort=False),
         "latest_health":  latest_health,
-        "session_count":  session_count,
     })
 
 

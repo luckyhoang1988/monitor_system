@@ -55,48 +55,6 @@ class HuaweiSNMPDeviceFactory(DeviceFactory):
     snmp_community = "huawei_ro"
 
 
-class MikroTikSNMPDeviceFactory(DeviceFactory):
-    name             = factory.Sequence(lambda n: f"mt-test-{n:03d}")
-    device_type      = "router"
-    vendor           = "mikrotik"
-    protocol         = "snmp"
-    os_family        = "mikrotik_routeros"
-    snmp_community   = "public"
-
-
-class MikroTikSSHDeviceFactory(DeviceFactory):
-    name        = factory.Sequence(lambda n: f"mt-ssh-{n:03d}")
-    device_type = "router"
-    vendor      = "mikrotik"
-    protocol    = "ssh"
-    os_family   = "mikrotik_routeros"
-
-
-class MikroTikSwitchSNMPDeviceFactory(DeviceFactory):
-    name        = factory.Sequence(lambda n: f"mt-sw-{n:03d}")
-    device_type = "switch"
-    vendor      = "mikrotik"
-    protocol    = "snmp"
-    os_family   = "mikrotik_routeros"
-
-
-class FortinetSNMPDeviceFactory(DeviceFactory):
-    name             = factory.Sequence(lambda n: f"fw-test-{n:03d}")
-    device_type      = "firewall"
-    vendor           = "fortinet"
-    protocol         = "snmp"
-    os_family        = "fortinet_fortios"
-    snmp_community   = "public"
-
-
-class FortinetSSHDeviceFactory(DeviceFactory):
-    name        = factory.Sequence(lambda n: f"fw-ssh-{n:03d}")
-    device_type = "firewall"
-    vendor      = "fortinet"
-    protocol    = "ssh"
-    os_family   = "fortinet_fortios"
-
-
 class HuaweiACDeviceFactory(DeviceFactory):
     name           = factory.Sequence(lambda n: f"ac-test-{n:03d}")
     device_type    = "wlan_controller"
@@ -175,26 +133,6 @@ def cisco_snmp_device(db):
 @pytest.fixture
 def huawei_snmp_device(db):
     return HuaweiSNMPDeviceFactory()
-
-
-@pytest.fixture
-def mikrotik_snmp_device(db):
-    return MikroTikSNMPDeviceFactory()
-
-
-@pytest.fixture
-def mikrotik_ssh_device(db):
-    return MikroTikSSHDeviceFactory()
-
-
-@pytest.fixture
-def fortinet_snmp_device(db):
-    return FortinetSNMPDeviceFactory()
-
-
-@pytest.fixture
-def fortinet_ssh_device(db):
-    return FortinetSSHDeviceFactory()
 
 
 @pytest.fixture

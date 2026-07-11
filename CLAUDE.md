@@ -49,7 +49,14 @@ apps/
 **Huawei VRP / YunShan** — `hwEntityResourceTable` `1.3.6.1.4.1.2011.5.25.31.1.1.1.1.X`:
 - `.5` = **hwEntityCpuUsage** (CPU% ✅) · `.6` = CpuUsageThreshold (NGƯỠNG 90/95, ❌ không phải CPU) · `.7` = **hwEntityMemUsage** (Mem% ✅).
 - ⚠️ **Từng gán nhầm CPU→`.6`** (mọi switch báo CPU 90-95% giả) và Mem→`.5`. Đã fix.
-- Scalar `.0` thường trống → walk table, lấy entity "MPU Board"/mainboard (giá trị > 0).
+- Scalar `.0` thường trống → walk table. ⚠️ **Đính chính 2026-07-11**: code (`_collect_cpu_mem_huawei`,
+  [switch_snmp.py](apps/collectors/switch_snmp.py)) KHÔNG lọc theo tên entity "MPU Board"/mainboard
+  như mô tả trước đây (không hề walk cột tên entity) — thực tế chọn **entry có CPU cao nhất** trong
+  toàn bảng, rồi lấy Mem cùng index đó. Hội tụ đúng trên switch 1-MPU (fleet 16 thiết bị đã verify),
+  nhưng **chưa thử trên chassis nhiều MPU/line card thật** (S9300/S12700, có trong "Mục tiêu") — trên
+  chassis đó, "CPU cao nhất" có thể rơi vào 1 line card/MPU standby đang bận thay vì MPU active chính.
+  Không phải bug đã xác nhận (chưa có thiết bị để verify) — chỉ là điểm cần walk lại + đối chiếu
+  `display cpu-usage` CLI khi có S9300/S12700 thật vào fleet.
 - Dùng chung cho VRP V5 (S5735 V200R021), YunShan (CloudEngine S5735-L-V2 V600R023/024), **và firewall USG6525E** (VRP V600R007C20SPC600, entity MPU 67108873) — collector `huawei_vrp` chạy nguyên.
 - ⚠️ **USG từ chối PTY** (chỉ exec-channel) → netmiko `huawei_vrp` fail "Channel closed" → firewall phải poll **SNMP** (hoặc exec-channel paramiko gửi `system-view\n…\nquit` trong 1 phiên).
 
@@ -57,6 +64,20 @@ apps/
 - IOS classic (C2960X): CPU `1.3.6.1.4.1.9.2.1.58.0` (OLD-CISCO-CPU 5min), Mem pool `.1`.
 - Business/SMB (Catalyst 1200/1300, CBS250/350): CPU `rlCpuUtil 1.3.6.1.4.1.9.6.1.101.1.9.0`. **Mem KHÔNG expose SNMP → mem=0** (giới hạn HW, không phải bug).
 - IOS-XE — ⚠️ **CHƯA kiểm chứng** (không có thiết bị): CPU/mem hard-code index `.1`; cần walk/verify khi có thiết bị thật (index khác trên stack/multi-RP).
+  - **Research 2026-07-11 (chưa code, chờ thiết bị thật)**: Mem hiện dùng `CISCO-MEMORY-POOL-MIB`
+    (`ciscoMemoryPoolTable`, `1.3.6.1.4.1.9.9.48.1.1.1.5.1`/`.6.1`) — Used/Free là **Gauge32
+    (32-bit)**, tài liệu Cisco chính hãng (SNMP config guide xe-16-9/xe-17-x) ghi nhận overflow/sai
+    số trên platform RAM lớn (Catalyst 9300/9500/9600, ISR/ASR4000 — phổ biến trên IOS-XE hiện đại
+    hơn IOS classic). MIB thay thế đúng là `CISCO-ENHANCED-MEMPOOL-MIB` (`cempMemPoolTable`
+    `1.3.6.1.4.1.9.9.221.1.1.1.1`, cột `.18`=cempMemPoolHCUsed/`.20`=cempMemPoolHCFree, bản 64-bit).
+    ⚠️ **KHÔNG thể hardcode 1 index như MIB cũ** — đã đọc thẳng file `.my` gốc: table này INDEX
+    **KÉP** `{entPhysicalIndex, cempMemPoolIndex}` (khác `ciscoMemoryPoolTable` chỉ index 1 cột
+    `ciscoMemoryPoolType`), nên phải walk + chọn đúng entry (thường lọc theo `cempMemPoolName`
+    chứa "Processor"/"System memory") — CHƯA biết entPhysicalIndex nào là RP chính trên platform
+    thật (nhất là stack/multi-RP) nếu không có thiết bị để walk đối chiếu. Quyết định: **không viết
+    code đoán** (giống lý do bỏ HP/Aruba) — giữ nguyên `CISCO-MEMORY-POOL-MIB` hiện tại (đơn giản,
+    đủ dùng cho platform RAM nhỏ, đã ghi rõ "chưa kiểm chứng" nên không ai bị đánh lừa) cho tới khi
+    có IOS-XE thật để walk `cempMemPoolTable` + đối chiếu `show processes memory platform`.
 
 **Synology DSM (NAS)** — UCD-SNMP-MIB (`1.3.6.1.4.1.2021`), `oids/synology_dsm.yaml`:
 - ❌ **KHÔNG dùng `ssCpuUser/.9`+`ssCpuSystem/.10`+`ssCpuIdle/.11` (chuẩn UCD-SNMP-MIB, `cpu=100-idle`)** — verify runtime NAS-Pfvn 2026-07-11: DSM trả User(0)+System(1)+Idle(47)=**48**, phải ≈100 theo chuẩn. Field percent này bị lỗi scale trên firmware DSM (root cause chưa rõ, chỉ biết KHÔNG tin được) → `100-idle` từng báo CPU **53-54%** giả trong khi Resource Monitor thật DSM chỉ **~1-4%**.
@@ -305,6 +326,63 @@ Phase 1–7 **đã hoàn thành** (setup/models → collector SNMP/SSH + tests �
   `expire_seconds` cùng giá trị, nếu không entry đó lặp lại đúng bug này.
 
 ### Thay đổi quan trọng
+- **2026-07-11**: Audit cách lấy CPU/RAM toàn bộ switch (yêu cầu user "review lại"). Verified-đúng:
+  Cisco IOS classic, Cisco Business/SMB, Huawei VRP (khớp mọi note đã có). Đã sửa phần verify được
+  ngay (không cần thiết bị thật): (1) **gỡ bỏ vendor "HP/Aruba"** khỏi `Device.VENDORS` + nhánh
+  detect H3C/Comware (`switch_snmp.py`) + `NETMIKO_DRIVER`/`COMMANDS["hp"]` (`switch_ssh.py`,
+  migration `0019_alter_device_vendor`) — code chỉ từng support HP-Comware (H3C rebrand), KHÔNG
+  phải ArubaOS thật; nhãn gộp 2 hãng khác nhau dưới 1 lựa chọn dễ khiến ai thêm switch Aruba thật
+  rơi vào silent-fail (auto-detect không dùng field `vendor` nên fallback `cisco_ios` → cpu=mem=0,
+  không log warning). Không có thiết bị thật nào dùng vendor này (verify DB: 0 record) → xoá thẳng
+  thay vì sửa nhãn, đúng theo hướng dẫn "thiết bị chưa có thật thì bỏ, có thiết bị thật code sau".
+  (2) Sửa `tests/collectors/test_switch_snmp.py` — test Huawei entity-table dùng đúng số cột thật
+  (`.5`=CPU/`.7`=Mem) thay vì `.6`/`.5` (vô tình mô phỏng lại đúng cặp số đã biết là SAI trong lịch
+  sử dự án, dễ gây hiểu lầm cho người đọc sau dù không phải bug chức năng). (3) Đính chính mô tả
+  thuật toán chọn entity Huawei (xem "OID đã xác minh runtime" → Huawei) — code chọn theo CPU cao
+  nhất, không lọc theo tên "MPU Board" như comment cũ mô tả. (4) Research (chưa code, chưa có IOS-XE
+  thật): `CISCO-ENHANCED-MEMPOOL-MIB` là MIB đúng thay cho `CISCO-MEMORY-POOL-MIB` 32-bit trên
+  IOS-XE RAM lớn, nhưng INDEX kép `{entPhysicalIndex, cempMemPoolIndex}` nên không thể hardcode như
+  MIB cũ — chờ thiết bị thật để walk+chọn entry đúng cách (xem mục Cisco IOS-XE). (5) Thêm comment
+  giải thích hành vi ngầm định pysnmp `NoSuchInstance`/`NoSuchObject` → `str()` ra chuỗi rỗng (đã
+  verify runtime pysnmp 7.1.27) tại [snmp_client.py](apps/collectors/snmp_client.py) — toàn bộ
+  pattern `float(x or 0)` trong collector dựa vào hành vi này, không phải bug nhưng dễ vỡ nếu ai đổi
+  sang `.prettyPrint()`. Chưa đụng: SSH-path `_parse_cisco_mem` (regex nghi ngờ không khớp output
+  thật `show processes memory` — 0 thiết bị hiện dùng `protocol=ssh` trong DB nên chưa có real data
+  để verify, để lại chờ có thiết bị SSH thật).
+- **2026-07-11 (cùng ngày, tiếp audit trên)**: User xác nhận gỡ luôn **MikroTik** và **Fortinet**
+  theo đúng cách đã làm với HP/Aruba — 2 vendor này có code + OID profile đầy đủ
+  (`oids/mikrotik_routeros.yaml`, `oids/fortinet_fortios.yaml`, adapter riêng) nhưng chưa từng xuất
+  hiện trong mục "OID đã xác minh runtime" ở trên (chưa có thiết bị thật để verify), và không có
+  device nào dùng 2 vendor này trong DB (local: 0 record; không kết luận được cho prod nhưng user đã
+  xác nhận xoá). Phạm vi xoá **rộng hơn HP/Aruba nhiều** vì đây là support đầy đủ (không chỉ 1 nhánh
+  detect):
+  - `Device.VENDORS` (migration `0020_alter_device_vendor`), nhánh `detect_os_family` +
+    `_collect_cpu_mem_mikrotik`/`_collect_cpu_mem_fortinet` + dispatch trong `collect_raw()`
+    ([switch_snmp.py](apps/collectors/switch_snmp.py)).
+  - `NETMIKO_DRIVER`, `COMMANDS`, `detect_os_family` shortcut, toàn bộ parser
+    (`_parse_mikrotik_resource/_interfaces`, `_parse_fortinet_perf/_uptime/_interfaces`) + dispatch
+    trong `collect_raw()` ([switch_ssh.py](apps/collectors/switch_ssh.py), −184 dòng).
+  - Xoá hẳn `apps/collectors/adapters/mikrotik_routeros.py`, `fortinet_fortios.py` +
+    registry trong `adapters/__init__.py`, `oids/mikrotik_routeros.yaml`, `oids/fortinet_fortios.yaml`.
+  - **`fw_session_count`** (alert metric) xoá theo dây chuyền — field này **chỉ Fortinet từng ghi**
+    (`extra["session_count"]`, không hãng nào khác đụng tới), nên sau khi bỏ Fortinet, giữ lại
+    `fw_session_count` trong `METRIC_CHOICES`/`AlertRule.metric_label` sẽ tạo ra **dropdown option
+    không bao giờ có dữ liệu** — đúng loại "silent-fail trap" mà bẫy HP/Aruba đã cảnh báo, nên xoá
+    chứ không giữ. Xoá `_fw_session_count`/`_sustained_fw_session_count` +
+    `METRIC_GETTERS`/dispatch/format trong [engine.py](apps/alerts/engine.py); entry
+    "Firewall Sessions High" trong `seed_alert_rules.py` (⚠️ nếu prod đã từng chạy lệnh seed này,
+    AlertRule row cùng tên có thể vẫn còn trong DB thật — seed command không tự xoá rule cũ, cần
+    kiểm tra/xoá tay qua `/alerts/rules/` nếu tồn tại). Kéo theo xoá luôn UI/API hiển thị
+    `session_count` (thẻ "Sessions" + Chart.js dataset trong `firewall_detail.html`,
+    `_attach_session_count()` trong `metrics/api.py`, extraction trong `dashboard/views.py`,
+    write-side `sc` key trong `writer.py::_device_scalar_sample` — giữ lại sẽ là field ghi ra mà
+    không ai đọc, tương tự lý do xoá `fw_session_count`). `SystemHealth.extra` (JSONField) **giữ
+    nguyên** — đây là kho generic dùng chung cho `vms`/`wifi_aps`/`wifi_clients`, không phải code
+    riêng Fortinet.
+  - Test: xoá `MikroTik*/Fortinet*DeviceFactory` + fixtures (`conftest.py`), test adapter/factory
+    riêng 2 vendor; thay device_type=router/firewall trong test bằng Cisco/Huawei (Huawei mirror
+    đúng firewall thật USG6525E trong fleet) để không mất coverage dispatch theo `device_type`.
+    424 passed, 2 skipped (không đổi so với trước, cùng lý do skip easysnmp).
 - **2026-07-11**: Fix CPU Synology NAS báo sai (53-54% giả, DSM thật ~1-4%) — phát hiện qua
   đối chiếu ảnh chụp DSM Resource Monitor thật của user. Root cause: `ssCpuIdle` trên DSM
   không theo chuẩn UCD-SNMP-MIB (verify runtime User+System+Idle=48, phải ≈100). Fix: chuyển

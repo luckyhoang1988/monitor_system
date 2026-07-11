@@ -165,14 +165,11 @@ _REPL_HEALTHY = {"Normal", "NotConfigured"}
 def _device_scalar_sample(data: NormalizedData, ts_epoch: float) -> dict:
     """Mẫu scalar cấp thiết bị cho ring-buffer sys — nguồn cho sustained alert.
 
-    Ngoài cpu/mem còn gói các scalar/poll: session_count (sc), vm running (vmr),
-    vm repl unhealthy (vmu), wifi client (wc), wifi AP offline (wao) — chỉ thêm key
-    khi thiết bị có dữ liệu tương ứng.
+    Ngoài cpu/mem còn gói các scalar/poll: vm running (vmr), vm repl unhealthy
+    (vmu), wifi client (wc), wifi AP offline (wao) — chỉ thêm key khi thiết bị
+    có dữ liệu tương ứng.
     """
     sample = {"ts": ts_epoch, "cpu": data.cpu_percent, "mem": data.mem_percent}
-    sc = data.extra.get("session_count")
-    if sc is not None:
-        sample["sc"] = sc
     vms = data.extra.get("vms")
     if vms:
         sample["vmr"] = sum(1 for v in vms if v.get("state") == "Running")

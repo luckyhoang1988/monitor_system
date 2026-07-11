@@ -124,9 +124,6 @@ def device_metrics(request, device_id: int):
     - range ≤ 24h: raw data (SystemHealth)
     - range 7d: hourly aggregated (SystemHealthHourly)
     - range ≥ 30d: daily aggregated (SystemHealthDaily)
-
-    If SystemHealth.extra contains vendor-specific fields (e.g. Fortinet session_count),
-    we include them when present so UI can optionally chart them.
     """
     device = get_object_or_404(Device, pk=device_id)
     since, until, source = _resolve_window(request)
@@ -226,9 +223,6 @@ def _device_metrics_raw(device: Device, since, until) -> JsonResponse:
             "mem_percent": [r.get("mem") for r in rows],
             "source":      "raw",
         }
-        sc_series = [r.get("sc") for r in rows]
-        if any(v is not None for v in sc_series):
-            data["session_count"] = [float(v) if v is not None else None for v in sc_series]
         _attach_host_perf_cache(data, rows)
         return JsonResponse(data)
 
@@ -245,8 +239,6 @@ def _device_metrics_raw(device: Device, since, until) -> JsonResponse:
         "mem_percent": [r["mem_percent"] for r in rows],
         "source":      "raw",
     }
-    # Optional vendor metric: Fortinet session count stored in JSON extra
-    _attach_session_count(data, rows)
     _attach_host_perf_db(data, rows)
     return JsonResponse(data)
 
@@ -367,25 +359,6 @@ def _device_metrics_daily(device: Device, since, until) -> JsonResponse:
     }
     _attach_host_perf_agg(data, rows)
     return JsonResponse(data)
-
-
-def _attach_session_count(data: dict, rows: list[dict]) -> None:
-    """Gắn Fortinet session_count series vào data nếu có."""
-    session_series = []
-    has_any_session = False
-    for r in rows:
-        extra = r.get("extra") or {}
-        val = extra.get("session_count")
-        if val is None:
-            session_series.append(None)
-        else:
-            has_any_session = True
-            try:
-                session_series.append(float(val))
-            except (TypeError, ValueError):
-                session_series.append(None)
-    if has_any_session:
-        data["session_count"] = session_series
 
 
 @login_required

@@ -2,8 +2,6 @@
 from tests.conftest import (
     CiscoSSHDeviceFactory, CiscoSNMPDeviceFactory,
     HuaweiSSHDeviceFactory, HuaweiSNMPDeviceFactory,
-    MikroTikSNMPDeviceFactory, MikroTikSSHDeviceFactory,
-    FortinetSNMPDeviceFactory, FortinetSSHDeviceFactory,
 )
 from apps.collectors.factory import CollectorFactory
 from apps.collectors.switch_snmp import SwitchSNMPCollector
@@ -43,24 +41,19 @@ class TestCollectorFactory:
         collector = CollectorFactory.create(device)
         assert isinstance(collector, SwitchSNMPCollector)
 
-    def test_mikrotik_snmp_router_returns_snmp_collector(self):
-        device = MikroTikSNMPDeviceFactory.build()
-        assert device.device_type == "router"
+    def test_snmp_router_returns_snmp_collector(self):
+        # device_type không ảnh hưởng dispatch — chỉ protocol/hyperv mới ảnh hưởng.
+        device = CiscoSNMPDeviceFactory.build(device_type="router")
         collector = CollectorFactory.create(device)
         assert isinstance(collector, SwitchSNMPCollector)
 
-    def test_mikrotik_ssh_router_returns_ssh_collector(self):
-        device = MikroTikSSHDeviceFactory.build()
-        collector = CollectorFactory.create(device)
-        assert isinstance(collector, SwitchSSHCollector)
-
-    def test_fortinet_snmp_firewall_returns_snmp_collector(self):
-        device = FortinetSNMPDeviceFactory.build()
-        assert device.device_type == "firewall"
+    def test_snmp_firewall_returns_snmp_collector(self):
+        # Firewall thật trong fleet (USG6525E) là Huawei SNMP.
+        device = HuaweiSNMPDeviceFactory.build(device_type="firewall")
         collector = CollectorFactory.create(device)
         assert isinstance(collector, SwitchSNMPCollector)
 
-    def test_fortinet_ssh_firewall_returns_ssh_collector(self):
-        device = FortinetSSHDeviceFactory.build()
+    def test_ssh_firewall_returns_ssh_collector(self):
+        device = CiscoSSHDeviceFactory.build(device_type="firewall")
         collector = CollectorFactory.create(device)
         assert isinstance(collector, SwitchSSHCollector)

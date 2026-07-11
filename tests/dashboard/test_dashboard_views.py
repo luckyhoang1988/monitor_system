@@ -5,9 +5,8 @@ from django.contrib.auth.models import User
 from django.urls import reverse
 from tests.conftest import (
     CiscoSNMPDeviceFactory,
+    HuaweiSNMPDeviceFactory,
     HyperVDeviceFactory,
-    MikroTikSNMPDeviceFactory,
-    FortinetSNMPDeviceFactory,
 )
 from apps.devices.models import Device, Interface
 from apps.metrics.models import SystemHealth, InterfaceStats, VMStats, WifiApStats
@@ -29,8 +28,8 @@ class TestDashboardViews:
 
     def test_dashboard_index_view(self, logged_in_client):
         switch = CiscoSNMPDeviceFactory(name="sw-1", device_type="switch")
-        router = MikroTikSNMPDeviceFactory(name="rt-1", device_type="router")
-        firewall = FortinetSNMPDeviceFactory(name="fw-1", device_type="firewall")
+        router = CiscoSNMPDeviceFactory(name="rt-1", device_type="router")
+        firewall = HuaweiSNMPDeviceFactory(name="fw-1", device_type="firewall")
         hyperv = HyperVDeviceFactory(name="hv-1", device_type="hyperv")
 
         response = logged_in_client.get(reverse("dashboard:index"))
@@ -43,8 +42,8 @@ class TestDashboardViews:
 
     def test_dashboard_index_shows_per_type_stats(self, logged_in_client):
         CiscoSNMPDeviceFactory.create_batch(3, device_type="switch")
-        MikroTikSNMPDeviceFactory.create_batch(2, device_type="router")
-        FortinetSNMPDeviceFactory(name="fw-only", device_type="firewall")
+        CiscoSNMPDeviceFactory.create_batch(2, device_type="router")
+        HuaweiSNMPDeviceFactory(name="fw-only", device_type="firewall")
 
         response = logged_in_client.get(reverse("dashboard:index"))
         assert response.status_code == 200
@@ -137,13 +136,13 @@ class TestDashboardViews:
         assert "Gi0/1" in content
 
     def test_router_detail_view(self, logged_in_client):
-        router = MikroTikSNMPDeviceFactory(name="rt-1", device_type="router")
+        router = CiscoSNMPDeviceFactory(name="rt-1", device_type="router")
         response = logged_in_client.get(reverse("dashboard:router_detail", args=[router.pk]))
         assert response.status_code == 200
         assert "rt-1" in response.content.decode("utf-8")
 
     def test_firewall_detail_view(self, logged_in_client):
-        fw = FortinetSNMPDeviceFactory(name="fw-1", device_type="firewall")
+        fw = HuaweiSNMPDeviceFactory(name="fw-1", device_type="firewall")
         response = logged_in_client.get(reverse("dashboard:firewall_detail", args=[fw.pk]))
         assert response.status_code == 200
         assert "fw-1" in response.content.decode("utf-8")

@@ -47,12 +47,6 @@ DEFAULT_RULES = [
         "condition": "gt", "threshold": 800.0,
         "severity": "WARNING", "duration_min": 10,
     },
-    {
-        "name": "Firewall Sessions High",
-        "device_type": "firewall", "metric": "fw_session_count",
-        "condition": "gt", "threshold": 200000.0,
-        "severity": "WARNING", "duration_min": 10,
-    },
     # HyperV rules
     {
         "name": "HyperV CPU Critical",

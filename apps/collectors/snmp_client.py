@@ -208,6 +208,12 @@ def create_snmp_session(snmp_kwargs: dict[str, Any], backend: str | None = None)
 
 
 def snmp_get_value(session: Any, oid: str) -> str | None:
+    # pysnmp trả NoSuchInstance/NoSuchObject khi OID scalar không tồn tại (case phổ
+    # biến — vd Huawei scalar .0 thường trống). str() trên 2 type này ra CHUỖI RỖNG
+    # (verify runtime pysnmp 7.1.27), KHÔNG phải message .prettyPrint(). Toàn bộ
+    # pattern `float(self._snmp_get(oid) or 0)` trong switch_snmp.py dựa vào chuỗi
+    # rỗng này để rơi về 0 mà không crash — đổi sang prettyPrint() sẽ làm float()
+    # ném ValueError trên mọi vendor có OID rỗng hợp lệ (Huawei/Synology fallback).
     try:
         result = session.get(oid)
         return str(getattr(result, "value", result))

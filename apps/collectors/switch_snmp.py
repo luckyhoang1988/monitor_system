@@ -204,21 +204,8 @@ class SwitchSNMPCollector(BaseCollector):
         sys_oid  = self._snmp_get(OID_SYS_OBJECT_ID) or ""
         sys_desc = self._snmp_get(OID_SYS_DESCR) or ""
 
-        # MikroTik — enterprise prefix 14988
-        if "14988" in sys_oid or "RouterOS" in sys_desc:
-            return "mikrotik_routeros"
-
-        # Fortinet — enterprise prefix 12356
-        if "12356" in sys_oid or "FortiGate" in sys_desc or "FortiOS" in sys_desc:
-            return "fortinet_fortios"
-
         # Huawei — enterprise prefix 2011
         if "2011" in sys_oid or "VRP" in sys_desc:
-            return "huawei_vrp"
-
-        # HP/H3C Comware — enterprise prefix 25506; dùng chung profile Huawei entity table
-        if "25506" in sys_oid or "Comware" in sys_desc or "H3C" in sys_desc:
-            logger.info("Device %s: detect HP/H3C Comware — dùng profile huawei_vrp", self.device.name)
             return "huawei_vrp"
 
         # Synology NAS (DSM) — enterprise prefix 6574 (hiếm khi xuất hiện ở sysObjectID
@@ -447,26 +434,6 @@ class SwitchSNMPCollector(BaseCollector):
                 continue  # không thành viên VLAN nào → bỏ qua, dùng fallback
             result[if_index] = mode
         return result
-
-    def _collect_cpu_mem_mikrotik(self, oid_profile: dict) -> tuple[float, float]:
-        """CPU và Memory cho MikroTik RouterOS."""
-        cpu_table_oid = oid_profile.get("cpu", {}).get("processor_table")
-        cpu_rows = self._snmp_walk(cpu_table_oid) if cpu_table_oid else []
-        cpu_val  = float(cpu_rows[0][1]) if cpu_rows else 0.0
-
-        mem_profile = oid_profile.get("memory", {})
-        mem_used_oid = mem_profile.get("mem_used")
-        mem_total_oid = mem_profile.get("mem_total")
-        mem_used = int(self._snmp_get(mem_used_oid) or 0) if mem_used_oid else 0
-        mem_total = int(self._snmp_get(mem_total_oid) or 1) if mem_total_oid else 1
-        mem_val   = mem_used / mem_total * 100 if mem_total else 0.0
-        return cpu_val, round(mem_val, 1)
-
-    def _collect_cpu_mem_fortinet(self, oid_profile: dict) -> tuple[float, float]:
-        """CPU và Memory cho Fortinet FortiOS — cả hai là % trực tiếp."""
-        cpu_val = float(self._snmp_get(oid_profile["cpu"]["cpu_usage"]) or 0)
-        mem_val = float(self._snmp_get(oid_profile["memory"]["mem_usage"]) or 0)
-        return cpu_val, mem_val
 
     def _collect_cpu_mem_huawei(self, oid_profile: dict) -> tuple[float, float]:
         """Huawei VRP — scalar .0 thường trống, cần walk entity table."""
@@ -754,19 +721,7 @@ class SwitchSNMPCollector(BaseCollector):
         oid_profile = _load_oid_profile(os_family)
         extra: dict = {}
 
-        if os_family == "mikrotik_routeros":
-            cpu_val, mem_val = self._collect_cpu_mem_mikrotik(oid_profile)
-
-        elif os_family == "fortinet_fortios":
-            cpu_val, mem_val = self._collect_cpu_mem_fortinet(oid_profile)
-            # Lưu session count vào extra nếu có
-            ses_oid = oid_profile.get("extra", {}).get("session_count")
-            if ses_oid:
-                ses = self._snmp_get(ses_oid)
-                if ses is not None:
-                    extra["session_count"] = int(ses)
-
-        elif os_family == "huawei_vrp":
+        if os_family == "huawei_vrp":
             cpu_val, mem_val = self._collect_cpu_mem_huawei(oid_profile)
 
         elif os_family == "cisco_business":

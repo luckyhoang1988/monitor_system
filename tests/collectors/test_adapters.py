@@ -4,7 +4,6 @@ import pytest
 from apps.collectors.adapters import (
     get_adapter,
     CiscoIOSAdapter, CiscoIOSXEAdapter, HuaweiVRPAdapter,
-    MikroTikRouterOSAdapter, FortinetFortiOSAdapter,
 )
 from apps.collectors.base import InterfaceData
 
@@ -100,61 +99,6 @@ class TestHuaweiVRPAdapter:
         assert data.mem_percent == 0.0
 
 
-class TestMikroTikRouterOSAdapter:
-    def test_os_family(self):
-        data = MikroTikRouterOSAdapter().normalize(SAMPLE_RAW, "mt-01", "10.0.0.10")
-        assert data.os_family == "mikrotik_routeros"
-
-    def test_cpu_mem_cast(self):
-        raw = {**SAMPLE_RAW, "cpu_percent": "12", "mem_percent": "55"}
-        data = MikroTikRouterOSAdapter().normalize(raw, "mt-01", "10.0.0.10")
-        assert data.cpu_percent == 12.0
-        assert data.mem_percent == 55.0
-
-    def test_extra_passthrough(self):
-        raw = {**SAMPLE_RAW, "extra": {"custom_key": 42}}
-        data = MikroTikRouterOSAdapter().normalize(raw, "mt-01", "10.0.0.10")
-        assert data.extra.get("custom_key") == 42
-
-    def test_missing_keys_default_zero(self):
-        data = MikroTikRouterOSAdapter().normalize({}, "mt-01", "10.0.0.10")
-        assert data.cpu_percent == 0.0
-        assert data.mem_percent == 0.0
-        assert data.uptime_secs == 0
-        assert data.interfaces == []
-
-    def test_timestamp_is_utc(self):
-        data = MikroTikRouterOSAdapter().normalize(SAMPLE_RAW, "mt-01", "10.0.0.10")
-        assert data.timestamp.tzinfo == timezone.utc
-
-
-class TestFortinetFortiOSAdapter:
-    def test_os_family(self):
-        data = FortinetFortiOSAdapter().normalize(SAMPLE_RAW, "fw-01", "10.0.0.20")
-        assert data.os_family == "fortinet_fortios"
-
-    def test_cpu_mem_cast(self):
-        raw = {**SAMPLE_RAW, "cpu_percent": "30", "mem_percent": "75"}
-        data = FortinetFortiOSAdapter().normalize(raw, "fw-01", "10.0.0.20")
-        assert data.cpu_percent == 30.0
-        assert data.mem_percent == 75.0
-
-    def test_extra_session_count(self):
-        raw = {**SAMPLE_RAW, "extra": {"session_count": 15000}}
-        data = FortinetFortiOSAdapter().normalize(raw, "fw-01", "10.0.0.20")
-        assert data.extra.get("session_count") == 15000
-
-    def test_missing_keys_default_zero(self):
-        data = FortinetFortiOSAdapter().normalize({}, "fw-01", "10.0.0.20")
-        assert data.cpu_percent == 0.0
-        assert data.mem_percent == 0.0
-        assert data.extra == {}
-
-    def test_timestamp_is_utc(self):
-        data = FortinetFortiOSAdapter().normalize(SAMPLE_RAW, "fw-01", "10.0.0.20")
-        assert data.timestamp.tzinfo == timezone.utc
-
-
 class TestGetAdapter:
     def test_get_cisco_ios(self):
         adapter = get_adapter("cisco_ios")
@@ -167,14 +111,6 @@ class TestGetAdapter:
     def test_get_huawei_vrp(self):
         adapter = get_adapter("huawei_vrp")
         assert isinstance(adapter, HuaweiVRPAdapter)
-
-    def test_get_mikrotik_routeros(self):
-        adapter = get_adapter("mikrotik_routeros")
-        assert isinstance(adapter, MikroTikRouterOSAdapter)
-
-    def test_get_fortinet_fortios(self):
-        adapter = get_adapter("fortinet_fortios")
-        assert isinstance(adapter, FortinetFortiOSAdapter)
 
     def test_unknown_os_raises_value_error(self):
         with pytest.raises(ValueError, match="Không có adapter"):

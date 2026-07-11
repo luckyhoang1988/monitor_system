@@ -49,7 +49,6 @@ class AlertRule(models.Model):
             "if_status": "Uplink status (0=DOWN, 1=UP)",
             "uplink_in_mbps_max": "Uplink IN traffic max (Mbps)",
             "uplink_out_mbps_max": "Uplink OUT traffic max (Mbps)",
-            "fw_session_count": "Firewall sessions (Fortinet)",
             "vm_count_running": "Số VM đang chạy",
             "vm_repl_unhealthy": "Số VM replication lỗi",
             "device_online": "Trạng thái online (0=OFFLINE, 1=ONLINE)",
@@ -78,7 +77,7 @@ class AlertRule(models.Model):
             return f"{t:.1f}%"
         if m in ("uplink_in_mbps_max", "uplink_out_mbps_max"):
             return f"{t:.3f} Mbps"
-        if m in ("vm_count_running", "vm_repl_unhealthy", "fw_session_count",
+        if m in ("vm_count_running", "vm_repl_unhealthy",
                  "wifi_client_count", "wifi_ap_offline"):
             return f"{t:.0f}"
         if m == "if_status":

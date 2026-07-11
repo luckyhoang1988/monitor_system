@@ -7,7 +7,6 @@ METRIC_CHOICES = [
     ("if_status",         "Uplink status (0=DOWN, 1=UP)"),
     ("uplink_in_mbps_max",  "Uplink IN traffic max (Mbps)"),
     ("uplink_out_mbps_max", "Uplink OUT traffic max (Mbps)"),
-    ("fw_session_count",  "Firewall sessions (Fortinet)"),
     ("vm_count_running",  "Số VM đang chạy"),
     ("vm_repl_unhealthy", "Số VM replication lỗi"),
     ("device_online",     "Trạng thái online (0=OFFLINE, 1=ONLINE)"),

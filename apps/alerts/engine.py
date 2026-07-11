@@ -31,7 +31,6 @@ METRIC_GETTERS = {
     "if_status":         lambda device, since: _check_if_status(device, since),
     "uplink_in_mbps_max":  lambda device, since: _uplink_traffic_max(device, since, direction="in"),
     "uplink_out_mbps_max": lambda device, since: _uplink_traffic_max(device, since, direction="out"),
-    "fw_session_count":    lambda device, since: _fw_session_count(device, since),
     "vm_count_running":  lambda device, since: _count_vms_running(device, since),
     "vm_repl_unhealthy": lambda device, since: _count_vms_repl_unhealthy(device, since),
     "device_online":     lambda device, since: _device_online(device),
@@ -395,47 +394,6 @@ def _sustained_uplink_traffic_max(device: Device, rule: AlertRule, window_since)
     return latest if (cond_fn and cond_fn(latest, threshold)) else None
 
 
-def _fw_session_count(device: Device, since) -> float | None:
-    """Latest firewall session count from SystemHealth.extra.session_count."""
-    if _use_cache():
-        snap = _fresh_latest(device, since)
-        if not snap:
-            return None
-        sc = (snap.get("extra") or {}).get("session_count")
-        try:
-            return float(sc) if sc is not None else None
-        except (TypeError, ValueError):
-            return None
-    from apps.metrics.models import SystemHealth
-    rec = (SystemHealth.objects
-           .filter(device=device, timestamp__gte=since, extra__session_count__isnull=False)
-           .order_by("-timestamp")
-           .values_list("extra__session_count", flat=True)
-           .first())
-    if rec is None:
-        return None
-    try:
-        return float(rec)
-    except (TypeError, ValueError):
-        return None
-
-
-def _sustained_fw_session_count(device: Device, rule: AlertRule, window_since) -> float | None:
-    if _use_cache():
-        series = metrics_cache.get_sys_series(device.id, window_since)
-        values = [float(s["sc"]) for s in series if s.get("sc") is not None]
-        return _sustained_verdict(values, rule)
-
-    from apps.metrics.models import SystemHealth
-
-    qs = (SystemHealth.objects
-          .filter(device=device, timestamp__gte=window_since, extra__session_count__isnull=False)
-          .order_by("timestamp")
-          .values_list("extra__session_count", flat=True))
-    values = [float(v) for v in qs if v is not None]
-    return _sustained_verdict(values, rule)
-
-
 def _sustained_vm_metric(device: Device, rule: AlertRule, window_since) -> float | None:
     """Evaluate sustained VM metrics across snapshots in window.
 
@@ -793,8 +751,6 @@ def check_device_alerts(device: Device, since) -> None:
                 value = _sustained_if_status(device, window_since)
             elif rule.metric in ("uplink_in_mbps_max", "uplink_out_mbps_max"):
                 value = _sustained_uplink_traffic_max(device, rule, window_since)
-            elif rule.metric == "fw_session_count":
-                value = _sustained_fw_session_count(device, rule, window_since)
             elif rule.metric in ("vm_count_running", "vm_repl_unhealthy"):
                 value = _sustained_vm_metric(device, rule, window_since)
             elif rule.metric == "device_online":
@@ -891,8 +847,6 @@ def _fire_alert(device: Device, rule: AlertRule, value: float) -> None:
             return f"{v:.1f}%"
         if metric in ("uplink_in_mbps_max", "uplink_out_mbps_max"):
             return f"{v:.3f} Mbps"
-        if metric == "fw_session_count":
-            return f"{v:.0f}"
         if metric in ("vm_count_running", "vm_repl_unhealthy", "wifi_client_count"):
             return f"{v:.0f}"
         if metric == "wifi_ap_offline":

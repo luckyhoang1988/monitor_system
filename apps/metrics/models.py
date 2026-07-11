@@ -27,7 +27,7 @@ class SystemHealth(models.Model):
     cpu_percent = models.FloatField()
     mem_percent = models.FloatField()
     uptime_secs = models.BigIntegerField(null=True, blank=True)
-    extra       = models.JSONField(default=dict, blank=True)  # vendor-specific: session_count, v.v.
+    extra       = models.JSONField(default=dict, blank=True)  # per-device-type: vms, wifi_aps, v.v.
     # HyperV host performance counters (Phase 1 MVP, apps.collectors.hyperv Get-Counter burst).
     # null = collector không hỗ trợ hoặc Get-Counter lỗi cho poll đó.
     cpu_hv_percent        = models.FloatField(null=True, blank=True)

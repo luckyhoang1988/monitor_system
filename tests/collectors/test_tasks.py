@@ -145,11 +145,11 @@ class TestPollAllSwitches:
 @pytest.mark.django_db
 class TestPollAllNetworkDevices:
     def test_dispatches_for_switch_router_firewall_enabled(self, mocker):
-        from tests.conftest import MikroTikSNMPDeviceFactory, FortinetSNMPDeviceFactory
+        from tests.conftest import HuaweiSNMPDeviceFactory
         CiscoSNMPDeviceFactory(device_type="switch",   enabled=True)
         CiscoSNMPDeviceFactory(device_type="switch",   enabled=False)  # skip disabled
-        MikroTikSNMPDeviceFactory(device_type="router",   enabled=True)
-        FortinetSNMPDeviceFactory(device_type="firewall", enabled=True)
+        CiscoSNMPDeviceFactory(device_type="router",   enabled=True)
+        HuaweiSNMPDeviceFactory(device_type="firewall", enabled=True)  # như USG6525E thật
 
         mock_dispatch = mocker.patch("apps.collectors.tasks.poll_device.apply_async")
         from apps.collectors.tasks import poll_all_network_devices

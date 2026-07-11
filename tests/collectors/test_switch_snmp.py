@@ -302,42 +302,34 @@ class TestCollectRawResilience:
         raw = collector.collect_raw()
         assert raw["mem_percent"] == 0.0
 
-    def test_collect_raw_mikrotik_missing_memory_oids_does_not_raise(self, mocker):
-        collector = SwitchSNMPCollector(CiscoSNMPDeviceFactory.build())
-        mocker.patch.object(collector, "detect_os_family", return_value="mikrotik_routeros")
-        mocker.patch("apps.collectors.switch_snmp._load_oid_profile", return_value={
-            "cpu": {"processor_table": "1.2.3"},
-            "memory": {},
-        })
-        mocker.patch.object(collector, "_snmp_walk", return_value=[("1.2.3.1", "10")])
-        mocker.patch.object(collector, "_snmp_get", return_value=0)
-        mocker.patch.object(collector, "_collect_interfaces", return_value=[])
-
-        raw = collector.collect_raw()
-        assert raw["mem_percent"] == 0.0
-
     def test_collect_cpu_mem_huawei_walks_entity_table_when_scalar_empty(self, mocker):
+        """Số cột dùng ĐÚNG mapping thật đã verify runtime (CLAUDE.md): .5=CPU, .7=Mem.
+
+        (.6 = hwEntityCpuUsageThreshold — ngưỡng cảnh báo, KHÔNG phải CPU. Từng bị gán
+        nhầm CPU→.6/Mem→.5 trên fleet thật; cột số trong test này cố tình khớp số thật
+        để không mô phỏng lại đúng cặp số đã biết là sai.)
+        """
         collector = SwitchSNMPCollector(HuaweiSNMPDeviceFactory.build())
         mocker.patch.object(collector, "_snmp_get", return_value="")
         mocker.patch.object(collector, "_snmp_walk", side_effect=[
             [
-                ("1.3.6.1.4.1.2011.5.25.31.1.1.1.1.6.67108867", "0"),
-                ("1.3.6.1.4.1.2011.5.25.31.1.1.1.1.6.67108873", "95"),
+                ("1.3.6.1.4.1.2011.5.25.31.1.1.1.1.5.67108867", "0"),
+                ("1.3.6.1.4.1.2011.5.25.31.1.1.1.1.5.67108873", "95"),
             ],
             [
-                ("1.3.6.1.4.1.2011.5.25.31.1.1.1.1.5.67108867", "0"),
-                ("1.3.6.1.4.1.2011.5.25.31.1.1.1.1.5.67108873", "6"),
+                ("1.3.6.1.4.1.2011.5.25.31.1.1.1.1.7.67108867", "0"),
+                ("1.3.6.1.4.1.2011.5.25.31.1.1.1.1.7.67108873", "6"),
             ],
         ])
 
         cpu_val, mem_val = collector._collect_cpu_mem_huawei({
             "cpu": {
-                "cpu_usage": "1.3.6.1.4.1.2011.5.25.31.1.1.1.1.6.0",
-                "cpu_table": "1.3.6.1.4.1.2011.5.25.31.1.1.1.1.6",
+                "cpu_usage": "1.3.6.1.4.1.2011.5.25.31.1.1.1.1.5.0",
+                "cpu_table": "1.3.6.1.4.1.2011.5.25.31.1.1.1.1.5",
             },
             "memory": {
-                "mem_usage": "1.3.6.1.4.1.2011.5.25.31.1.1.1.1.5.0",
-                "mem_table": "1.3.6.1.4.1.2011.5.25.31.1.1.1.1.5",
+                "mem_usage": "1.3.6.1.4.1.2011.5.25.31.1.1.1.1.7.0",
+                "mem_table": "1.3.6.1.4.1.2011.5.25.31.1.1.1.1.7",
             },
         })
 

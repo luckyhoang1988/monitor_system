@@ -14,9 +14,6 @@ logger = logging.getLogger(__name__)
 NETMIKO_DRIVER = {
     "cisco":    "cisco_ios",    # Netmiko tự detect IOS vs IOS-XE
     "huawei":   "huawei_vrp",
-    "hp":       "hp_comware",
-    "mikrotik": "mikrotik_routeros",
-    "fortinet": "fortinet",
 }
 
 # SSH commands theo vendor
@@ -32,21 +29,6 @@ COMMANDS = {
         "cpu":       "display cpu-usage",
         "memory":    "display memory-usage",
         "interface": "display interface",
-    },
-    "hp": {
-        "version":   "display version",
-        "cpu":       "display cpu-usage",
-        "memory":    "display memory-usage",
-        "interface": "display interface",
-    },
-    "mikrotik": {
-        "resource":  "/system resource print",
-        "interface": "/interface print detail",
-    },
-    "fortinet": {
-        "perf":      "get system performance status",
-        "version":   "get system status",
-        "interface": "get system interface physical",
     },
 }
 
@@ -78,13 +60,6 @@ class SwitchSSHCollector(BaseCollector):
             raise TimeoutError(f"SSH timeout connecting to device {self.device.name} ({self.device.ip_address})")
 
     def detect_os_family(self) -> str:
-        if self.device.vendor == "mikrotik":
-            return "mikrotik_routeros"
-        if self.device.vendor == "fortinet":
-            return "fortinet_fortios"
-        if self.device.vendor == "hp":
-            return "hp_comware"
-
         cmd_set = COMMANDS.get(self.device.vendor, {})
         version_cmd = cmd_set.get("version")
         if not version_cmd:
@@ -218,139 +193,9 @@ class SwitchSSHCollector(BaseCollector):
             ))
         return interfaces
 
-    # ─── MikroTik RouterOS parsers ─────────────────────────────────────────────
-
-    def _parse_mikrotik_resource(self, output: str) -> tuple[float, float, int]:
-        """Parse '/system resource print' → (cpu%, mem%, uptime_secs)."""
-        cpu_m   = re.search(r"cpu-load:\s*(\d+)", output)
-        free_m  = re.search(r"free-memory:\s*([\d.]+)([MKG]iB)", output)
-        total_m = re.search(r"total-memory:\s*([\d.]+)([MKG]iB)", output)
-        up_m    = re.search(r"uptime:\s*(\S+)", output)
-
-        cpu_val = float(cpu_m.group(1)) if cpu_m else 0.0
-
-        def to_mb(val: float, unit: str) -> float:
-            return {"GiB": val * 1024, "MiB": val, "KiB": val / 1024}.get(unit, val)
-
-        mem_val = 0.0
-        if free_m and total_m:
-            free  = to_mb(float(free_m.group(1)),  free_m.group(2))
-            total = to_mb(float(total_m.group(1)), total_m.group(2))
-            mem_val = (total - free) / total * 100 if total else 0.0
-
-        uptime = 0
-        if up_m:
-            # Format: 10w4d19h2m29s
-            raw = up_m.group(1)
-            for pat, mult in [(r"(\d+)w", 604800), (r"(\d+)d", 86400),
-                              (r"(\d+)h", 3600),   (r"(\d+)m", 60), (r"(\d+)s", 1)]:
-                m = re.search(pat, raw)
-                if m:
-                    uptime += int(m.group(1)) * mult
-
-        return cpu_val, round(mem_val, 1), uptime
-
-    def _parse_mikrotik_interfaces(self, output: str) -> list[InterfaceData]:
-        """Parse '/interface print detail' output của MikroTik RouterOS."""
-        interfaces = []
-        # Mỗi interface bắt đầu bằng số thứ tự đầu dòng
-        blocks = re.split(r"\n(?=\s*\d+\s+)", output)
-        for idx, block in enumerate(blocks, start=1):
-            name_m    = re.search(r'name="([^"]+)"', block)
-            running_m = re.search(r"running=(yes|no)", block)
-            disabled_m= re.search(r"disabled=(yes|no)", block)
-            rx_m      = re.search(r"rx-byte=(\d+)", block)
-            tx_m      = re.search(r"tx-byte=(\d+)", block)
-            rx_err_m  = re.search(r"rx-error=(\d+)", block)
-            tx_err_m  = re.search(r"tx-error=(\d+)", block)
-            comment_m = re.search(r'comment="([^"]*)"', block)
-
-            if not name_m:
-                continue
-
-            if disabled_m and disabled_m.group(1) == "yes":
-                status = "down"
-            elif running_m:
-                status = "up" if running_m.group(1) == "yes" else "down"
-            else:
-                status = "unknown"
-
-            interfaces.append(InterfaceData(
-                name=name_m.group(1),
-                if_index=idx,
-                status=status,
-                in_bytes=int(rx_m.group(1)) if rx_m else 0,
-                out_bytes=int(tx_m.group(1)) if tx_m else 0,
-                in_errors=int(rx_err_m.group(1)) if rx_err_m else 0,
-                out_errors=int(tx_err_m.group(1)) if tx_err_m else 0,
-                description=comment_m.group(1) if comment_m else "",
-            ))
-        return interfaces
-
-    # ─── Fortinet FortiOS parsers ───────────────────────────────────────────────
-
-    def _parse_fortinet_perf(self, output: str) -> tuple[float, float]:
-        """Parse 'get system performance status' → (cpu%, mem%)."""
-        # "CPU states: 5% user 1% system 0% nice 94% idle"
-        cpu_m = re.search(r"CPU states?:\s*(\d+)%\s*user", output)
-        # "Memory: total=1000000 KB used=500000 KB free=500000 KB"
-        used_m  = re.search(r"Memory:.*?used=(\d+)\s*KB", output, re.DOTALL)
-        total_m = re.search(r"Memory:.*?total=(\d+)\s*KB", output, re.DOTALL)
-
-        cpu_val = float(cpu_m.group(1)) if cpu_m else 0.0
-        mem_val = 0.0
-        if used_m and total_m:
-            used, total = int(used_m.group(1)), int(total_m.group(1))
-            mem_val = used / total * 100 if total else 0.0
-
-        return cpu_val, round(mem_val, 1)
-
-    def _parse_fortinet_uptime(self, output: str) -> int:
-        """Parse 'get system status' → uptime_secs."""
-        # "System time: Mon Jan  1 00:00:00 2024\nUptime: 10 days,  2 hours,  15 minutes"
-        m = re.search(r"Uptime:\s*(?:(\d+)\s*day)?.*?(?:(\d+)\s*hour)?.*?(?:(\d+)\s*minute)?", output)
-        if not m:
-            return 0
-        d = int(m.group(1) or 0)
-        h = int(m.group(2) or 0)
-        mi = int(m.group(3) or 0)
-        return d * 86400 + h * 3600 + mi * 60
-
-    def _parse_fortinet_interfaces(self, output: str) -> list[InterfaceData]:
-        """Parse 'get system interface physical' output của Fortinet."""
-        interfaces = []
-        # Mỗi interface bắt đầu bằng "== [interface_name] =="
-        blocks = re.split(r"==\s+\[", output)
-        for idx, block in enumerate(blocks[1:], start=1):
-            header_m = re.match(r"([^\]]+)\]", block)
-            if not header_m:
-                continue
-
-            name = header_m.group(1).strip()
-            status = "up" if re.search(r"Link.*?up", block, re.IGNORECASE) else "down"
-            desc_m  = re.search(r"alias\s*:\s*(.+)", block)
-            rx_m    = re.search(r"rx-bytes\s*:\s*(\d+)", block)
-            tx_m    = re.search(r"tx-bytes\s*:\s*(\d+)", block)
-            spd_m   = re.search(r"speed\s*=\s*(\d+)", block)
-
-            interfaces.append(InterfaceData(
-                name=name,
-                if_index=idx,
-                status=status,
-                in_bytes=int(rx_m.group(1)) if rx_m else 0,
-                out_bytes=int(tx_m.group(1)) if tx_m else 0,
-                description=desc_m.group(1).strip() if desc_m else "",
-                speed_mbps=float(spd_m.group(1)) if spd_m else 0.0,
-            ))
-        return interfaces
-
     def _parse_interfaces(self, output: str, vendor: str) -> list[InterfaceData]:
         if vendor == "huawei":
             return self._parse_huawei_interfaces(output)
-        if vendor == "mikrotik":
-            return self._parse_mikrotik_interfaces(output)
-        if vendor == "fortinet":
-            return self._parse_fortinet_interfaces(output)
         return self._parse_cisco_interfaces(output)
 
     def collect_raw(self) -> dict:
@@ -358,35 +203,6 @@ class SwitchSSHCollector(BaseCollector):
         commands = COMMANDS.get(vendor, COMMANDS["cisco"])
 
         with self._get_connection() as conn:
-            if vendor == "mikrotik":
-                res_out = conn.send_command(commands["resource"])
-                if_out  = conn.send_command(commands["interface"])
-                cpu_percent, mem_percent, uptime_secs = self._parse_mikrotik_resource(res_out)
-                os_family = "mikrotik_routeros"
-                return {
-                    "os_family":   os_family,
-                    "cpu_percent": cpu_percent,
-                    "mem_percent": mem_percent,
-                    "uptime_secs": uptime_secs,
-                    "interfaces":  self._parse_mikrotik_interfaces(if_out),
-                    "extra":       {},
-                }
-
-            if vendor == "fortinet":
-                perf_out = conn.send_command(commands["perf"])
-                ver_out  = conn.send_command(commands["version"])
-                if_out   = conn.send_command(commands["interface"])
-                cpu_percent, mem_percent = self._parse_fortinet_perf(perf_out)
-                uptime_secs = self._parse_fortinet_uptime(ver_out)
-                return {
-                    "os_family":   "fortinet_fortios",
-                    "cpu_percent": cpu_percent,
-                    "mem_percent": mem_percent,
-                    "uptime_secs": uptime_secs,
-                    "interfaces":  self._parse_fortinet_interfaces(if_out),
-                    "extra":       {},
-                }
-
             # Cisco / Huawei
             ver_out = conn.send_command(commands["version"])
             cpu_out = conn.send_command(commands["cpu"])

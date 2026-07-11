@@ -50,12 +50,6 @@
             </div>
             <div class="text-muted" style="font-size:.7rem;">RAM</div>
           </div>
-          {% if session_count is not None %}
-          <div class="text-center">
-            <div class="fs-4 fw-bold text-danger">{{ session_count|floatformat:0 }}</div>
-            <div class="text-muted" style="font-size:.7rem;">Sessions</div>
-          </div>
-          {% endif %}
         </div>
         {% endif %}
 
@@ -199,8 +193,6 @@ const cpuChart = new Chart(cpuCtx, {
       tension: .3, fill: true, pointRadius: 2 },
     { label: "RAM %", data: [], borderColor: "#10b981", backgroundColor: "rgba(16,185,129,.1)",
       tension: .3, fill: true, pointRadius: 2 },
-    { label: "Sessions", data: [], borderColor: "#111827", backgroundColor: "transparent",
-      tension: .3, fill: false, pointRadius: 1, yAxisID: "y1" },
   ]},
   options: { ...chartDefaults, scales: { ...chartDefaults.scales, y: { ...chartDefaults.scales.y, max: 100 } } },
 });
@@ -218,10 +210,6 @@ function loadMetrics() {
       cpuChart.data.labels = d.labels;
       cpuChart.data.datasets[0].data = d.cpu_percent;
       cpuChart.data.datasets[1].data = d.mem_percent;
-      // Optional firewall metric: session_count
-      cpuChart.data.datasets[2].data = d.session_count || [];
-      // Hide dataset if not available
-      cpuChart.data.datasets[2].hidden = !d.session_count;
       cpuChart.update();
     })
     .catch(() => {});
