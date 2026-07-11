@@ -58,6 +58,13 @@ apps/
 - Business/SMB (Catalyst 1200/1300, CBS250/350): CPU `rlCpuUtil 1.3.6.1.4.1.9.6.1.101.1.9.0`. **Mem KHÔNG expose SNMP → mem=0** (giới hạn HW, không phải bug).
 - IOS-XE — ⚠️ **CHƯA kiểm chứng** (không có thiết bị): CPU/mem hard-code index `.1`; cần walk/verify khi có thiết bị thật (index khác trên stack/multi-RP).
 
+**Synology DSM (NAS)** — UCD-SNMP-MIB (`1.3.6.1.4.1.2021`), `oids/synology_dsm.yaml`:
+- ❌ **KHÔNG dùng `ssCpuUser/.9`+`ssCpuSystem/.10`+`ssCpuIdle/.11` (chuẩn UCD-SNMP-MIB, `cpu=100-idle`)** — verify runtime NAS-Pfvn 2026-07-11: DSM trả User(0)+System(1)+Idle(47)=**48**, phải ≈100 theo chuẩn. Field percent này bị lỗi scale trên firmware DSM (root cause chưa rõ, chỉ biết KHÔNG tin được) → `100-idle` từng báo CPU **53-54%** giả trong khi Resource Monitor thật DSM chỉ **~1-4%**.
+- ✅ **Dùng RAW counter** `ssCpuRawUser/.50` + `RawNice/.51` + `RawSystem/.52` + `RawIdle/.53` (jiffies cộng dồn từ boot, KHÔNG phải % — chuẩn Cacti/Zabbix/Munin cho host net-snmp) — **delta giữa 2 lần poll liên tiếp**: `cpu% = 100 × Δ(user+nice+system) / Δ(user+nice+system+idle)`. Cần baseline (poll trước, lưu Redis DB/1 qua `apps/collectors/cpu_state.py`, TTL 600s, độc lập `METRICS_WRITE_MODE`) → poll đầu tiên (hoặc sau khi mất state) trả `cpu=0.0`, tự lành ở poll kế tiếp. Counter giảm (NAS reboot) → bỏ mẫu, không suy đoán bừa.
+- ✅ Verify runtime NAS-Pfvn 2026-07-11 (3 poll cách nhau ~20-25s qua `manage.py poll_device`, đối chiếu DSM Resource Monitor UI): cpu trả 4.3% rồi 3.7% — khớp DSM thật (nền ~1%, spike ~12-15%), thay vì 53-54% cũ.
+- `cpu_idle` (`.11`) vẫn giữ trong profile làm **fallback** khi thiếu OID raw trong profile hoặc SNMP không trả đủ 4 giá trị raw — KHÔNG xoá.
+- Mem: `mem% = (memTotalReal - memAvailReal - memBuffer - memCached)/total×100` (loại cache/buffer để khớp DSM Resource Monitor) — **đã verify đúng từ trước** (commit `ee2b47f`), không đổi lần này.
+
 **Interface (mọi vendor)** — MIB-II, dùng 64-bit HC counters `ifHCInOctets/Out` = `.31.1.1.1.6/.10`.
 
 **Access VLAN / PVID per port** (`Interface.access_vlan`, collector `_collect_access_vlans`, OID trong `oids/*.yaml` `vlan:`):
@@ -298,6 +305,11 @@ Phase 1–7 **đã hoàn thành** (setup/models → collector SNMP/SSH + tests �
   `expire_seconds` cùng giá trị, nếu không entry đó lặp lại đúng bug này.
 
 ### Thay đổi quan trọng
+- **2026-07-11**: Fix CPU Synology NAS báo sai (53-54% giả, DSM thật ~1-4%) — phát hiện qua
+  đối chiếu ảnh chụp DSM Resource Monitor thật của user. Root cause: `ssCpuIdle` trên DSM
+  không theo chuẩn UCD-SNMP-MIB (verify runtime User+System+Idle=48, phải ≈100). Fix: chuyển
+  sang RAW counter delta 2 lần poll (xem mục "OID đã xác minh runtime" → Synology DSM). Module
+  mới `apps/collectors/cpu_state.py` (Redis scratch state). `cpu_idle` giữ làm fallback.
 - **2026-07-07**: Audit lại poll HyperV: fix `poll_all_hyperv` thiếu soft/hard `time_limit` batch
   (thêm 100s/110s, xem mục "HyperV Host Performance Counters" ⚠️ Batch); fix root cause
   `expire_seconds` bị `beat` reset mỗi lần restart (xem mục "Celery Beat" ở trên) — thêm key

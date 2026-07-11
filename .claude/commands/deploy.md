@@ -101,6 +101,19 @@ Quy trình chuẩn (đã dùng để bắt bug 504 phiên đầu):
   thì 1 thiết bị treo (WinRM/SNMP/SSH) có thể chiếm toàn bộ task tới hàng trăm giây, y hệt cơ chế
   "poll queue snowball" — `poll_device` đã có từ commit `fe1dac1`, `poll_all_hyperv` thiếu tới
   2026-07-07 mới fix (100s/110s, bắt `SoftTimeLimitExceeded` để dừng batch sạch).
+- **Field "percent" sẵn có trong MIB chuẩn (vd `ssCpuIdle` UCD-SNMP-MIB) không chắc đúng chuẩn
+  trên mọi firmware — phải verify tổng User+System+Idle ≈100 trên thiết bị thật trước khi tin.**
+  Dính thật 2026-07-11: Synology DSM trả `ssCpuUser(.9)+ssCpuSystem(.10)+ssCpuIdle(.11)=48`
+  (phải ≈100) → công thức chuẩn `100-idle` báo CPU 53-54% giả trong khi Resource Monitor DSM
+  thật ~1-4% (phát hiện qua ảnh chụp UI thật của user, không phải chủ động test). Fix: chuyển
+  sang **RAW counter** (`ssCpuRawUser/Nice/System/Idle` — jiffies cộng dồn từ boot, KHÔNG phải
+  %) + **delta giữa 2 lần poll liên tiếp** (`cpu%=100×Δbusy/Δtotal`, chuẩn Cacti/Zabbix/Munin).
+  Cần baseline (poll trước) → thêm state Redis riêng `apps/collectors/cpu_state.py` (DB/1, TTL
+  600s, **độc lập `METRICS_WRITE_MODE`** vì đây là scratch tính delta chứ không phải metrics).
+  Counter giảm (reboot) → bỏ mẫu thay vì suy đoán. Quy tắc chung: bất kỳ OID "đã tính sẵn %"
+  nào chưa có trong mục "OID đã xác minh runtime" CLAUDE.md đều PHẢI coi là chưa chắc — verify
+  bằng cách walk cả nhánh counter thô liên quan rồi đối chiếu UI/tool chính hãng của thiết bị,
+  không chỉ tin tên OID nghe "chuẩn".
 - **PowerShell helper function 1 ký tự có thể trùng alias built-in** (`r`=`Invoke-History`,
   `h`=`Get-History`, v.v.) — PowerShell resolve alias TRƯỚC function cùng tên trong 1 số trường hợp,
   khiến hàm tự định nghĩa `function R(...)` bị gọi nhầm thành `Invoke-History`, ném lỗi mơ hồ

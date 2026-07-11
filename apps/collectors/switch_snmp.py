@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 import yaml
 
+from . import cpu_state
 from .base import BaseCollector, NormalizedData, InterfaceData
 from .snmp_client import (
     create_snmp_session,
@@ -515,7 +516,16 @@ class SwitchSNMPCollector(BaseCollector):
         return cpu_val, 0.0
 
     def _collect_cpu_mem_synology(self, oid_profile: dict) -> tuple[float, float]:
-        """Synology DSM — UCD-SNMP-MIB. CPU = 100 - ssCpuIdle.
+        """Synology DSM — UCD-SNMP-MIB.
+
+        ⚠️ CPU KHÔNG dùng `100 - ssCpuIdle` (cách chuẩn UCD-SNMP-MIB) — verify runtime
+        NAS-Pfvn 2026-07-11 cho thấy DSM tính OID `.9/.10/.11` (User/System/Idle) sai
+        chuẩn: User(0)+System(1)+Idle(47)=48, phải ≈100. Công thức cũ báo CPU 53-54%
+        trong khi DSM Resource Monitor thật báo ~1%. Thay bằng RAW counter (jiffies
+        cộng dồn từ boot, `.50/.51/.52/.53`) + delta 2 lần poll liên tiếp — công thức
+        chuẩn Cacti/Zabbix/Munin dùng cho host net-snmp, không phụ thuộc field percent
+        lỗi scale của DSM. Cần baseline (poll trước, lưu Redis qua `cpu_state`) → poll
+        đầu tiên (hoặc sau khi state hết TTL/reset) trả cpu=0.0, tự lành ở poll kế.
 
         Mem 'thực dùng' = total - free - buffer - cached (loại cache/buffer để khớp
         DSM Resource Monitor). Nếu thiếu buffer/cached → quay về total - free.
@@ -526,8 +536,33 @@ class SwitchSNMPCollector(BaseCollector):
             except (TypeError, ValueError):
                 return 0.0
 
-        idle_raw = self._snmp_get(oid_profile["cpu"]["cpu_idle"])
-        cpu_val = max(0.0, 100.0 - _to_float(idle_raw)) if idle_raw not in (None, "") else 0.0
+        cpu_oids = oid_profile["cpu"]
+        raw_keys = ("cpu_raw_user", "cpu_raw_nice", "cpu_raw_system", "cpu_raw_idle")
+        raw_now: dict[str, float] = {}
+        if all(cpu_oids.get(k) for k in raw_keys):
+            for key in raw_keys:
+                val = self._snmp_get(cpu_oids[key])
+                if val in (None, ""):
+                    raw_now = {}
+                    break
+                raw_now[key] = _to_float(val)
+
+        cpu_val = 0.0
+        if raw_now:
+            prev = cpu_state.get_last_raw(self.device.id)
+            if prev:
+                deltas = {k: raw_now[k] - _to_float(prev.get(k)) for k in raw_keys}
+                total_delta = sum(deltas.values())
+                # total_delta<=0 → reboot (counter reset) hoặc 2 poll cùng thời điểm: bỏ mẫu,
+                # KHÔNG trả số rác — tự lành ở poll kế (baseline mới đã lưu bên dưới).
+                if total_delta > 0:
+                    busy = deltas["cpu_raw_user"] + deltas["cpu_raw_nice"] + deltas["cpu_raw_system"]
+                    cpu_val = max(0.0, min(100.0, busy / total_delta * 100.0))
+            cpu_state.set_last_raw(self.device.id, raw_now)
+        else:
+            # Fallback: thiếu OID raw trong profile hoặc SNMP không trả đủ 4 giá trị.
+            idle_raw = self._snmp_get(cpu_oids.get("cpu_idle"))
+            cpu_val = max(0.0, 100.0 - _to_float(idle_raw)) if idle_raw not in (None, "") else 0.0
 
         mem = oid_profile["memory"]
 

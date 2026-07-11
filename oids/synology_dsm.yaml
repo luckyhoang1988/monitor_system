@@ -1,11 +1,18 @@
 # Synology DSM (NAS) — SNMP qua UCD-SNMP-MIB (enterprise 1.3.6.1.4.1.2021)
 # Bật SNMP trên DSM: Control Panel → Terminal & SNMP → SNMP service (v2c/v3).
-# CPU: ssCpuIdle (%) → cpu_percent = 100 - idle
+# CPU: dùng RAW counter (jiffies cộng dồn) + delta 2 lần poll — xem CLAUDE.md
+#   "OID đã xác minh runtime" mục Synology: ssCpuIdle (.11, %) trên DSM KHÔNG
+#   theo chuẩn UCD-SNMP-MIB (User+System+Idle verify runtime chỉ =48, phải ≈100)
+#   → 100-idle cho CPU giả cao. cpu_idle giữ lại làm fallback khi thiếu OID raw.
 # Memory: memTotalReal / memAvailReal (KB) → mem% = (total - avail)/total*100
 # Interface: dùng MIB-II standard (xử lý chung trong collector, không cần khai báo).
 
 cpu:
-  cpu_idle: "1.3.6.1.4.1.2021.11.11.0"     # ssCpuIdle (%)
+  cpu_idle:       "1.3.6.1.4.1.2021.11.11.0"  # ssCpuIdle (%) — fallback, KHÔNG đáng tin trên DSM
+  cpu_raw_user:   "1.3.6.1.4.1.2021.11.50.0"  # ssCpuRawUser (jiffies cộng dồn từ boot)
+  cpu_raw_nice:   "1.3.6.1.4.1.2021.11.51.0"  # ssCpuRawNice
+  cpu_raw_system: "1.3.6.1.4.1.2021.11.52.0"  # ssCpuRawSystem
+  cpu_raw_idle:   "1.3.6.1.4.1.2021.11.53.0"  # ssCpuRawIdle
 
 memory:
   mem_total:  "1.3.6.1.4.1.2021.4.5.0"     # memTotalReal (KB)
