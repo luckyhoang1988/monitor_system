@@ -1,4 +1,6 @@
 """Tests for Auto-Discovery Scanner."""
+import time
+
 import pytest
 from django.urls import reverse
 from unittest.mock import patch
@@ -50,6 +52,36 @@ class TestDiscoveryViews:
         data = response.json()
         assert data["success"] is False
         assert "256" in data["message"]
+
+    def test_scan_huge_subnet_rejected_fast(self, logged_in_client):
+        # Regression: code cũ materialize list(network.hosts()) TRƯỚC khi so max_ips
+        # → nhập nhầm /8 (16.7 triệu IP) tạo ngần ấy string trước khi kịp từ chối,
+        # có thể treo/OOM worker. Fix kiểm tra network.num_addresses (O(1)) trước khi
+        # duyệt — request phải trả lời gần như tức thì thay vì phải build xong list khổng lồ.
+        start = time.monotonic()
+        response = logged_in_client.post(
+            reverse("devices:discovery_scan"), data={"subnet": "10.0.0.0/8"}
+        )
+        elapsed = time.monotonic() - start
+        assert response.status_code == 200
+        data = response.json()
+        assert data["success"] is False
+        assert "256" in data["message"]
+        assert elapsed < 2.0, f"Bị từ chối nhưng mất {elapsed:.2f}s — nghi ngờ vẫn materialize list lớn"
+
+    def test_scan_ipv6_subnet_rejected_fast(self, logged_in_client):
+        # IPv6 /64 = 2**64 địa chỉ — cùng nhóm rủi ro với /8, đảm bảo không đặc biệt
+        # hoá riêng IPv4 mà bỏ sót IPv6.
+        start = time.monotonic()
+        response = logged_in_client.post(
+            reverse("devices:discovery_scan"), data={"subnet": "2001:db8::/64"}
+        )
+        elapsed = time.monotonic() - start
+        assert response.status_code == 200
+        data = response.json()
+        assert data["success"] is False
+        assert "256" in data["message"]
+        assert elapsed < 2.0, f"Bị từ chối nhưng mất {elapsed:.2f}s — nghi ngờ vẫn materialize list lớn"
 
     @patch("apps.devices.views._ping_ip")
     @patch("apps.devices.views._probe_snmp")

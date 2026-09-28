@@ -6,6 +6,15 @@
   var SSE_DEBOUNCE_MS = 2000;
   var dagreReady = false;
 
+  // mac/ip/switch_name/location... đến từ LLDP/FDB/SNMP của thiết bị trên mạng
+  // (dữ liệu ngoài tầm kiểm soát của server) — phải escape trước khi ghép vào
+  // innerHTML. Cùng pattern esc() đã dùng ở topology_links.js/wlan_detail.html.
+  function esc(s) {
+    var div = document.createElement("div");
+    div.textContent = s == null ? "" : String(s);
+    return div.innerHTML;
+  }
+
   function ensureDagre() {
     if (dagreReady) return true;
     if (global.cytoscape && global.cytoscapeDagre) {
@@ -290,11 +299,11 @@
       opts.panelTitle.textContent = title;
       var lines = [];
       if (d.type === "ap") {
-        if (d.mac) lines.push("<div><strong>MAC:</strong> " + d.mac + "</div>");
-        if (d.ip) lines.push("<div><strong>IP:</strong> " + d.ip + "</div>");
+        if (d.mac) lines.push("<div><strong>MAC:</strong> " + esc(d.mac) + "</div>");
+        if (d.ip) lines.push("<div><strong>IP:</strong> " + esc(d.ip) + "</div>");
         if (d.switch_name) {
-          lines.push("<div><strong>Switch:</strong> " + d.switch_name + "</div>");
-          lines.push("<div><strong>Port:</strong> " + (d.switch_port || "—") + "</div>");
+          lines.push("<div><strong>Switch:</strong> " + esc(d.switch_name) + "</div>");
+          lines.push("<div><strong>Port:</strong> " + esc(d.switch_port || "—") + "</div>");
         } else if (d.orphan) {
           lines.push('<div class="text-warning">Chưa map — chưa biết switch/port</div>');
         }
@@ -314,11 +323,11 @@
       } else if (d.type === "core" || d.type === "switch") {
         lines.push('<div class="badge ' + (d.type === "core" ? "bg-primary" : "bg-secondary") + ' mb-1">' +
           (d.type === "core" ? "Core switch" : "Switch access") + "</div>");
-        if (d.ip) lines.push("<div><strong>IP:</strong> " + d.ip + "</div>");
-        if (d.location) lines.push("<div><strong>Vị trí:</strong> " + d.location + "</div>");
+        if (d.ip) lines.push("<div><strong>IP:</strong> " + esc(d.ip) + "</div>");
+        if (d.location) lines.push("<div><strong>Vị trí:</strong> " + esc(d.location) + "</div>");
         if (d.ap_count != null) lines.push("<div><strong>AP:</strong> " + d.ap_count + "</div>");
         if (d.detail_url) {
-          lines.push('<div class="mt-2"><a href="' + d.detail_url + '">Chi tiết switch</a></div>');
+          lines.push('<div class="mt-2"><a href="' + esc(d.detail_url) + '">Chi tiết switch</a></div>');
         }
       }
       opts.panelBody.innerHTML = lines.join("");

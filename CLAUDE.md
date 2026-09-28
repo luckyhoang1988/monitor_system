@@ -424,6 +424,38 @@ admin credential riêng, không nhất thiết giống Hyperv-02/Hyprver03).
   `expire_seconds` cùng giá trị, nếu không entry đó lặp lại đúng bug này.
 
 ### Thay đổi quan trọng
+- **2026-09-28 (cùng ngày, mới nhất — sau iLO)**: Security review theo báo cáo ngoài (4 điểm), cả
+  4 đều verify đúng bằng bằng chứng thật rồi mới fix (không sửa mù):
+  1. **Critical — secret/dữ liệu vận hành đóng gói vào Docker image**: `Dockerfile` `COPY . .`
+     không có `.dockerignore` → build context chứa `.env`/`.env.production`/`db.sqlite3`/
+     `backups/`/`.git/`/`venv/`/`scratchpad/`. Thêm `.dockerignore` loại trừ secret + VCS + venv +
+     dữ liệu vận hành (không đổi `Dockerfile`).
+  2. **High — service `db` và `app` nhận 2 bộ credential Postgres khác nhau**: xác nhận **đang
+     tồn tại thật trên prod** qua SSH + `docker compose config` (không chỉ đọc code đoán) —
+     `POSTGRES_PASSWORD` resolve về default `change_me_db_password`, khác hẳn `DB_PASSWORD` thật.
+     Root cause: `${DB_USER}`/`${DB_PASSWORD}` trong `docker-compose.yml` là nội suy cấp Compose
+     (chỉ đọc file `.env`, server không có), không đọc qua `env_file: .env.production`. Hiện chưa
+     lộ triệu chứng vì Postgres chỉ áp `POSTGRES_*` lúc init volume rỗng lần đầu — sẽ vỡ khi tái
+     tạo volume (disaster recovery/migrate host). Fix: bỏ `environment: ${...}`, service `db` đọc
+     thẳng `POSTGRES_DB/POSTGRES_USER/POSTGRES_PASSWORD` qua `env_file` (3 khoá mới, mirror
+     `DB_NAME/DB_USER/DB_PASSWORD`, thêm vào `.env`/`.env.production`/`.env.example`); healthcheck
+     đổi sang `$$POSTGRES_USER` (nội suy trong container, không phải Compose). Chi tiết đầy đủ +
+     cách verify: `/deploy` skill mục bẫy `${VAR}` vs `env_file`. ⚠️ **Đã sửa code + env file cục
+     bộ, CHƯA deploy lên prod** (đổi service `db` cần recreate container → gián đoạn ngắn, để
+     người dùng chọn thời điểm).
+  3. **High — DOM XSS**: `discovery.html` (kết quả AJAX scan: hostname/sys_descr từ reverse
+     DNS+SNMP của thiết bị quét được) và `topology.js` (`showPanel`: mac/ip/switch_name/location từ
+     LLDP/FDB/SNMP) ghép thẳng vào `innerHTML` không escape — dữ liệu này đến từ thiết bị ngoài
+     mạng, không phải server sinh ra, nên thiết bị/host độc hại có thể chèn HTML/script chạy trong
+     phiên admin. Fix: thêm hàm `esc()` (tạo `<div>`, gán `textContent`, đọc lại `innerHTML`) —
+     đúng pattern đã có sẵn ở `topology_links.js`/`wlan_detail.html`, áp cho mọi field nghi vấn;
+     `discovery.html` thêm `encodeURIComponent()` cho query string link Import.
+  4. **High — CIDR lớn có thể OOM/treo worker**: `device_discovery_scan`
+     ([apps/devices/views.py](apps/devices/views.py)) từng `list(network.hosts())` rồi mới so
+     `len(ips) > max_ips` → nhập nhầm `/8` hoặc IPv6 `/64` tạo hàng triệu/tỷ string trước khi kịp
+     từ chối. Fix: so `network.num_addresses` (O(1), không duyệt) TRƯỚC khi materialize danh sách.
+     Test regression thêm (`test_scan_huge_subnet_rejected_fast`/`test_scan_ipv6_subnet_rejected_fast`,
+     assert trả lời <2s) — 448 test pass (446+2 mới), 2 skip như cũ.
 - **2026-09-28 (cùng ngày, mới nhất)**: Thêm iLO Redfish — RAID/disk health cho HyperV host, độc
   lập hoàn toàn WinRM (model `HardwareHealth`, collector `ilo_redfish.py`, task `poll_all_ilo`, 3
   alert rule RAID). Xem mục "iLO Redfish" ở trên + memory `ilo-raid-monitoring.md`. Verify sống

@@ -146,6 +146,15 @@ const toast = new bootstrap.Toast(document.getElementById("scanToast"));
 const toastBody = document.getElementById("scanToastBody");
 const toastTitle = document.getElementById("toastTitle");
 
+// hostname/sys_descr đến từ reverse DNS + SNMP sysDescr của thiết bị quét được
+// (dữ liệu ngoài tầm kiểm soát của server) — phải escape trước khi ghép vào innerHTML,
+// không tin HTML thô. Cùng pattern esc() đã dùng ở topology_links.js/wlan_detail.html.
+function esc(s) {
+  const div = document.createElement("div");
+  div.textContent = s == null ? "" : String(s);
+  return div.innerHTML;
+}
+
 document.getElementById("scanForm").addEventListener("submit", function (e) {
   e.preventDefault();
   
@@ -183,14 +192,14 @@ document.getElementById("scanForm").addEventListener("submit", function (e) {
             
           const actionBtn = dev.is_imported
             ? '<span class="badge bg-success rounded-pill px-2"><i class="bi bi-check-circle me-1"></i>Đã Import</span>'
-            : `<a href="{% url 'devices:add' %}?ip_address=${dev.ip_address}&name=${dev.hostname}&protocol=${dev.snmp_status ? 'snmp' : 'ping'}&snmp_community=${dev.snmp_status ? 'public' : ''}" class="btn btn-primary btn-sm py-0 px-2">Import</a>`;
-            
+            : `<a href="{% url 'devices:add' %}?ip_address=${encodeURIComponent(dev.ip_address)}&name=${encodeURIComponent(dev.hostname || '')}&protocol=${dev.snmp_status ? 'snmp' : 'ping'}&snmp_community=${dev.snmp_status ? 'public' : ''}" class="btn btn-primary btn-sm py-0 px-2">Import</a>`;
+
           const tr = document.createElement("tr");
           tr.innerHTML = `
-            <td class="font-monospace fw-bold text-dark">${dev.ip_address}</td>
-            <td class="text-muted">${dev.hostname || '—'}</td>
+            <td class="font-monospace fw-bold text-dark">${esc(dev.ip_address)}</td>
+            <td class="text-muted">${esc(dev.hostname) || '—'}</td>
             <td>${snmpBadge}</td>
-            <td class="small text-muted text-truncate" style="max-width: 300px;" title="${dev.sys_descr || ''}">${dev.sys_descr || '—'}</td>
+            <td class="small text-muted text-truncate" style="max-width: 300px;" title="${esc(dev.sys_descr)}">${esc(dev.sys_descr) || '—'}</td>
             <td class="text-end pe-3">${actionBtn}</td>
           `;
           resultsBody.appendChild(tr);

@@ -213,6 +213,33 @@ Quy trình chuẩn (đã dùng để bắt bug 504 phiên đầu):
   đúng 1 lần bằng session mới (`session.close()` rồi để `requests` tự mở connection mới) khi gặp
   `ConnectionError`. Áp dụng cho bất kỳ tích hợp BMC/thiết bị nhúng nào khác sau này (Dell iDRAC...)
   nếu thấy đúng triệu chứng xen kẽ này — verify lại trên thiết bị đó trước khi copy nguyên fix.
+- **`${VAR}` trong `docker-compose.yml` KHÔNG đọc qua `env_file:` của service — chỉ Compose nội
+  suy từ file tên đúng `.env` cạnh compose file (hoặc `--env-file`/shell env).** `env_file:` chỉ bơm
+  biến vào **container lúc chạy**, không tham gia bước nội suy `${...}` trong chính file YAML (bước
+  đó chạy client-side, TRƯỚC khi container tồn tại). Dính thật 2026-09-28 (audit security từ báo cáo
+  ngoài): service `db` khai cả `env_file: .env.production` LẪN
+  `environment: { POSTGRES_USER: ${DB_USER:-monitor_user}, POSTGRES_PASSWORD: ${DB_PASSWORD:-change_me_db_password} }`
+  — trong khi server **chỉ có `.env.production`, không có `.env`** (xác nhận qua SSH `ls -la`) nên
+  `${DB_USER}`/`${DB_PASSWORD}` luôn rơi về default, còn `app`/`worker`/`beat` (chỉ dùng `env_file`,
+  không có `environment: ${...}`) nhận đúng giá trị thật → 2 bộ credential khác nhau cho cùng 1 DB.
+  Verify runtime `docker compose config` trên server thật: `POSTGRES_PASSWORD` == default
+  `change_me_db_password`, KHÁC `DB_PASSWORD` thật app đang dùng — bug **đang tồn tại**, chỉ "vô hại
+  tạm thời" vì Postgres image chỉ áp `POSTGRES_*` lúc **init data dir rỗng lần đầu** (container đang
+  chạy dùng credential đã ghi sẵn trong `postgres_data` volume, không đọc lại env mỗi lần start) —
+  sẽ nổ ngay khi ai `docker compose down -v`/tạo volume mới (disaster recovery, migrate host) vì lúc
+  đó Postgres init thật sự bằng giá trị default sai. Fix: bỏ hẳn `environment: ${...}` ở service cần
+  secret thật, chỉ dùng `env_file:` trỏ đúng file — và file đó phải tự có sẵn đúng tên biến mà image
+  cần (image `postgres` cần `POSTGRES_DB/POSTGRES_USER/POSTGRES_PASSWORD`, không đọc `DB_*` của
+  Django) → thêm 3 khoá `POSTGRES_*` mirror `DB_*` thẳng vào `.env.production`/`.env`/`.env.example`
+  (xem CLAUDE.md). Healthcheck cùng lỗi (`pg_isready -U ${DB_USER}`) — sửa bằng `$$VAR` (2 dấu `$`)
+  để Compose KHÔNG nội suy, để nguyên cho shell **trong container** tự thay bằng biến thật lúc chạy
+  (`test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]`). Quy tắc chung: **service
+  nào cần secret/giá trị thật khớp `env_file` của chính nó thì đọc thẳng qua `env_file`, đừng đi
+  vòng qua `${VAR}` nội suy YAML** — 2 cơ chế độc lập, dễ tưởng đã "dùng chung 1 nguồn" nhưng thực
+  ra không. Kèm theo: `Dockerfile` `COPY . .` không có `.dockerignore` từng đóng gói cả `.env*`,
+  `db.sqlite3`, `backups/`, `.git/`, `venv/`, `scratchpad/` vào build context — thêm `.dockerignore`
+  loại trừ secret/dữ liệu vận hành/VCS/venv (không đổi phần code đóng gói vào image, chỉ đổi
+  context).
 
 ## 2. Deploy
 ```

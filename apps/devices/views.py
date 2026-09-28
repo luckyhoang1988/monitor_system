@@ -197,7 +197,6 @@ def device_discovery_scan(request):
 
     try:
         network = ipaddress.ip_network(subnet, strict=False)
-        ips = [str(ip) for ip in network.hosts()]
     except Exception as exc:
         return JsonResponse({"success": False, "message": f"Dải mạng không hợp lệ: {str(exc)}"})
 
@@ -205,8 +204,15 @@ def device_discovery_scan(request):
     ping_workers      = getattr(settings, "DISCOVERY_PING_WORKERS", 100)
     snmp_workers      = getattr(settings, "DISCOVERY_SNMP_WORKERS", 80)
 
-    if len(ips) > max_ips:
+    # Kiểm tra kích thước TRƯỚC khi materialize list(network.hosts()) — network.num_addresses
+    # là O(1) (không duyệt từng IP), trong khi hosts() sinh ra generator sẽ bị list() ép chạy
+    # hết ngay lập tức. Nhập nhầm /8 hoặc IPv6 /64 sẽ tạo hàng triệu/tỷ string → treo/OOM
+    # worker trước khi kịp so sánh độ dài. num_addresses luôn >= số host thật (bao gồm cả
+    # network/broadcast) nên dùng làm ngưỡng chặn sớm là an toàn, không lọt subnet lớn.
+    if network.num_addresses > max_ips:
         return JsonResponse({"success": False, "message": f"Để tối ưu hiệu năng, vui lòng quét dải mạng tối đa {max_ips} IPs"})
+
+    ips = [str(ip) for ip in network.hosts()]
 
     discovered_hosts: list[dict] = []
 

@@ -1,0 +1,50 @@
+# Build context KHÔNG được chứa secret/dữ liệu vận hành — Dockerfile dùng
+# `COPY . .` nên bất cứ thứ gì không loại trừ ở đây đều bị đóng gói vào image
+# (và có thể tồn tại trong layer cache/registry ngay cả khi xoá khỏi commit sau).
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# VCS / editor / OS / agent tooling
+.git/
+.gitignore
+.vscode/
+.idea/
+.claude/
+.cursor/
+*.swp
+.DS_Store
+
+# Helper chạy TỪ máy dev để SSH lên server — vô nghĩa (và không nên có) trong image
+deploy.sh
+
+# Python runtime artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Virtualenv (không cần trong image — deps cài lại qua requirements/*.txt)
+venv/
+.venv/
+env/
+
+# Dữ liệu vận hành / backup — không phải mã nguồn, không thuộc image
+db.sqlite3
+backups/
+staticfiles/
+media/
+
+# Nơi làm việc tạm của agent, không phải 1 phần app
+scratchpad/
+
+# Docs/CI không cần trong runtime image
+.github/
+*.md
+docs/

@@ -2,15 +2,26 @@ services:
   db:
     image: postgres:16-alpine
     restart: unless-stopped
+    # ⚠️ KHÔNG dùng ${DB_USER}/${DB_PASSWORD} (nội suy cấp Compose) ở đây: cú pháp ${...}
+    # trong docker-compose.yml chỉ được Compose nội suy từ 1 file tên đúng ".env" cạnh
+    # file này (hoặc --env-file/shell env) — KHÔNG đọc qua `env_file:` bên dưới (đó chỉ
+    # bơm biến vào container lúc chạy, không tham gia nội suy YAML). Dự án chỉ có
+    # .env.production (không có .env ở prod) nên trước đây ${DB_USER} luôn rơi về default
+    # monitor_user/change_me_db_password — khác hẳn credential thật mà app/worker/beat
+    # nhận qua env_file, khiến Postgres và Django dùng 2 bộ credential khác nhau.
+    # Fix: đọc thẳng POSTGRES_DB/POSTGRES_USER/POSTGRES_PASSWORD (tên biến chuẩn của
+    # image postgres) từ .env.production qua env_file — không qua nội suy YAML nữa.
+    # .env.production phải có 3 khoá này (mirror DB_NAME/DB_USER/DB_PASSWORD, xem
+    # .env.example).
     env_file: .env.production
-    environment:
-      POSTGRES_DB: ${DB_NAME:-monitor_db}
-      POSTGRES_USER: ${DB_USER:-monitor_user}
-      POSTGRES_PASSWORD: ${DB_PASSWORD:-change_me_db_password}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-monitor_user} -d ${DB_NAME:-monitor_db}"]
+      # $$ (không phải $) để Compose KHÔNG nội suy lúc build câu lệnh — để nguyên
+      # $POSTGRES_USER/$POSTGRES_DB cho shell TRONG container tự thay bằng biến thật
+      # (đã có sẵn từ env_file/entrypoint chính thức của image postgres), tránh lặp lại
+      # đúng lỗi nội suy YAML ở trên.
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 10s
       timeout: 5s
       retries: 5
