@@ -199,13 +199,23 @@ def poll_all_ping_devices() -> None:
 # 60s/read 70s timeout mỗi cái) — không giới hạn tổng thì 1 host xấu đủ nuốt hết chu kỳ,
 # y hệt cơ chế "poll queue snowball" đã fix cho poll_device (commit fe1dac1) nhưng CHƯA
 # từng áp cho nhánh hyperv (gap ghi nhận ở memory poll-queue-snowball-slow-device.md
-# 2026-07-07, chưa fix). 100s/110s: gấp ~2x runtime bình thường đo thật (~52.5s/2 host,
-# CLAUDE.md "HyperV — Disk Throughput/Queue/IO-size"), vẫn dưới POLL_HYPERV_INTERVAL_SECS
-# mặc định 120s để không đè lên chu kỳ kế tiếp. SoftTimeLimitExceeded chỉ dừng batch ở
-# host đang xử lý — host đã poll xong trong vòng này vẫn giữ kết quả (mỗi host tự
-# save_metrics ngay trong _poll_device_once, không đợi hết loop).
-POLL_HYPERV_BATCH_SOFT_LIMIT = 100
-POLL_HYPERV_BATCH_HARD_LIMIT = 110
+# 2026-07-07, chưa fix).
+# ⚠️ 100s/110s (bản 2026-07-07) tính cho **2 host healthy** (~52.5s đo thật). Dính thật
+# 2026-09-28: thêm host thứ 3 (Hyprver03) + Hyperv-02 đang có sự cố RAID/HpSAMD thật
+# (xem memory hyperv02-winrm-instability.md, ssacli/cage đĩa 2 lỏng) khiến 1 lệnh WinRM
+# trên Hyperv-02 có thể tự treo tới hết timeout socket riêng (60-70s) DÙ đã hết soft
+# time_limit — SoftTimeLimitExceeded là 1 exception Python (SystemExit) chỉ raise được
+# khi interpreter quay lại bytecode; nếu đang kẹt trong 1 lệnh blocking dài hơn khoảng
+# (hard-soft) còn lại thì Celery buộc SIGKILL cả task (log "ERROR/MainProcess Hard time
+# limit exceeded") — không "Polled X"/"succeeded" nào được ghi, mọi host trong vòng đó
+# (kể cả Hyperv-01/Hyprver03 đang khoẻ) mất trắng 1 chu kỳ → last_seen rớt quá grace →
+# Offline giả. Verify runtime: 09:35-10:11 hard-kill liên tục ~10 lần/36 phút. Fix: nới
+# rộng hẳn (không chỉ tăng nhẹ) + tăng POLL_HYPERV_INTERVAL_SECS đi kèm (300s, xem
+# config/settings/base.py) để có margin thật cho 3 host + 1 host đang bệnh, tránh vá lại
+# đúng bẫy này khi fleet tăng tiếp. Trước khi thêm host HyperV thứ 4+ — đo lại timing thật
+# rồi mới quyết định giữ nguyên hay tách kiến trúc (dispatch mỗi host 1 task riêng).
+POLL_HYPERV_BATCH_SOFT_LIMIT = 250
+POLL_HYPERV_BATCH_HARD_LIMIT = 270
 
 
 @shared_task(

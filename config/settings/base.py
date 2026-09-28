@@ -128,7 +128,12 @@ POLL_PING_INTERVAL_SECS    = env.int("POLL_PING_INTERVAL_SECS", default=90)
 # 2026-07-07: hạ 300s→120s sau khi đo timing thật (Hyperv-01/02): burst Get-Counter
 # ~10-12s/host + WMI cũ ~4s ⇒ ~30s/tick cho 2 host, duty cycle ~25% ở 120s (margin ~4x,
 # tránh lặp sự cố "poll queue snowball" — xem memory poll-queue-snowball-slow-device.md).
-POLL_HYPERV_INTERVAL_SECS  = env.int("POLL_HYPERV_INTERVAL_SECS", default=120)
+# 2026-09-28: nâng lại 120s→300s — thêm host thứ 3 (Hyprver03) + Hyperv-02 đang có sự cố
+# RAID/HpSAMD thật (memory hyperv02-winrm-instability.md) khiến batch `poll_all_hyperv`
+# thường xuyên chạm hard time_limit cũ (110s) và bị SIGKILL sạch → mất trắng cả 3 host 1
+# chu kỳ → Hyprver03 báo Offline giả (xem apps/collectors/tasks.py POLL_HYPERV_BATCH_*).
+# 300s khớp đúng Device.collect_interval=300 đã set sẵn cho cả 3 host HyperV trong DB.
+POLL_HYPERV_INTERVAL_SECS  = env.int("POLL_HYPERV_INTERVAL_SECS", default=300)
 ALERT_EVAL_INTERVAL_SECS   = env.int("ALERT_EVAL_INTERVAL_SECS", default=90)
 TOPOLOGY_DISCOVER_INTERVAL_SECS = env.int("TOPOLOGY_DISCOVER_INTERVAL_SECS", default=1800)
 
