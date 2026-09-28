@@ -440,9 +440,11 @@ admin credential riêng, không nhất thiết giống Hyperv-02/Hyprver03).
      thẳng `POSTGRES_DB/POSTGRES_USER/POSTGRES_PASSWORD` qua `env_file` (3 khoá mới, mirror
      `DB_NAME/DB_USER/DB_PASSWORD`, thêm vào `.env`/`.env.production`/`.env.example`); healthcheck
      đổi sang `$$POSTGRES_USER` (nội suy trong container, không phải Compose). Chi tiết đầy đủ +
-     cách verify: `/deploy` skill mục bẫy `${VAR}` vs `env_file`. ⚠️ **Đã sửa code + env file cục
-     bộ, CHƯA deploy lên prod** (đổi service `db` cần recreate container → gián đoạn ngắn, để
-     người dùng chọn thời điểm).
+     cách verify: `/deploy` skill mục bẫy `${VAR}` vs `env_file`. ✅ **Đã deploy prod + verify
+     sống**: `db-1` tự recreate (đổi `env_file`), lên `Healthy`; SSH xác nhận
+     `POSTGRES_PASSWORD == DB_PASSWORD thật` (trước đó `False`); `Device.objects.count()` qua
+     container `app` mới trả đúng 23 — chứng minh app thật sự query được DB vừa recreate, không
+     chỉ postgres process lên. Commit `4e1447e`.
   3. **High — DOM XSS**: `discovery.html` (kết quả AJAX scan: hostname/sys_descr từ reverse
      DNS+SNMP của thiết bị quét được) và `topology.js` (`showPanel`: mac/ip/switch_name/location từ
      LLDP/FDB/SNMP) ghép thẳng vào `innerHTML` không escape — dữ liệu này đến từ thiết bị ngoài
@@ -456,6 +458,47 @@ admin credential riêng, không nhất thiết giống Hyperv-02/Hyprver03).
      từ chối. Fix: so `network.num_addresses` (O(1), không duyệt) TRƯỚC khi materialize danh sách.
      Test regression thêm (`test_scan_huge_subnet_rejected_fast`/`test_scan_ipv6_subnet_rejected_fast`,
      assert trả lời <2s) — 448 test pass (446+2 mới), 2 skip như cũ.
+- **2026-09-28 (cùng ngày, mới nhất — sau đợt security review đầu)**: User dán tiếp báo cáo review
+  đợt 2 (4 điểm mức Medium), verify từng cái bằng đọc code thật (không đoán) — cả 4 đều đúng:
+  1. **Migrate/collectstatic chạy đồng thời ở cả 3 container**: [entrypoint.sh](entrypoint.sh)
+     chạy `migrate`/`sync_beat_expires`/`collectstatic --clear` **vô điều kiện** trước khi mới xét
+     có `command:` riêng hay không — app/worker/beat dùng chung `ENTRYPOINT` này
+     ([Dockerfile](Dockerfile) dòng `ENTRYPOINT`) nên `deploy.sh`/`docker compose up -d --build app
+     worker beat` khiến 2-3 container cùng migrate + cùng `collectstatic --clear` gần như đồng
+     thời (đua tranh schema; nginx đọc `static_volume` có thể trúng khoảng trống giữa lúc 1
+     container đang `--clear` còn container khác đang ghi lại). Fix: chuyển migrate/collectstatic
+     vào nhánh **KHÔNG có `command:` riêng** (chỉ container `app` chạy — worker/beat luôn có
+     `command: celery ...` trong `docker-compose.yml` nên đi thẳng `exec "$@"`, không migrate
+     nữa). Kèm theo: thêm `depends_on: app: condition: service_healthy` cho `worker`/`beat` trong
+     `docker-compose.yml` — đảm bảo chúng chỉ khởi động SAU khi `app` đã migrate xong + gunicorn
+     lên (healthcheck `/health/` pass), tránh worker/beat chạy task trước khi schema kịp migrate.
+     Nếu migrate lỗi → container `app` exit → `worker`/`beat` không bao giờ start (compose báo lỗi
+     rõ ràng ở bước deploy thay vì âm thầm cho worker chạy trên schema cũ).
+  2. **`_resolve_alert` có thể gửi trùng thông báo RECOVERED**: alert được eval từ CẢ inline sau
+     mỗi poll (`_poll_device_once`) LẪN `evaluate_alert_rules` định kỳ (safety net) — 2 đường có
+     thể chạy gần như đồng thời trên các Celery worker khác nhau (`--concurrency=4`).
+     [_resolve_alert](apps/alerts/engine.py) bản cũ đọc `alerts_to_resolve` (không lock) → gửi
+     notification → MỚI update `is_active=False` — 2 lời gọi trùng thời điểm cùng đọc thấy
+     `is_active=True`, cùng gửi Telegram/email trùng lặp (bất đối xứng với `_fire_alert` — hàm đó
+     ĐÃ có `select_for_update()` khoá `Device` từ trước). Fix: áp cùng pattern khoá — "claim"
+     atomically (lock `Device` + update `is_active=False` TRƯỚC trong `transaction.atomic()`) rồi
+     MỚI gửi notification ngoài transaction (không giữ lock trong lúc chờ HTTP Telegram/email);
+     lời gọi thứ 2 tới sau sẽ thấy `is_active` đã `False` (đã commit) → tự return, không gửi lại.
+  3. **`alert_acknowledge` thiếu kiểm tra RBAC**: [alert_acknowledge](apps/alerts/views.py) chỉ
+     `@login_required`, không gọi `_can_write` như `rule_create`/`rule_edit`/`storage` cùng file
+     — trái mô hình RBAC "Read-Only Operators chỉ xem" (xem mục "RBAC" ở trên). Fix: thêm check
+     `_can_write` → 403 nếu không có quyền, cùng pattern đã dùng ở các view khác trong file. Test
+     regression `test_alert_acknowledge_forbidden_for_readonly`.
+  4. **`_update_link` xoá link cũ TRƯỚC khi validate link mới**:
+     [_update_link](apps/dashboard/topology_links_api.py) xoá `existing` (dòng cũ) rồi mới gọi
+     `_create_link(request)` — hàm này tự validate (thiếu field, switch đích không tồn tại, nối
+     chính nó...) và trả `JsonResponse` lỗi (không raise exception) nên request sai làm **mất
+     link cũ vĩnh viễn** mà không tạo được link thay thế. Fix: bọc xoá+tạo trong
+     `transaction.atomic()`, nếu `_create_link` trả `status_code != 200` thì
+     `transaction.set_rollback(True)` — khôi phục nguyên link cũ. Test regression
+     `test_update_with_invalid_body_keeps_existing_link` (file mới
+     `tests/dashboard/test_topology_links_api.py`).
+  451 test pass (448+3 mới), 2 skip như cũ.
 - **2026-09-28 (cùng ngày, mới nhất)**: Thêm iLO Redfish — RAID/disk health cho HyperV host, độc
   lập hoàn toàn WinRM (model `HardwareHealth`, collector `ilo_redfish.py`, task `poll_all_ilo`, 3
   alert rule RAID). Xem mục "iLO Redfish" ở trên + memory `ilo-raid-monitoring.md`. Verify sống

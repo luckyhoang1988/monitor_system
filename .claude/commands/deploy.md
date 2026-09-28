@@ -240,6 +240,58 @@ Quy trình chuẩn (đã dùng để bắt bug 504 phiên đầu):
   `db.sqlite3`, `backups/`, `.git/`, `venv/`, `scratchpad/` vào build context — thêm `.dockerignore`
   loại trừ secret/dữ liệu vận hành/VCS/venv (không đổi phần code đóng gói vào image, chỉ đổi
   context).
+- **`ENTRYPOINT` dùng chung cho nhiều service (app/worker/beat) mà chạy `migrate`/`collectstatic`
+  vô điều kiện → N container cùng migrate/collectstatic đồng thời khi deploy.** Dính thật
+  2026-09-28 (security review đợt 2, người ngoài phát hiện): [entrypoint.sh](../../entrypoint.sh)
+  cũ chạy `migrate --noinput` → `sync_beat_expires` → `collectstatic --noinput --clear` **trước
+  cả khi kiểm tra `$# -gt 0`** (có `command:` riêng hay không) — `app`/`worker`/`beat` đều dùng
+  chung `ENTRYPOINT` này ([Dockerfile](../../Dockerfile)) nên `deploy.sh`/`docker compose up -d
+  --build app worker beat` khởi động gần như đồng thời khiến 2-3 container cùng gọi `migrate`
+  (đua tranh áp schema) + cùng `collectstatic --clear` (xoá rồi ghi static trong khi container
+  khác cũng đang xoá/ghi → nginx đọc `static_volume` có thể trúng khoảng trống). Fix: đảo thứ tự
+  — kiểm tra `$# -gt 0` (worker/beat luôn có `command: celery ...`) **TRƯỚC**, có thì `exec "$@"`
+  ngay (không migrate); chỉ nhánh KHÔNG có command riêng (= container `app`, dùng gunicorn mặc
+  định ở cuối script) mới migrate/collectstatic — 1 lần duy nhất mỗi lần deploy. Kèm theo: thêm
+  `depends_on: app: condition: service_healthy` cho `worker`/`beat` trong `docker-compose.yml`
+  (app healthcheck `/health/` chỉ pass sau khi gunicorn lên = migrate đã xong) — đảm bảo
+  worker/beat không chạy task Celery trước khi schema kịp migrate; migrate lỗi → `app` exit →
+  compose từ chối start worker/beat, deploy fail rõ ràng thay vì âm thầm chạy trên schema cũ.
+  Quy tắc chung: **`ENTRYPOINT`/`command` dùng chung giữa nhiều service phải tự hỏi "việc chạy 1
+  lần" (migrate, seed data, sync schedule…) có đang bị N container cùng làm không** — nếu deploy
+  script start nhiều service cùng lúc (không tuần tự), câu trả lời mặc định là CÓ trừ khi tách
+  nhánh rõ ràng như trên.
+- **Alert engine: hàm resolve thiếu lock trong khi hàm fire đã có → gửi trùng notification khi 2
+  đường eval (inline sau poll + `evaluate_alert_rules` định kỳ) chạy gần như đồng thời trên các
+  Celery worker khác nhau.** Dính thật 2026-09-28: `_fire_alert`
+  ([apps/alerts/engine.py](../../apps/alerts/engine.py)) đã dùng `transaction.atomic()` +
+  `select_for_update()` khoá `Device` để serialize fire, nhưng `_resolve_alert` cạnh đó lại đọc
+  `alerts_to_resolve` KHÔNG lock → gửi RECOVERED → mới update `is_active=False`: 2 lời gọi trùng
+  thời điểm cùng đọc thấy `is_active=True`, cùng gửi trùng. Fix: cùng pattern lock — "claim"
+  (lock `Device` + update `is_active=False`) xong trong transaction rồi MỚI gửi notification
+  ngoài transaction (không giữ DB lock trong lúc chờ HTTP Telegram/email chậm). Quy tắc chung:
+  **bất kỳ cặp hàm fire/resolve (hay create/update/delete) nào thao tác chung 1 state đổi được từ
+  nhiều nơi đồng thời — nếu 1 hàm trong cặp đã có lock mà hàm còn lại không, đó gần như luôn là
+  thiếu sót chứ không phải cố ý** — kiểm tra tính đối xứng khi audit.
+- **View ghi dữ liệu chỉ `@login_required` mà thiếu check quyền ghi (`_can_write`/`is_admin`) —
+  dễ lọt qua review vì trông giống các view CRUD khác trong cùng file đã check đúng.** Dính thật
+  2026-09-28: `alert_acknowledge` ([apps/alerts/views.py](../../apps/alerts/views.py)) chỉ
+  `@login_required`, thiếu `_can_write` mà `rule_create`/`rule_edit`/`storage` NGAY TRONG CÙNG
+  FILE đã có — Read-Only Operators acknowledge được, trái RBAC "chỉ xem" (xem CLAUDE.md mục
+  RBAC). Quy tắc chung: khi thêm/audit 1 view ghi dữ liệu, **grep các view khác trong cùng
+  app/file trước** — nếu chúng đều gọi `_can_write`/`is_admin`, view mới/view đang xét thiếu là
+  dấu hiệu bug rõ ràng, không phải khác biệt có chủ đích.
+- **"Xoá rồi tạo lại" (xoá bản ghi cũ trước khi validate + tạo bản ghi mới) làm mất dữ liệu khi
+  validate fail, vì hàm tạo mới trả lỗi bằng `JsonResponse` (không raise exception).** Dính thật
+  2026-09-28: `_update_link` ([apps/dashboard/topology_links_api.py](../../apps/dashboard/topology_links_api.py))
+  xoá `existing` NGAY rồi mới gọi `_create_link(request)` — hàm đó tự validate và trả lỗi qua
+  `return _bad(...)` (JsonResponse status 400), không exception, nên transaction (nếu có) sẽ
+  KHÔNG tự rollback theo cơ chế "exception propagate" thông thường của Django. Request sai (thiếu
+  field, switch đích không tồn tại...) → mất link cũ vĩnh viễn, không tạo được link thay thế. Fix:
+  bọc xoá+tạo trong `transaction.atomic()`, kiểm tra `response.status_code != 200` rồi tự gọi
+  `transaction.set_rollback(True)` — Django hỗ trợ ép rollback trong atomic block mà không cần
+  raise. Quy tắc chung: pattern "xoá cũ → tạo mới từ input chưa validate" luôn nguy hiểm; nếu hàm
+  tạo mới báo lỗi bằng return value (không exception) thì `transaction.atomic()` không tự cứu —
+  phải chủ động `set_rollback(True)` khi thấy response lỗi.
 
 ## 2. Deploy
 ```

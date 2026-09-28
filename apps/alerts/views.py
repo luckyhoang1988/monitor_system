@@ -138,6 +138,12 @@ def alert_list(request):
 
 @login_required
 def alert_acknowledge(request, pk):
+    # Acknowledge là thao tác ghi (đổi acknowledged_by/acknowledged_at) — thiếu check này
+    # trước đây cho phép Read-Only Operators (chỉ @login_required) acknowledge được, trái
+    # với mô hình RBAC "Review chỉ xem" đã ghi trong CLAUDE.md (cùng pattern _can_write đã
+    # áp cho rule_create/rule_edit/storage bên dưới).
+    if not _can_write(request):
+        return HttpResponseForbidden("Bạn không có quyền thực hiện thao tác này.")
     alert = get_object_or_404(Alert, pk=pk)
     if request.method == "POST":
         alert.acknowledged_by = request.user.username

@@ -58,6 +58,15 @@ class TestAlertViews:
         assert alert.acknowledged_by == "admin"
         assert alert.acknowledged_at is not None
 
+    def test_alert_acknowledge_forbidden_for_readonly(self, readonly_client, alert):
+        # Regression: acknowledge là thao tác ghi nhưng view cũ chỉ @login_required
+        # (không _can_write) → Read-Only Operators acknowledge được, trái RBAC "chỉ xem".
+        response = readonly_client.post(reverse("alerts:ack", args=[alert.pk]))
+        assert response.status_code == 403
+        alert.refresh_from_db()
+        assert alert.acknowledged_by == ""
+        assert alert.acknowledged_at is None
+
     def test_rule_list_view(self, logged_in_client, alert_rule):
         response = logged_in_client.get(reverse("alerts:rule_list"))
         assert response.status_code == 200

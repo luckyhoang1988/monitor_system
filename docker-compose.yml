@@ -84,6 +84,11 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      # entrypoint.sh giờ CHỈ migrate ở container "app" (không phải worker/beat nữa, xem
+      # comment ở entrypoint.sh) — worker phải chờ app "healthy" (= migrate xong + gunicorn
+      # lên) rồi mới chạy, tránh chạy task Celery trước khi schema đã migrate.
+      app:
+        condition: service_healthy
 
   beat:
     build: .
@@ -98,6 +103,9 @@ services:
       db:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      # Cùng lý do với worker ở trên — chờ "app" migrate xong.
+      app:
         condition: service_healthy
 
   nginx:

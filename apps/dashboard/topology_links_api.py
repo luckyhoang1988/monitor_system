@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 
 from django.contrib.auth.decorators import login_required
+from django.db import transaction
 from django.http import HttpResponseNotAllowed, JsonResponse
 from django.views.decorators.http import require_GET
 
@@ -210,8 +211,17 @@ def _update_link(request, pk: int) -> JsonResponse:
             {"success": False, "message": "Không tìm thấy link thủ công."}, status=404
         )
     # Key unique = (local_device, local_port) có thể đổi khi sửa → xoá cũ rồi tạo lại từ body.
-    existing.delete()
-    return _create_link(request)
+    # ⚠️ Trước đây xoá NGAY rồi mới gọi _create_link — _create_link tự validate (thiếu field,
+    # switch đích không tồn tại, trùng chính nó...) và trả JsonResponse lỗi (không raise), nên
+    # request sai làm mất link cũ vĩnh viễn mà không tạo được link thay thế. Fix: bọc trong
+    # transaction.atomic() — nếu _create_link trả về lỗi (status != 200) hoặc ném exception,
+    # ép rollback (transaction.set_rollback) để link cũ được khôi phục nguyên vẹn.
+    with transaction.atomic():
+        existing.delete()
+        response = _create_link(request)
+        if response.status_code != 200:
+            transaction.set_rollback(True)
+    return response
 
 
 def _delete_link(pk: int) -> JsonResponse:

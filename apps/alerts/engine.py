@@ -969,10 +969,27 @@ def _fire_alert(device: Device, rule: AlertRule, value: float) -> None:
 
 
 def _resolve_alert(device: Device, rule: AlertRule) -> None:
-    alerts_to_resolve = list(Alert.objects.filter(device=device, rule=rule, is_active=True))
-    if not alerts_to_resolve:
-        return
-    resolved_at = timezone.now()
+    # ⚠️ Alert được eval từ CẢ inline sau mỗi poll (_poll_device_once) LẪN periodic
+    # evaluate_alert_rules (safety net) — 2 đường có thể chạy gần như đồng thời trên các
+    # worker Celery khác nhau (--concurrency=4). Bản cũ đọc alerts_to_resolve (không lock)
+    # → gửi RECOVERED → mới update is_active=False: 2 lời gọi trùng thời điểm cùng đọc thấy
+    # is_active=True, cùng gửi Telegram/email RECOVERED trùng lặp. Fix: "claim" atomically
+    # (lock Device + update is_active=False TRƯỚC, cùng pattern select_for_update đã dùng ở
+    # _fire_alert) rồi MỚI gửi notification ngoài transaction — lệnh gọi thứ 2 tới sau sẽ
+    # thấy is_active đã False (đã commit) → alerts_to_resolve rỗng → tự return, không gửi lại.
+    with transaction.atomic():
+        Device.objects.select_for_update().filter(pk=device.pk).first()
+        alerts_to_resolve = list(
+            Alert.objects.select_for_update().filter(device=device, rule=rule, is_active=True)
+        )
+        if not alerts_to_resolve:
+            return
+        resolved_at = timezone.now()
+        Alert.objects.filter(pk__in=[a.pk for a in alerts_to_resolve]).update(
+            is_active=False,
+            resolved_at=resolved_at,
+        )
+
     for alert in alerts_to_resolve:
         # Gán resolved_at lên object TRƯỚC khi gửi để tin RECOVERED có ngày giờ
         # (trước đây gửi trước update → alert.resolved_at=None → hiện "N/A").
@@ -982,10 +999,6 @@ def _resolve_alert(device: Device, rule: AlertRule) -> None:
         # tránh dội ✅ RECOVERED cho cảnh báo giả/flapping mà người dùng chưa từng thấy.
         if AlertNotification.objects.filter(alert=alert, status="sent").exists():
             _send_recovery_notifications(alert, rule.channels)
-    Alert.objects.filter(pk__in=[a.pk for a in alerts_to_resolve]).update(
-        is_active=False,
-        resolved_at=resolved_at,
-    )
     logger.info("ALERT resolved: %s — %s", device.name, rule.name)
 
 
