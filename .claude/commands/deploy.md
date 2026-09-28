@@ -101,6 +101,17 @@ Quy trình chuẩn (đã dùng để bắt bug 504 phiên đầu):
   thì 1 thiết bị treo (WinRM/SNMP/SSH) có thể chiếm toàn bộ task tới hàng trăm giây, y hệt cơ chế
   "poll queue snowball" — `poll_device` đã có từ commit `fe1dac1`, `poll_all_hyperv` thiếu tới
   2026-07-07 mới fix (100s/110s, bắt `SoftTimeLimitExceeded` để dừng batch sạch).
+  ⚠️ **Con số soft/hard này PHẢI tính lại mỗi khi fleet HyperV đổi quy mô hoặc có host đang bệnh —
+  không phải hằng số cố định.** Dính thật 2026-09-28: 100s/110s (tính cho 2 host healthy) không đủ
+  khi thêm host thứ 3 + 1 host đang có sự cố phần cứng (RAID) khiến WinRM tự treo tới hết timeout
+  socket riêng (60-70s) BẤT KỂ soft_time_limit đã bắn — `SoftTimeLimitExceeded` là Python exception,
+  chỉ raise được khi interpreter quay lại bytecode; kẹt trong 1 call blocking lâu hơn khoảng
+  (hard−soft) còn lại → Celery SIGKILL thẳng tiến trình, mất trắng KHÔNG chỉ host xấu mà CẢ host
+  đang khoẻ trong cùng vòng → offline giả cho host không liên quan. Fix: nâng hẳn soft/hard lên
+  250s/270s + `POLL_HYPERV_INTERVAL_SECS` 120s→300s (xem CLAUDE.md "HyperV Host Performance
+  Counters" ⚠️ Batch, memory `poll-queue-snowball-slow-device.md`). Quy tắc: thêm host HyperV mới
+  → đo timing thật trước, tính theo host XẤU NHẤT trong fleet (không phải trung bình), rồi mới
+  quyết định giữ nguyên hay tách kiến trúc (mỗi host 1 task riêng qua `poll_device`).
 - **Vendor/enum choice thêm vào UI (`Device.VENDORS`...) mà KHÔNG có nhánh detect + OID đã verify
   trên thiết bị thật đứng sau nó → silent-fail âm thầm, không phải lỗi ồn ào.** Dính thật 2026-07-11
   khi audit CPU/RAM: `VENDORS` có `("hp", "HP/Aruba")` nhưng code chỉ implement HP-Comware (H3C

@@ -221,10 +221,20 @@ Phase 1–7 **đã hoàn thành** (setup/models → collector SNMP/SSH + tests �
   soft/hard `time_limit` per-device như switch/router. 1 host WinRM treo có thể chiếm ~280s (2 script
   host+volume × 2 endpoint http/https × operation 60s/read 70s timeout mỗi cái) — đủ nuốt hết chu kỳ,
   y hệt cơ chế "poll queue snowball" đã fix cho `poll_device` (commit `fe1dac1`) nhưng CHƯA từng áp
-  cho nhánh hyperv. **Đã fix**: thêm `soft_time_limit=100s`/`time_limit=110s` thẳng lên
-  `poll_all_hyperv` (bắt `SoftTimeLimitExceeded`, log rồi return — host chưa poll kịp chờ chu kỳ sau,
-  host đã poll xong trong vòng vẫn giữ kết quả vì `save_metrics` chạy ngay trong từng host, không đợi
-  hết loop).
+  cho nhánh hyperv. **Đã fix**: thêm `soft_time_limit`/`time_limit` thẳng lên `poll_all_hyperv` (bắt
+  `SoftTimeLimitExceeded`, log rồi return — host chưa poll kịp chờ chu kỳ sau, host đã poll xong
+  trong vòng vẫn giữ kết quả vì `save_metrics` chạy ngay trong từng host, không đợi hết loop).
+  ⚠️ **Giá trị 100s/110s (2026-07-07) chỉ tính cho 2 host healthy — KHÔNG đủ khi fleet tăng lên 3
+  host (2026-09-28, thêm Hyprver03) cộng với 1 host đang có sự cố phần cứng** (Hyperv-02, xem memory
+  `hyperv02-winrm-instability.md`): 1 lệnh WinRM có thể tự treo tới hết timeout socket riêng (60-70s)
+  BẤT KỂ soft_time_limit đã bắn, vì `SoftTimeLimitExceeded` chỉ raise được khi interpreter quay lại
+  bytecode — kẹt trong 1 call blocking lâu hơn khoảng (hard−soft) còn lại thì Celery SIGKILL thẳng
+  cả task, mất trắng toàn bộ host trong vòng đó (kể cả host đang khoẻ) → offline giả. Đã nâng lên
+  **`soft=250s`/`hard=270s`** + `POLL_HYPERV_INTERVAL_SECS` **120s→300s** (khớp
+  `Device.collect_interval=300` đã set sẵn), deploy commit `14b8f7a`, verify 2 vòng sau deploy
+  99.6s/109.5s không hard-kill. Quy tắc: thêm host HyperV mới → đo lại timing thật trước, tính theo
+  host XẤU NHẤT trong fleet, không ngoại suy tuyến tính. Chi tiết: memory
+  `poll-queue-snowball-slow-device.md` mục "Recurrence 2026-09-28".
 - **Alert engine**: không tái dùng `_sustained_cpu_mem` (hardcode field cpu/mem) — dict riêng
   `_HOST_PERF_FIELD_MAP` (metric → short-key ring-buffer + field SystemHealth) + `_latest_host_perf`/
   `_sustained_host_perf` dùng chung `_sustained_verdict`. 4 seed `AlertRule` (`device_type=hyperv`):
@@ -326,6 +336,13 @@ Phase 1–7 **đã hoàn thành** (setup/models → collector SNMP/SSH + tests �
   `expire_seconds` cùng giá trị, nếu không entry đó lặp lại đúng bug này.
 
 ### Thay đổi quan trọng
+- **2026-09-28**: Fix `poll_all_hyperv` hard-kill liên tục sau khi fleet HyperV tăng lên 3 host
+  (thêm Hyprver03) trong khi Hyperv-02 đang có sự cố RAID thật ([[hyperv02-winrm-instability]] —
+  không phải memory link, xem file cùng tên) khiến batch vượt hard time_limit cũ (110s, tính cho
+  2 host) → SIGKILL cả task → Hyprver03 báo Offline giả (10:08-10:09). Nâng
+  `POLL_HYPERV_BATCH_SOFT_LIMIT/HARD_LIMIT` 100/110→250/270, `POLL_HYPERV_INTERVAL_SECS` 120→300.
+  Deploy commit `14b8f7a`, verify 2 vòng poll sau deploy không hard-kill. Xem mục "HyperV Host
+  Performance Counters" ⚠️ Batch ở trên + memory `poll-queue-snowball-slow-device.md`.
 - **2026-07-11**: Audit cách lấy CPU/RAM toàn bộ switch (yêu cầu user "review lại"). Verified-đúng:
   Cisco IOS classic, Cisco Business/SMB, Huawei VRP (khớp mọi note đã có). Đã sửa phần verify được
   ngay (không cần thiết bị thật): (1) **gỡ bỏ vendor "HP/Aruba"** khỏi `Device.VENDORS` + nhánh
