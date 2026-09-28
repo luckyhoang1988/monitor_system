@@ -252,11 +252,22 @@ Phase 1–7 **đã hoàn thành** (setup/models → collector SNMP/SSH + tests �
   `poll-queue-snowball-slow-device.md` mục "Recurrence 2026-09-28".
 - **Alert engine**: không tái dùng `_sustained_cpu_mem` (hardcode field cpu/mem) — dict riêng
   `_HOST_PERF_FIELD_MAP` (metric → short-key ring-buffer + field SystemHealth) + `_latest_host_perf`/
-  `_sustained_host_perf` dùng chung `_sustained_verdict`. 4 seed `AlertRule` (`device_type=hyperv`):
-  CPU hypervisor >80%, RAM available <2048MB, disk read/write latency >20ms (duration 5 phút).
+  `_sustained_host_perf` dùng chung `_sustained_verdict`. 4 `AlertRule` (`device_type=hyperv`,
+  tạo qua UI `/alerts/rules/` — KHÔNG có trong `seed_alert_rules.py`, chỉ tồn tại dạng data trên
+  DB prod): CPU hypervisor >80%, RAM available <2048MB, disk read/write latency >20ms.
 - ✅ Verify runtime 2026-07-07 (Hyperv-01/02 thật, cả local dev DB-mode lẫn prod cache-mode Redis):
   dữ liệu non-null hợp lý cả 7 field, alert fire đúng trên spike latency thật (33ms/549ms), Telegram
   gửi thành công trên prod.
+- ⚠️ **2026-09-28: nâng `duration_min` disk read/write latency 5→15 phút** (rule id 19/20, prod)
+  — noise thật: lúc backup server chạy, latency vượt 20ms đều đặn, cửa sổ 5 phút (≈1-2 mẫu ở
+  poll cadence 300s) quá ngắn nên hầu như backup nào cũng bắn Telegram. Đối chiếu lịch sử fire 7
+  ngày (37 lần fire riêng ngày 2026-09-28): đa số fire→resolve trong 4-15 phút (khớp thời lượng 1
+  job backup), vài trường hợp kéo dài 58/108 phút và 1 alert vẫn active >4 giờ (Hyperv-02, rule
+  20 — khớp sự cố RAID thật đang có, xem [[hyperv02-winrm-instability]]) — đây mới là loại cần
+  báo, không phải backup blip. Đặt `duration_min=15` (yêu cầu MỌI mẫu trong cửa sổ 15 phút đều
+  vượt ngưỡng, logic có sẵn ở `_sustained_verdict`, không cần đổi code) lọc gần hết backup noise
+  mà vẫn giữ báo đúng cho sự cố kéo dài thật. Đổi qua Django shell (`AlertRule.objects.filter(id__in=[19,20]).update(duration_min=15)`)
+  trên prod trực tiếp — thuần data, không rebuild/deploy.
 
 ### HyperV — Disk Throughput/Queue/IO-size + Per-Volume mapped theo VM (từ 2026-07-07, cùng ngày)
 > Vòng 2 cùng ngày: thêm 4 metric host-level (`disk_read_throughput_mbps`, `disk_write_throughput_mbps`,
