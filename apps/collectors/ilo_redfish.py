@@ -129,6 +129,21 @@ class IloRedfishClient:
         # bị đẩy xuống cuối bảng thay vì đứng đầu, gây hiểu nhầm khi đối chiếu tay với máy thật.
         disks.sort(key=self._disk_sort_key)
 
+        # Gắn `bay_number` để UI hiển thị "Bay N" dễ đọc thay vì Redfish `Id` (Id không theo thứ
+        # tự bay vật lý — xem chú thích _disk_sort_key). Lấy thẳng từ Location đã verify runtime,
+        # KHÔNG suy đoán. Đĩa missing không có Location -> bay_number=None (UI tự fallback về
+        # "Disk N"); vẫn gắn `Id` hiển thị được bằng path segment cuối của @odata.id — theo đúng
+        # quy ước Redfish (Id trùng segment cuối URI thành viên), không phải đoán.
+        for d in disks:
+            if d.get("is_missing"):
+                d["bay_number"] = None
+                uri = d.get("@odata.id") or ""
+                if uri:
+                    d.setdefault("Id", uri.rstrip("/").rsplit("/", 1)[-1])
+            else:
+                _, _, bay = self._parse_location(d.get("Location") or "")
+                d["bay_number"] = bay or None
+
         enclosures: list[dict] = []
         encl_status, encl_list = self._get(session, base, ac_uri.rstrip("/") + "/StorageEnclosures/")
         if encl_status == 200 and encl_list:
@@ -154,8 +169,15 @@ class IloRedfishClient:
         `Location`) xếp CUỐI — không đủ dữ liệu để biết bay thật của nó, không đoán."""
         if disk.get("is_missing"):
             return (1, "", 0, 0)
-        location = disk.get("Location") or ""
-        parts = location.split(":")
+        port, box, bay = IloRedfishClient._parse_location(disk.get("Location") or "")
+        return (0, port, box, bay)
+
+    @staticmethod
+    def _parse_location(location: str) -> tuple[str, int, int]:
+        """Parse `Location` dạng "Port:Box:Bay" (vd "1I:3:4") -> (port, box, bay). Thiếu phần
+        nào trả rỗng/0 cho phần đó — chỉ parse đúng cấu trúc đã verify runtime, không suy đoán
+        giá trị. Dùng chung cho `_disk_sort_key` (sort) và gắn `bay_number` hiển thị UI."""
+        parts = (location or "").split(":")
         port = parts[0] if len(parts) > 0 else ""
         try:
             box = int(parts[1]) if len(parts) > 1 else 0
@@ -165,7 +187,7 @@ class IloRedfishClient:
             bay = int(parts[2]) if len(parts) > 2 else 0
         except ValueError:
             bay = 0
-        return (0, port, box, bay)
+        return port, box, bay
 
     @staticmethod
     def _get(session: requests.Session, base: str, path: str) -> tuple[int | None, dict | None]:

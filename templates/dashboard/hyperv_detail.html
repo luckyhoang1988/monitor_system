@@ -369,7 +369,7 @@
             <tbody>
               {% for d in c.disks %}
               <tr>
-                <td class="ps-3 font-monospace">Disk {{ d.Id }}</td>
+                <td class="ps-3 font-monospace">{% if d.bay_number %}Bay {{ d.bay_number }}{% else %}Disk {{ d.Id|default:"?" }}{% endif %}</td>
                 {% if d.is_missing %}
                 <td colspan="3" class="text-danger">Không detect được (mất đĩa)</td>
                 <td class="pe-3"><span class="badge bg-danger">MISSING</span></td>

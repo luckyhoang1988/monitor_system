@@ -253,6 +253,13 @@ class TestCollectRaw:
         missing = [d for d in controller["disks"] if d.get("is_missing")]
         assert len(missing) == 1
         assert missing[0]["@odata.id"] == ac_uri + "DiskDrives/1/"
+        # Missing disk không có Location -> không đoán bay: bay_number=None, UI tự fallback về
+        # "Disk N" — nhưng vẫn cần Id hiển thị được, lấy từ path segment cuối @odata.id (quy ước
+        # Redfish, không phải đoán).
+        assert missing[0]["bay_number"] is None
+        assert missing[0]["Id"] == "1"
+        present = [d for d in controller["disks"] if not d.get("is_missing")][0]
+        assert present["bay_number"] == 4  # Location "1I:3:4" -> bay 4
 
         normalized = IloRedfishClient(ilo_device).normalize(raw)
         assert normalized["missing_disk_count"] == 1
@@ -321,6 +328,8 @@ class TestCollectRaw:
         assert locations_in_order == ["1I:3:1", "1I:3:2", "1I:3:3", "1I:3:4", "2I:3:5", "2I:3:6"]
         # 2 ổ 300GB (chạy OS, bay 1-2) phải đứng đầu bảng.
         assert [d["CapacityGB"] for d in disks[:2]] == [300, 300]
+        # bay_number hiển thị UI ("Bay N") phải tăng dần khớp thứ tự hiển thị, xuyên suốt cả 2 box.
+        assert [d["bay_number"] for d in disks] == [1, 2, 3, 4, 5, 6]
 
     def test_missing_disks_sorted_last(self, ilo_device):
         present = {"Location": "1I:3:1", "Status": {"Health": "OK"}}
