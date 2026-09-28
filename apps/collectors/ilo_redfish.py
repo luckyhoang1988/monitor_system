@@ -111,6 +111,8 @@ class IloRedfishClient:
         # Đi qua đúng tập disk MÀ LD khai báo (DataDrives), không phải /DiskDrives/ collection —
         # collection chỉ liệt kê đĩa CÒN detect được, đĩa mất đơn giản KHÔNG xuất hiện trong đó.
         # Đi từng DataDrives URI mới bắt được 404 thật (verify runtime, xem docstring module).
+        # sorted(expected_disk_uris) chỉ để có thứ tự GỌI ỔN ĐỊNH (không phụ thuộc thứ tự set) —
+        # KHÔNG dùng thứ tự này để hiển thị, xem _disk_sort_key bên dưới.
         disks: list[dict] = []
         for d_uri in sorted(expected_disk_uris):
             d_status, d_detail = self._get(session, base, d_uri)
@@ -120,6 +122,12 @@ class IloRedfishClient:
                 disks.append(d_detail)
             else:
                 logger.warning("iLO %s: disk %s trả HTTP %s không mong đợi (không phải 200/404)", device.name, d_uri, d_status)
+        # ⚠️ Sắp theo VỊ TRÍ VẬT LÝ (Location "Port:Box:Bay"), KHÔNG theo Redfish `Id` (thứ tự
+        # nội bộ iLO tự gán lúc detect, không nhất thiết khớp bay vật lý). Verify runtime
+        # 2026-09-28 (đối chiếu dashboard thật với người dùng biết chắc layout máy): box "1I:3"
+        # có Id TĂNG dần (0,1,2,3) nhưng bay lại GIẢM dần (4,3,2,1) — 2 ổ 300GB chạy OS (bay 1,2)
+        # bị đẩy xuống cuối bảng thay vì đứng đầu, gây hiểu nhầm khi đối chiếu tay với máy thật.
+        disks.sort(key=self._disk_sort_key)
 
         enclosures: list[dict] = []
         encl_status, encl_list = self._get(session, base, ac_uri.rstrip("/") + "/StorageEnclosures/")
@@ -138,6 +146,26 @@ class IloRedfishClient:
             "disks": disks,
             "enclosures": enclosures,
         }
+
+    @staticmethod
+    def _disk_sort_key(disk: dict) -> tuple:
+        """Sort theo vị trí vật lý `Location` ("Port:Box:Bay", vd "1I:3:4") thay vì Redfish
+        `Id` — xem chú thích chỗ gọi (`collect_raw`). Đĩa `is_missing` (404, không có
+        `Location`) xếp CUỐI — không đủ dữ liệu để biết bay thật của nó, không đoán."""
+        if disk.get("is_missing"):
+            return (1, "", 0, 0)
+        location = disk.get("Location") or ""
+        parts = location.split(":")
+        port = parts[0] if len(parts) > 0 else ""
+        try:
+            box = int(parts[1]) if len(parts) > 1 else 0
+        except ValueError:
+            box = 0
+        try:
+            bay = int(parts[2]) if len(parts) > 2 else 0
+        except ValueError:
+            bay = 0
+        return (0, port, box, bay)
 
     @staticmethod
     def _get(session: requests.Session, base: str, path: str) -> tuple[int | None, dict | None]:

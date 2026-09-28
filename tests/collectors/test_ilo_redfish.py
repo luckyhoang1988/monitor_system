@@ -256,3 +256,74 @@ class TestCollectRaw:
 
         normalized = IloRedfishClient(ilo_device).normalize(raw)
         assert normalized["missing_disk_count"] == 1
+
+    def test_disks_sorted_by_physical_bay_not_by_id(self, ilo_device, mocker):
+        """Regression: verify runtime 2026-09-28 (đối chiếu dashboard thật với người dùng biết
+        chắc layout máy) — box "1I:3" có Redfish Id TĂNG dần (0,1,2,3) nhưng bay vật lý lại
+        GIẢM dần (4,3,2,1); 2 ổ 300GB chạy OS thật sự nằm bay 1-2 (đứng đầu vật lý) nhưng cũ
+        sort theo Id đẩy chúng xuống cuối bảng. Mirror ĐÚNG layout thật Hyprver03: LD1(RAID1)
+        = disk2,3 (300GB, bay 2,1) — LD2(RAID5) = disk0,1,4,5 (1800GB, bay 4,3 + bay 5,6)."""
+        root = "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/"
+        ac_uri = root + "0/"
+
+        disk_specs = {
+            "0": ("1I:3:4", 1800),
+            "1": ("1I:3:3", 1800),
+            "2": ("1I:3:2", 300),
+            "3": ("1I:3:1", 300),
+            "4": ("2I:3:5", 1800),
+            "5": ("2I:3:6", 1800),
+        }
+
+        def fake_get(url, timeout=None, headers=None):
+            path = url.replace("https://10.0.198.254", "")
+            resp = mocker.MagicMock()
+            if path == root:
+                resp.status_code = 200
+                resp.json.return_value = {"Members": [{"@odata.id": ac_uri}]}
+            elif path == ac_uri:
+                resp.status_code = 200
+                resp.json.return_value = {"Status": {"Health": "OK"}}
+            elif path == ac_uri + "LogicalDrives/":
+                resp.status_code = 200
+                resp.json.return_value = {"Members": [{"@odata.id": ac_uri + "LogicalDrives/1/"}]}
+            elif path == ac_uri + "LogicalDrives/1/":
+                resp.status_code = 200
+                resp.json.return_value = {"Id": "1", "Raid": "1", "Status": {"Health": "OK"}}
+            elif path == ac_uri + "LogicalDrives/1/DataDrives/":
+                resp.status_code = 200
+                resp.json.return_value = {
+                    "Members": [{"@odata.id": ac_uri + f"DiskDrives/{i}/"} for i in disk_specs]
+                }
+            elif path == ac_uri + "StorageEnclosures/":
+                resp.status_code = 200
+                resp.json.return_value = {"Members": []}
+            else:
+                for disk_id, (location, capacity_gb) in disk_specs.items():
+                    if path == ac_uri + f"DiskDrives/{disk_id}/":
+                        resp.status_code = 200
+                        resp.json.return_value = {
+                            "Id": disk_id, "Location": location, "CapacityGB": capacity_gb,
+                            "Status": {"Health": "OK"},
+                        }
+                        return resp
+                raise AssertionError(f"Unexpected path probed in test: {path}")
+            return resp
+
+        mocker.patch("requests.Session.get", side_effect=fake_get)
+
+        raw = IloRedfishClient(ilo_device).collect_raw()
+
+        disks = raw["controllers"][0]["disks"]
+        locations_in_order = [d["Location"] for d in disks]
+        # Bay tăng dần xuyên suốt cả 2 box (1,2,3,4 rồi 5,6) — KHÔNG theo Id (vốn sẽ ra
+        # 1I:3:4, 1I:3:3, 1I:3:2, 1I:3:1, 2I:3:5, 2I:3:6 nếu sort theo Id như code cũ).
+        assert locations_in_order == ["1I:3:1", "1I:3:2", "1I:3:3", "1I:3:4", "2I:3:5", "2I:3:6"]
+        # 2 ổ 300GB (chạy OS, bay 1-2) phải đứng đầu bảng.
+        assert [d["CapacityGB"] for d in disks[:2]] == [300, 300]
+
+    def test_missing_disks_sorted_last(self, ilo_device):
+        present = {"Location": "1I:3:1", "Status": {"Health": "OK"}}
+        missing = {"@odata.id": "x", "is_missing": True}
+        ordered = sorted([missing, present], key=IloRedfishClient._disk_sort_key)
+        assert ordered == [present, missing]
