@@ -189,6 +189,30 @@ Quy trình chuẩn (đã dùng để bắt bug 504 phiên đầu):
   nén `PS_SCRIPT`). Trước khi đặt tên helper function ngắn, tránh dùng 1 ký tự đơn lẻ hay kiểm tra
   `Get-Alias <tên>` trên máy Windows thật; ưu tiên tên 2+ ký tự (`RA`, `RS`, `RX`) dù tốn thêm vài
   chục ký tự base64.
+- **`GenericIPAddressField` (Postgres `inet`) KHÔNG lưu được chuỗi rỗng `""` — Django tự coi `""`
+  là `None` khi build query.** `.exclude(field="")` trên field này sinh SQL
+  `NOT (x = %s AND x IS NOT NULL)` với param `None` → `x = NULL` luôn là SQL `NULL` (không phải
+  `TRUE`/`FALSE`) → biểu thức `AND`/`NOT` cả dòng thành `NULL` → **WHERE loại bỏ HẾT mọi row, kể cả
+  row có giá trị hợp lệ** (SQL chỉ giữ row khi điều kiện `TRUE`, `NULL` bị coi như `FALSE`). Dính
+  thật 2026-09-28 khi build `poll_all_ilo`: `.exclude(ilo_ip_address__isnull=True).exclude(
+  ilo_ip_address="")` trả **0 devices** dù DB có đủ 3 IP hợp lệ (verify bằng
+  `qs.query.sql_with_params()` in ra đúng SQL trên + đếm tay qua `psql`). Fix: field IP/inet chỉ
+  cần `.exclude(field__isnull=True)` — KHÔNG thêm `.exclude(field="")` (không bao giờ có "" thật
+  trong DB để loại). Quy tắc chung: **filter/exclude bằng `""` trên field không-string thật sự
+  (`GenericIPAddressField`, `DateField`, `IntegerField`...) luôn đáng ngờ** — field đó thường coerce
+  `""` → `None` ở `to_python`/`get_prep_value`, khiến so sánh `=""` âm thầm thành so sánh `=NULL`
+  (luôn `NULL`, không lỗi) — không phải bug hiếm, các field `blank=True, null=True` non-string khác
+  trong model (vd `remote_mgmt_ip` ở `TopologyLink`) có nguy cơ y hệt nếu ai lỡ viết
+  `.exclude(remote_mgmt_ip="")`.
+- **BMC/iLO embedded webserver (HPE iLO 4/5 xác nhận thật) đóng TCP connection sau ĐÚNG 1 request
+  dù client gửi HTTP keep-alive.** `requests.Session()` tái dùng pooled connection → request thứ 2
+  trên cùng session luôn `ConnectionError: Remote end closed connection without response` — lỗi
+  xen kẽ đều đặn OK/ERR/OK/ERR qua nhiều request liên tiếp (dính thật 2026-09-28 khi build
+  `apps/collectors/ilo_redfish.py`, xem CLAUDE.md mục "iLO Redfish"). Endpoint/URL hoàn toàn ĐÚNG —
+  đừng nhầm sang "sai path" khi thấy lỗi này. Fix: header `Connection: close` mỗi request + retry
+  đúng 1 lần bằng session mới (`session.close()` rồi để `requests` tự mở connection mới) khi gặp
+  `ConnectionError`. Áp dụng cho bất kỳ tích hợp BMC/thiết bị nhúng nào khác sau này (Dell iDRAC...)
+  nếu thấy đúng triệu chứng xen kẽ này — verify lại trên thiết bị đó trước khi copy nguyên fix.
 
 ## 2. Deploy
 ```

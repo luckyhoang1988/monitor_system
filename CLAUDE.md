@@ -324,6 +324,79 @@ Phase 1–7 **đã hoàn thành** (setup/models → collector SNMP/SSH + tests �
 - Migration `0007_systemhealth_avg_io_size_kb_and_more` (4 cột `SystemHealth` + 8 cột mỗi
   Hourly/Daily + model `VolumeStats`). Commit `21da8e0`.
 
+## iLO Redfish — RAID/disk health cho HyperV host (từ 2026-09-28)
+> Nguồn phát sinh: sự cố Hyperv-02 (RAID P440ar mất 2/4 disk RAID5, xem memory
+> `hyperv02-winrm-instability.md`) cho thấy WinRM collector KHÔNG có cách nào chẩn đoán RAID/đĩa —
+> chỉ thấy "poll chập chờn". Thêm nguồn dữ liệu **độc lập hoàn toàn** với WinRM: gọi trực tiếp iLO
+> Redfish API (đọc-only, HTTPS) — model/task/collector riêng, không qua `CollectorFactory`, không
+> đụng `device.last_seen`/`is_online`. Chỉ hỗ trợ **HPE iLO 4/5 + Redfish SmartStorage extension**
+> (OEM-specific) — loại BMC duy nhất đã verify thật, theo đúng tiền lệ "không build cho hãng chưa
+> verify" (giống lý do gỡ HP/Aruba/MikroTik/Fortinet). Cấu hình theo từng Device
+> (`ilo_ip_address`/`ilo_username`/`ilo_password`, optional — để trống = bỏ qua khi poll), nhập qua
+> UI thêm/sửa thiết bị (section "iLO / Remote Management", hiện khi `device_type=HyperV Host`).
+
+**Endpoint đã verify runtime thật (Hyperv-02 P440ar fw 5.04 đang RAID Critical thật, Hyprver03
+P440ar fw 4.52 khoẻ mạnh, 2026-09-28)** — root `/redfish/v1/Systems/1/SmartStorage/ArrayControllers/`:
+- `ArrayControllers/{id}/` — `Status.Health` của **controller**.
+- `ArrayControllers/{id}/LogicalDrives/{ld}/` — `Status.Health`, `Raid`, `CapacityMiB` của từng LD.
+- `ArrayControllers/{id}/LogicalDrives/{ld}/DataDrives/` — danh sách URI đĩa **khai báo thuộc LD đó**
+  (dùng để biết "đĩa nào LẼ RA phải có", KHÔNG đổi theo tình trạng detect).
+- `ArrayControllers/{id}/DiskDrives/{n}/` — detail 1 đĩa vật lý (`Status.Health`, `Location`
+  `"1I:3:4"` dạng ControllerPort:Box:Bay, `Model`, `CapacityGB`).
+- `ArrayControllers/{id}/StorageEnclosures/{n}/` — `DriveBayCount` + `Location` `"1I:3"`
+  (ControllerPort:Box, tiền tố khớp `Location` của đĩa thuộc enclosure đó).
+
+**Đã xác minh runtime (KHÔNG suy luận)**:
+- `Status.Health` chỉ 3 giá trị thật đã thấy: `"OK"` / `"Warning"` / `"Critical"` (controller +
+  logical drive). Map `OK=0, Warning/Degraded=1, Critical/Failed=2` — enum lạ chưa từng thấy thì
+  **coi Critical (an toàn, không bỏ sót)** + log warning rõ ràng để verify sau, KHÔNG bug im lặng.
+- **Đĩa "mất" (RAID member không detect) = HTTP 404 THẬT** tại `DiskDrives/{id}/`
+  (`MessageID: Base.0.10.ResourceMissingAtURI`) — verify trực tiếp trên đúng 2 đĩa đang mất thật
+  của Hyperv-02 (id 4, 5 thuộc LD2/RAID5). KHÔNG phải chỉ "biến mất khỏi `/DiskDrives/` collection"
+  — phải đi qua đúng tập URI từ `DataDrives/` của từng LD (khai báo cấu hình) rồi GET từng cái, vì
+  `/DiskDrives/` collection tự nó chỉ liệt kê đĩa CÒN detect (không có entry 404 sẵn trong đó).
+- `enclosure_mismatch_count` (mất cả 1 cage đĩa): nhóm đĩa **đang hiện diện** theo tiền tố
+  `Location` (bỏ phần `:Bay` cuối) rồi so với `DriveBayCount>0` của từng enclosure — enclosure có
+  bay nhưng 0 đĩa present khớp tiền tố ⇒ mismatch. Heuristic dựa trên field đã verify thật nhưng
+  CHƯA verify exhaustive mọi đĩa present đều đúng tiền tố enclosure (raw JSON giữ đủ để soi tay).
+- ⚠️ **HPE iLO4/5 embedded webserver đóng TCP connection sau ĐÚNG 1 request dù client gửi
+  keep-alive** — `requests.Session()` tái dùng connection cũ bị đóng → `ConnectionError` xen kẽ đều
+  đặn OK/ERR/OK/ERR qua nhiều request liên tiếp trên cùng session (không phải sai URL — mọi endpoint
+  ở trên đều đúng, chỉ lỗi khi request thứ 2+ tái dùng connection). Fix: header `Connection: close`
+  + retry 1 lần bằng session mới khi `ConnectionError` — xem `/deploy` skill mục bẫy BMC.
+- ⚠️ **Bug ORM bắt được ở bước verify (trước khi vào code thật)**: `GenericIPAddressField` (Postgres
+  `inet`) không lưu được `""` → Django coi `""` là `None` → `.exclude(ilo_ip_address="")` sinh SQL
+  luôn `NULL` cho mọi row (kể cả IP hợp lệ) → `poll_all_ilo` từng trả **0 devices** dù DB có đủ 3 IP
+  đúng. Fix: chỉ `.exclude(ilo_ip_address__isnull=True)`. Xem `/deploy` skill mục bẫy
+  `GenericIPAddressField` (áp dụng chung, không riêng iLO).
+
+**Kiến trúc** (quyết định "độc lập hoàn toàn" — không gộp vào `poll_all_hyperv`, xem lý do trong
+git log commit thêm feature): model `HardwareHealth` (`apps/metrics/models.py`, ghi thẳng DB mỗi
+poll, KHÔNG qua `METRICS_WRITE_MODE`/cache-mode, KHÔNG rollup Hourly/Daily — giống quyết định MVP
+đã áp cho `VolumeStats`) · collector `apps/collectors/ilo_redfish.py` (`IloRedfishClient`, không kế
+thừa `BaseCollector`) · task `poll_all_ilo` (`apps/collectors/tasks.py`, soft/hard time_limit riêng
+60s/70s — Redfish REST nhanh hơn WinRM PowerShell nhiều nên giới hạn thấp hơn `poll_all_hyperv`
+nhiều) · `POLL_ILO_INTERVAL_SECS=300s` mặc định, `CELERY_BEAT_SCHEDULE["poll-all-ilo"]` (nhớ cả
+`expires`+`expire_seconds`, xem mục Celery Beat bên dưới) · `ILO_CERT_VALIDATE` (bool, mặc định
+`False` — iLO tự ký cert). Alert: `_ILO_FIELD_MAP`/`_latest_ilo`/`_sustained_ilo`
+(`apps/alerts/engine.py`), 3 rule seed `duration_min=0` (sự cố phần cứng cần báo NGAY, không chờ
+sustain): `raid_controller_health >= 2` (Critical), `raid_logical_drive_health >= 1` (Warning+),
+`raid_missing_disk_count >= 1` (Critical). UI: card "Storage Health (iLO)" trên
+`templates/dashboard/hyperv_detail.html`, chỉ hiện khi `device.ilo_ip_address` có giá trị.
+
+**Verify sống 2026-09-28 (live-fire test tự nhiên trên RAID Hyperv-02 đang lỗi thật)**: deploy xong
+→ vòng `poll_all_ilo` đầu tiên (20.3s/2-3 host) ghi đúng `HardwareHealth` (Hyperv-02:
+`controller=2,ld_worst=1,missing=2,enclosure_mismatch=1`; Hyprver03: toàn `0` — khớp Redfish dump
+thủ công trước đó) → `evaluate_alert_rules` (safety net, 90s) fire đúng cả 3 alert ngay vòng đầu →
+Telegram gửi thành công cả 3 (`AlertNotification.status="sent"`). ⚠️ **Hyperv-01 (`10.0.198.253`)
+trả 401 Unauthorized** — user cần nhập lại đúng username/password iLO qua UI (mỗi iLO có local
+admin credential riêng, không nhất thiết giống Hyperv-02/Hyprver03).
+- ⚠️ Chưa test qua `_poll_device_once`/inline alert eval — `poll_all_ilo` KHÔNG gọi
+  `check_device_alerts` ngay sau khi ghi (khác pattern `_poll_device_once`), dựa hoàn toàn vào
+  `evaluate_alert_rules` (safety net, 90s) để phát hiện — vẫn đủ nhanh cho ngưỡng "sự cố phần cứng"
+  (không phải mili-giây) nhưng khác 1 chút so với pattern "eval inline sau mỗi poll" mô tả ở mục
+  "Online/offline" bên dưới (pattern đó áp cho `_poll_device_once`, không áp cho `poll_all_ilo`).
+
 ## Celery Beat — `expire_seconds` bị reset mỗi lần `beat` restart (fix gốc 2026-07-07)
 > Phát hiện khi audit lại điều kiện poll HyperV — không phải bug riêng HyperV, ảnh hưởng
 > **mọi** `PeriodicTask` có khai báo `options.expires` trong `CELERY_BEAT_SCHEDULE`
@@ -351,6 +424,14 @@ Phase 1–7 **đã hoàn thành** (setup/models → collector SNMP/SSH + tests �
   `expire_seconds` cùng giá trị, nếu không entry đó lặp lại đúng bug này.
 
 ### Thay đổi quan trọng
+- **2026-09-28 (cùng ngày, mới nhất)**: Thêm iLO Redfish — RAID/disk health cho HyperV host, độc
+  lập hoàn toàn WinRM (model `HardwareHealth`, collector `ilo_redfish.py`, task `poll_all_ilo`, 3
+  alert rule RAID). Xem mục "iLO Redfish" ở trên + memory `ilo-raid-monitoring.md`. Verify sống
+  live-fire trên RAID Hyperv-02 đang lỗi thật: alert fire + Telegram gửi thành công ngay vòng poll
+  đầu. Bắt được 2 bug ở bước verify trước khi code thật (ghi vào `/deploy` skill để dùng chung):
+  (1) `GenericIPAddressField.exclude(field="")` sinh SQL luôn `NULL`, loại bỏ mọi row; (2) HPE
+  iLO4/5 đóng TCP connection sau đúng 1 request dù keep-alive. Commit `2fddc44` (+ `78d71e5` bước 1
+  thêm field nhập liệu). ⚠️ Hyperv-01 còn 401 Unauthorized (credential iLO sai) — chưa fix.
 - **2026-09-28 (cùng ngày, sau đó)**: Fix alert `duration_min>0` không tự resolve dù metric đã hồi
   phục (11/13 alert active kẹt tới 95 ngày) — xem mục "Online/offline" ⚠️ Rule `duration_min>0` ở
   trên + memory `alert-sustained-never-resolve.md`. Commit `d258bec`. Verify runtime: 11 alert tự
@@ -449,7 +530,8 @@ Phase 1–7 **đã hoàn thành** (setup/models → collector SNMP/SSH + tests �
 | [apps/collectors/switch_snmp.py](apps/collectors/switch_snmp.py) | SNMP collector + auto-detect os_family |
 | [apps/collectors/switch_ssh.py](apps/collectors/switch_ssh.py) | SSH collector (Netmiko) |
 | [apps/collectors/factory.py](apps/collectors/factory.py) | CollectorFactory |
-| [apps/collectors/tasks.py](apps/collectors/tasks.py) | `_poll_device_once`, online/ICMP, clear `last_seen` khi offline, publish SSE |
+| [apps/collectors/tasks.py](apps/collectors/tasks.py) | `_poll_device_once`, online/ICMP, clear `last_seen` khi offline, publish SSE, `poll_all_ilo` |
+| [apps/collectors/ilo_redfish.py](apps/collectors/ilo_redfish.py) | `IloRedfishClient` — RAID/disk health qua iLO Redfish (HyperV, độc lập WinRM) |
 | [apps/devices/models.py](apps/devices/models.py) | Device, `is_online` property (grace từ `last_seen`) |
 | [apps/metrics/writer.py](apps/metrics/writer.py) | Ghi metrics (DB/cache), tính delta Mbps, evidence khi đổi trạng thái |
 | [apps/metrics/cache.py](apps/metrics/cache.py) | Redis cache metrics: latest snapshot + ring-buffer (cache-first) |
