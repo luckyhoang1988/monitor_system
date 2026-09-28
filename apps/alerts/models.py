@@ -65,6 +65,10 @@ class AlertRule(models.Model):
             "disk_write_throughput_mbps": "Disk Write Throughput (MB/s)",
             "disk_queue_length": "Disk Queue Length",
             "avg_io_size_kb": "Avg I/O Size (KB/IO)",
+            "raid_controller_health": "RAID Controller Health (iLO)",
+            "raid_logical_drive_health": "RAID Logical Drive Health (iLO)",
+            "raid_missing_disk_count": "Số đĩa mất (iLO)",
+            "raid_enclosure_mismatch": "Số enclosure bất thường (iLO)",
         }
         return labels.get(self.metric, self.metric)
 
@@ -100,6 +104,11 @@ class AlertRule(models.Model):
             return f"{t:.2f}"
         if m == "avg_io_size_kb":
             return f"{t:.1f} KB"
+        if m in ("raid_controller_health", "raid_logical_drive_health"):
+            health_names = {0: "OK", 1: "Warning", 2: "Critical"}
+            return health_names.get(int(t), f"code={t:.0f}")
+        if m in ("raid_missing_disk_count", "raid_enclosure_mismatch"):
+            return f"{t:.0f}"
         return f"{t:.2f}"
 
 

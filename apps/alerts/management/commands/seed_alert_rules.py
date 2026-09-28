@@ -72,6 +72,27 @@ DEFAULT_RULES = [
         "condition": "gt", "threshold": 0.0,
         "severity": "WARNING", "duration_min": 0,
     },
+    # HyperV RAID/disk health (iLO Redfish, độc lập WinRM — xem apps/collectors/ilo_redfish.py).
+    # duration_min=0 cho cả 3: state phần cứng rời rạc, cần báo NGAY không chờ sustain (bài học
+    # thật: RAID5 Hyperv-02 mất 2/4 disk vượt khả năng chịu lỗi).
+    {
+        "name": "HyperV RAID Controller Critical",
+        "device_type": "hyperv", "metric": "raid_controller_health",
+        "condition": "gte", "threshold": 2.0,
+        "severity": "CRITICAL", "duration_min": 0,
+    },
+    {
+        "name": "HyperV RAID Logical Drive Warning+",
+        "device_type": "hyperv", "metric": "raid_logical_drive_health",
+        "condition": "gte", "threshold": 1.0,
+        "severity": "WARNING", "duration_min": 0,
+    },
+    {
+        "name": "HyperV RAID Missing Disk",
+        "device_type": "hyperv", "metric": "raid_missing_disk_count",
+        "condition": "gte", "threshold": 1.0,
+        "severity": "CRITICAL", "duration_min": 0,
+    },
     # Wireless rules
     {
         "name": "AP Offline",

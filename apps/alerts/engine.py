@@ -60,6 +60,19 @@ for _metric in _HOST_PERF_FIELD_MAP:
     METRIC_GETTERS[_metric] = (lambda device, since, m=_metric: _latest_host_perf(device, since, m))
 del _metric
 
+# iLO Redfish RAID/disk health (độc lập WinRM, model HardwareHealth riêng — KHÔNG có nhánh
+# cache-mode, model này không đi qua METRICS_WRITE_MODE, xem CLAUDE.md "Phạm vi" mục iLO).
+_ILO_FIELD_MAP = {
+    "raid_controller_health":    "controller_health_code",
+    "raid_logical_drive_health": "logical_drive_worst_code",
+    "raid_missing_disk_count":   "missing_disk_count",
+    "raid_enclosure_mismatch":   "enclosure_mismatch_count",
+}
+
+for _metric in _ILO_FIELD_MAP:
+    METRIC_GETTERS[_metric] = (lambda device, since, m=_metric: _latest_ilo(device, since, m))
+del _metric
+
 
 # ── Cache-first: khi METRICS_WRITE_MODE="cache", getters đọc từ Redis thay vì DB ──
 def _use_cache() -> bool:
@@ -174,6 +187,33 @@ def _sustained_host_perf(device: Device, rule: AlertRule, window_since) -> float
 
     from apps.metrics.models import SystemHealth
     qs = (SystemHealth.objects
+          .filter(device=device, timestamp__gte=window_since, **{f"{field_name}__isnull": False})
+          .order_by("timestamp")
+          .values_list(field_name, flat=True))
+    values = [float(v) for v in qs]
+    return _sustained_verdict(values, rule)
+
+
+def _latest_ilo(device: Device, since, metric: str) -> float | None:
+    """Latest value cho iLO RAID/disk health — luôn đọc DB trực tiếp (HardwareHealth không có
+    nhánh cache-mode, ghi thẳng Postgres mỗi poll, xem apps/collectors/tasks.py poll_all_ilo)."""
+    field_name = _ILO_FIELD_MAP[metric]
+    from apps.metrics.models import HardwareHealth
+    rec = (HardwareHealth.objects
+           .filter(device=device, timestamp__gte=since, **{f"{field_name}__isnull": False})
+           .order_by("-timestamp")
+           .values_list(field_name, flat=True)
+           .first())
+    return float(rec) if rec is not None else None
+
+
+def _sustained_ilo(device: Device, rule: AlertRule, window_since) -> float | None:
+    """Sustained version cho iLO RAID/disk health — tái dùng _sustained_verdict. State phần
+    cứng rời rạc (không noisy) nên seed rule dùng duration_min=0 (xem seed_alert_rules.py),
+    hàm này chỉ giữ nhất quán API nếu ai đổi duration_min>0 qua UI."""
+    field_name = _ILO_FIELD_MAP[rule.metric]
+    from apps.metrics.models import HardwareHealth
+    qs = (HardwareHealth.objects
           .filter(device=device, timestamp__gte=window_since, **{f"{field_name}__isnull": False})
           .order_by("timestamp")
           .values_list(field_name, flat=True))
@@ -763,6 +803,8 @@ def check_device_alerts(device: Device, since) -> None:
                 value = _sustained_wifi_ap_offline_count(device, rule, window_since)
             elif rule.metric in _HOST_PERF_FIELD_MAP:
                 value = _sustained_host_perf(device, rule, window_since)
+            elif rule.metric in _ILO_FIELD_MAP:
+                value = _sustained_ilo(device, rule, window_since)
             else:
                 value = getter(device, since)
 

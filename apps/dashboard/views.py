@@ -336,10 +336,17 @@ def switch_detail(request, pk):
 
 @login_required
 def hyperv_detail(request, pk):
-    from apps.metrics.models import VMStats, VolumeStats
+    from apps.metrics.models import VMStats, VolumeStats, HardwareHealth
 
     device = get_object_or_404(Device, pk=pk, device_type="hyperv")
     latest_health = _detail_health(device)
+    # iLO RAID/disk health — luôn đọc DB trực tiếp (HardwareHealth không đi qua
+    # METRICS_WRITE_MODE/cache-mode, ghi thẳng Postgres mỗi poll_all_ilo). None nếu chưa
+    # cấu hình ilo_ip_address hoặc chưa có vòng poll nào thành công.
+    latest_hardware_health = (
+        HardwareHealth.objects.filter(device=device).order_by("-timestamp").first()
+        if device.ilo_ip_address else None
+    )
 
     if metrics_cache.is_cache_mode():
         # Cache-mode: danh sách VM từ snapshot Redis (dựng VMStats chưa lưu cho template).
@@ -406,12 +413,13 @@ def hyperv_detail(request, pk):
     unhealthy_vms = [v for v in latest_vms if v.repl_health not in ("", "Normal", "NotConfigured")]
 
     return render(request, "dashboard/hyperv_detail.html", {
-        "device":         device,
-        "vms":            latest_vms,
-        "volumes":        latest_volumes,
-        "latest_health":  latest_health,
-        "running_count":  running_count,
-        "unhealthy_vms":  unhealthy_vms,
+        "device":                 device,
+        "vms":                    latest_vms,
+        "volumes":                latest_volumes,
+        "latest_health":          latest_health,
+        "running_count":          running_count,
+        "unhealthy_vms":          unhealthy_vms,
+        "latest_hardware_health": latest_hardware_health,
     })
 
 

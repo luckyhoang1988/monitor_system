@@ -134,6 +134,9 @@ POLL_PING_INTERVAL_SECS    = env.int("POLL_PING_INTERVAL_SECS", default=90)
 # chu kỳ → Hyprver03 báo Offline giả (xem apps/collectors/tasks.py POLL_HYPERV_BATCH_*).
 # 300s khớp đúng Device.collect_interval=300 đã set sẵn cho cả 3 host HyperV trong DB.
 POLL_HYPERV_INTERVAL_SECS  = env.int("POLL_HYPERV_INTERVAL_SECS", default=300)
+# iLO Redfish (RAID/disk health) — độc lập WinRM, RAID health đổi chậm nên poll thưa hơn
+# CPU/mem hẳn, tránh spam TLS/cert-handshake tới BMC. Xem apps/collectors/ilo_redfish.py.
+POLL_ILO_INTERVAL_SECS     = env.int("POLL_ILO_INTERVAL_SECS", default=300)
 ALERT_EVAL_INTERVAL_SECS   = env.int("ALERT_EVAL_INTERVAL_SECS", default=90)
 TOPOLOGY_DISCOVER_INTERVAL_SECS = env.int("TOPOLOGY_DISCOVER_INTERVAL_SECS", default=1800)
 
@@ -168,6 +171,11 @@ CELERY_BEAT_SCHEDULE = {
         "task": "apps.collectors.tasks.poll_all_hyperv",
         "schedule": POLL_HYPERV_INTERVAL_SECS,
         "options": {"expires": POLL_HYPERV_INTERVAL_SECS, "expire_seconds": POLL_HYPERV_INTERVAL_SECS},
+    },
+    "poll-all-ilo": {
+        "task": "apps.collectors.tasks.poll_all_ilo",
+        "schedule": POLL_ILO_INTERVAL_SECS,
+        "options": {"expires": POLL_ILO_INTERVAL_SECS, "expire_seconds": POLL_ILO_INTERVAL_SECS},
     },
     "evaluate-alert-rules": {
         "task": "apps.alerts.tasks.evaluate_alert_rules",
@@ -224,6 +232,12 @@ OID_PROFILES_DIR = BASE_DIR / "oids"
 # "validate" = đúng chuẩn (production)
 # "ignore"   = bỏ qua cert — chỉ dùng khi Hyper-V host dùng self-signed cert nội bộ
 WINRM_CERT_VALIDATE = env("WINRM_CERT_VALIDATE", default="validate")
+
+# iLO Redfish certificate validation (apps/collectors/ilo_redfish.py, dùng thẳng cho
+# requests.Session.verify nên là bool, KHÁC WINRM_CERT_VALIDATE ở trên là string "validate"/
+# "ignore" cho pywinrm). Default False — iLO tự ký cert theo mặc định hãng, verify=True sẽ
+# fail hầu hết máy thật trừ khi tự upload CA nội bộ vào iLO.
+ILO_CERT_VALIDATE = env.bool("ILO_CERT_VALIDATE", default=False)
 
 # Metrics retention (ngày)
 METRICS_RETENTION_DAYS = env.int("METRICS_RETENTION_DAYS", default=90)

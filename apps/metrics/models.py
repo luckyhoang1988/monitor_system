@@ -269,3 +269,29 @@ class InterfaceStatsDaily(models.Model):
         ordering = ["-day"]
         verbose_name = "Interface Stats (Daily)"
 
+
+class HardwareHealth(models.Model):
+    """Time-series: RAID/disk health đọc qua iLO Redfish (HPE iLO 4/5 SmartStorage), độc lập
+    hoàn toàn với WinRM/`_poll_device_once` — task/chu kỳ riêng (`poll_all_ilo`), KHÔNG dùng
+    SystemHealth (field đó gắn với giả định "mỗi row = 1 lần poll WinRM thành công", dùng cho
+    Hourly/Daily rollup — iLO không có rollup, xem CLAUDE.md "Phạm vi").
+
+    Health code dùng chung scale cho controller/logical drive (verify runtime iLO4 P440ar
+    2026-09-28, xem apps/collectors/ilo_redfish.py): 0=OK, 1=Warning/Degraded, 2=Critical/khác.
+    """
+    device = models.ForeignKey(Device, on_delete=models.CASCADE, related_name="hardware_health")
+    timestamp = models.DateTimeField(db_index=True)
+    controller_health_code = models.IntegerField(null=True, blank=True, verbose_name="RAID Controller Health")
+    logical_drive_worst_code = models.IntegerField(null=True, blank=True, verbose_name="Logical Drive Health (worst)")
+    missing_disk_count = models.IntegerField(null=True, blank=True, verbose_name="Số đĩa mất (404)")
+    enclosure_mismatch_count = models.IntegerField(null=True, blank=True, verbose_name="Số enclosure bất thường")
+    # Detail đầy đủ controllers[]/logical_drives[]/disks[]/enclosures[] cho UI — không dùng để
+    # rollup/alert (chỉ 4 field code ở trên dùng cho alert engine).
+    raw = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        indexes = [models.Index(fields=["device", "-timestamp"])]
+        ordering = ["-timestamp"]
+        verbose_name = "Hardware Health (iLO)"
+        verbose_name_plural = "Hardware Health (iLO)"
+

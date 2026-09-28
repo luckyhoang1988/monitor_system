@@ -280,3 +280,69 @@ def discover_topology_links() -> None:
         "Topology discovery done: switches=%d links=%d confirmed=%d errors=%d",
         stats["switches"], stats["links"], stats["confirmed"], stats["errors"],
     )
+
+
+# Trần cho TOÀN BỘ batch poll_all_ilo — chạy inline nhiều host trong 1 lời gọi (giống
+# poll_all_hyperv), KHÔNG qua poll_device nên cần soft/hard time_limit riêng ở tầng batch.
+# Redfish GET nhanh hơn WinRM PowerShell rất nhiều (REST đơn giản, không burst Get-Counter)
+# nên giới hạn thấp hơn nhiều — đo lại timing thật sau khi có vài chu kỳ chạy thật trên prod,
+# tăng nếu fleet iLO mở rộng (theo đúng bài học poll_all_hyperv — không ngoại suy tuyến tính).
+POLL_ILO_BATCH_SOFT_LIMIT = 60
+POLL_ILO_BATCH_HARD_LIMIT = 70
+
+
+@shared_task(
+    soft_time_limit=POLL_ILO_BATCH_SOFT_LIMIT,
+    time_limit=POLL_ILO_BATCH_HARD_LIMIT,
+)
+def poll_all_ilo() -> None:
+    """Poll RAID/disk health qua iLO Redfish cho HyperV host có cấu hình ilo_ip_address.
+
+    Độc lập hoàn toàn _poll_device_once/WinRM (task/chu kỳ riêng) — KHÔNG đụng
+    device.last_seen/is_online: iLO reachable/unreachable là tín hiệu khác với online/offline
+    của _poll_device_once, không được lẫn vào semantics last_seen/last_ok_seen đã tách bạch
+    (xem CLAUDE.md "Online/offline"). Host chưa cấu hình ilo_ip_address (để trống) tự bị lọc
+    ra ở query, không lỗi.
+    """
+    from apps.devices.models import Device
+    from apps.collectors.ilo_redfish import IloRedfishClient
+    from apps.metrics.models import HardwareHealth
+
+    # LƯU Ý: GenericIPAddressField (Postgres inet) không lưu được "" — Django tự coi "" là
+    # None khi build query. .exclude(ilo_ip_address__isnull=True) là ĐỦ; thêm
+    # .exclude(ilo_ip_address="") sinh SQL "NOT (x = NULL AND x IS NOT NULL)" luôn NULL cho
+    # mọi row -> loại bỏ hết kể cả row có IP hợp lệ (verify runtime 2026-09-28, dính bug này
+    # ở đúng bước probe trước khi code — xem CLAUDE.md/deploy skill).
+    device_ids = list(
+        Device.objects.filter(device_type="hyperv", enabled=True)
+        .exclude(ilo_ip_address__isnull=True)
+        .values_list("pk", flat=True)
+    )
+    success = 0
+    failed = 0
+    t0 = timezone.now()
+    try:
+        for pk in device_ids:
+            try:
+                device = Device.objects.get(pk=pk)
+                client = IloRedfishClient(device)
+                raw = client.collect_raw()
+                if raw is None:
+                    failed += 1
+                    continue
+                data = client.normalize(raw)
+                HardwareHealth.objects.create(device=device, timestamp=timezone.now(), **data)
+                success += 1
+            except Exception as exc:
+                failed += 1
+                logger.warning("iLO poll lỗi device id=%s: %s", pk, exc, exc_info=True)
+    except SoftTimeLimitExceeded:
+        elapsed = (timezone.now() - t0).total_seconds()
+        logger.warning(
+            "poll_all_ilo vượt soft_time_limit %ds sau %d/%d host (elapsed=%.1fs) — "
+            "dừng batch, host còn lại chờ chu kỳ sau",
+            POLL_ILO_BATCH_SOFT_LIMIT, success + failed, len(device_ids), elapsed,
+        )
+        return
+    elapsed = (timezone.now() - t0).total_seconds()
+    logger.info("Polled %d/%d iLO hosts (failed=%d, elapsed=%.1fs)", success, len(device_ids), failed, elapsed)
