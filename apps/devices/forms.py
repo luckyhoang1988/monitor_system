@@ -17,6 +17,7 @@ class DeviceForm(forms.ModelForm):
             "snmpv3_username", "snmpv3_auth_protocol", "snmpv3_auth_password",
             "snmpv3_priv_protocol", "snmpv3_priv_password",
             "ssh_username", "ssh_password",
+            "ilo_ip_address", "ilo_username", "ilo_password",
             "collect_interval", "uplink_ports", "location", "notes",
             "enabled", "backup_enabled"
         ]
@@ -26,6 +27,7 @@ class DeviceForm(forms.ModelForm):
             "snmp_community":  forms.PasswordInput(render_value=True),
             "snmpv3_auth_password": forms.PasswordInput(render_value=True),
             "snmpv3_priv_password": forms.PasswordInput(render_value=True),
+            "ilo_password":    forms.PasswordInput(render_value=True),
             "uplink_ports":    forms.TextInput(attrs={"placeholder": "GE0/0/1, GE0/0/2"}),
             "notes":           forms.Textarea(attrs={"rows": 3}),
         }

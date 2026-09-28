@@ -114,6 +114,30 @@
             </div>
           </div>
 
+          <!-- iLO / Remote Management (chỉ HyperV) -->
+          <div id="section-ilo">
+            <h6 class="text-muted small text-uppercase fw-semibold mb-3">
+              iLO / Remote Management <span class="text-muted fw-normal">(RAID/disk health — tùy chọn)</span>
+            </h6>
+            <div class="row g-3 mb-4">
+              <div class="col-sm-4">
+                <label class="form-label small fw-semibold">{{ form.ilo_ip_address.label }}</label>
+                {{ form.ilo_ip_address }}
+              </div>
+              <div class="col-sm-4">
+                <label class="form-label small fw-semibold">{{ form.ilo_username.label }}</label>
+                {{ form.ilo_username }}
+              </div>
+              <div class="col-sm-4">
+                <label class="form-label small fw-semibold">{{ form.ilo_password.label }}</label>
+                {{ form.ilo_password }}
+              </div>
+              <div class="col-12">
+                <div class="form-text small text-muted">Để trống nếu host chưa có/chưa biết IP iLO — sẽ bỏ qua khi poll.</div>
+              </div>
+            </div>
+          </div>
+
           <!-- Misc -->
           <h6 class="text-muted small text-uppercase fw-semibold mb-3">Tùy chọn khác</h6>
           <div class="row g-3 mb-4">
@@ -196,5 +220,16 @@ if (snmpVersionSelect) {
   snmpVersionSelect.addEventListener("change", updateProtocolFields);
 }
 updateProtocolFields(); // chạy ngay khi tải trang (edit mode)
+
+// Show/hide iLO section based on device_type — độc lập với updateProtocolFields ở trên
+// (iLO không gắn với protocol: HyperV luôn dùng protocol=winrm, nhưng iLO là NIC/BMC riêng).
+function updateDeviceTypeFields() {
+  const deviceType = document.getElementById("id_device_type").value;
+  document.getElementById("section-ilo").style.display = (deviceType === "hyperv") ? "" : "none";
+}
+
+const deviceTypeSelect = document.getElementById("id_device_type");
+deviceTypeSelect.addEventListener("change", updateDeviceTypeFields);
+updateDeviceTypeFields(); // chạy ngay khi tải trang (edit mode)
 </script>
 {% endblock %}

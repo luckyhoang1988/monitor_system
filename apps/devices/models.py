@@ -51,6 +51,12 @@ class Device(models.Model):
     snmpv3_priv_password = EncryptedCharField(blank=True, verbose_name="SNMPv3 Privacy Password")
     ssh_username     = models.CharField(max_length=100, blank=True, verbose_name="SSH Username")
     ssh_password     = EncryptedCharField(blank=True, verbose_name="SSH Password")
+    # iLO Redfish (HPE iLO 4/5 SmartStorage) — nguồn RAID/disk health độc lập với WinRM,
+    # chỉ dùng cho device_type=hyperv. Để trống = chưa cấu hình/bỏ qua (poll_all_ilo tự skip).
+    # Không dùng tên chung "bmc_*" vì chỉ verify trên HPE iLO thật (xem CLAUDE.md "Phạm vi").
+    ilo_ip_address   = models.GenericIPAddressField(null=True, blank=True, verbose_name="IP iLO")
+    ilo_username     = models.CharField(max_length=100, blank=True, verbose_name="iLO Username")
+    ilo_password     = EncryptedCharField(blank=True, verbose_name="iLO Password")
     collect_interval = models.IntegerField(default=300, verbose_name="Chu kỳ quét (giây)")
     uplink_ports     = models.JSONField(default=list, verbose_name="Uplink/Trunk ports")
     location         = models.CharField(max_length=200, blank=True, verbose_name="Vị trí")
