@@ -118,6 +118,38 @@ class TestCheckDeviceAlerts:
         assert alert.is_active is False
         assert alert.resolved_at is not None
 
+    def test_resolves_duration_min_alert_when_metric_recovers(self, device):
+        """Bug 2026-09-28: sustained getter trả None lúc metric đã hồi phục (không còn sustain
+        ở mức cao) — trước fix, `value is None` bị `continue` thẳng nên alert kẹt active vĩnh
+        viễn dù đã hồi phục. Fix: fallback đọc giá trị tức thời để xét resolve."""
+        rule = make_rule(metric="cpu_percent", condition="gt", threshold=90.0, duration_min=5)
+        Alert.objects.create(
+            device=device, rule=rule, severity="WARNING",
+            message="High CPU", metric_value=95.0, is_active=True,
+        )
+        # CPU đã về mức thấp — sample duy nhất trong window không sustain ở mức cao nữa.
+        SystemHealth.objects.create(
+            device=device, timestamp=now(),
+            cpu_percent=30.0, mem_percent=50.0,
+        )
+        check_device_alerts(device, since())
+        alert = Alert.objects.get(device=device)
+        assert alert.is_active is False
+        assert alert.resolved_at is not None
+
+    def test_does_not_resolve_duration_min_alert_without_fresh_data(self, device):
+        """Ngược lại: KHÔNG có sample nào (mất tín hiệu hoàn toàn) khác với "đã hồi phục" —
+        không được tự resolve khi chưa có bằng chứng thật, chỉ vì sustained getter trả None."""
+        rule = make_rule(metric="cpu_percent", condition="gt", threshold=90.0, duration_min=5)
+        Alert.objects.create(
+            device=device, rule=rule, severity="WARNING",
+            message="High CPU", metric_value=95.0, is_active=True,
+        )
+        # Không tạo SystemHealth nào — không có dữ liệu tức thời để xác nhận hồi phục.
+        check_device_alerts(device, since())
+        alert = Alert.objects.get(device=device)
+        assert alert.is_active is True
+
     def test_deduplication_does_not_create_duplicate_alert(self, device):
         rule = make_rule(metric="cpu_percent", condition="gt", threshold=90.0)
         # Pre-create an active alert

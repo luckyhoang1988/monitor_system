@@ -741,6 +741,8 @@ def check_device_alerts(device: Device, since) -> None:
         if not getter:
             continue
 
+        has_active = Alert.objects.filter(device=device, rule=rule, is_active=True).exists()
+
         # duration_min: if set, require condition to be sustained for the whole window.
         if rule.duration_min and rule.duration_min > 0:
             window_since = timezone.now() - timedelta(minutes=int(rule.duration_min))
@@ -763,13 +765,32 @@ def check_device_alerts(device: Device, since) -> None:
                 value = _sustained_host_perf(device, rule, window_since)
             else:
                 value = getter(device, since)
+
+            # ⚠️ 2026-09-28: các hàm `_sustained_*` dùng `_sustained_verdict` (mọi metric TRỪ
+            # device_online/if_status — 2 metric đó tự trả 0.0/1.0 rõ ràng) trả về `None` bất
+            # cứ khi nào điều kiện KHÔNG còn đúng suốt window — nhưng đó CHÍNH LÀ lúc metric đã
+            # hồi phục. Trước đây `value is None` → `continue` thẳng, không bao giờ tới nhánh
+            # "resolve" bên dưới → alert đã fire (duration_min>0) KHÔNG BAO GIỜ tự resolve được,
+            # kẹt `is_active=True` vĩnh viễn dù metric đã về ngưỡng bình thường từ lâu (verify
+            # runtime prod: 11/13 alert active thuộc nhóm rule này đã hồi phục thật từ nhiều
+            # ngày/tháng trước nhưng chưa từng resolve — xem memory `alert-sustained-never-resolve.md`).
+            # Fix: khi sustained=None mà đang có alert active, fallback đọc giá trị TỨC THỜI
+            # (không sustain, đúng hàm `getter` dùng cho nhánh duration_min=0) để xét resolve qua
+            # hysteresis — resolve KHÔNG cần sustain (giống cách device_online/if_status đã làm
+            # đúng từ đầu: chỉ sustain lúc FIRE để lọc nhiễu, resolve thì tức thời ngay khi có bằng
+            # chứng hồi phục mới nhất). Không đổi bán kính "fire" (vẫn phải sustain đủ window).
+            if value is None:
+                if has_active:
+                    instant = getter(device, since)
+                    if instant is not None and _decide_transition(rule, instant, has_active) == "resolve":
+                        _resolve_alert(device, rule)
+                continue
         else:
             value = getter(device, since)
 
         if value is None:
             continue
 
-        has_active = Alert.objects.filter(device=device, rule=rule, is_active=True).exists()
         action = _decide_transition(rule, value, has_active)
         if action == "fire":
             _fire_alert(device, rule, value)
