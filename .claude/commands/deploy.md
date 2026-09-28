@@ -292,6 +292,52 @@ Quy trình chuẩn (đã dùng để bắt bug 504 phiên đầu):
   raise. Quy tắc chung: pattern "xoá cũ → tạo mới từ input chưa validate" luôn nguy hiểm; nếu hàm
   tạo mới báo lỗi bằng return value (không exception) thì `transaction.atomic()` không tự cứu —
   phải chủ động `set_rollback(True)` khi thấy response lỗi.
+- **`.dockerignore` loại đúng secret CỦA APP rồi vẫn có thể sót secret CỦA SERVICE KHÁC nằm
+  cùng thư mục con trong repo (vd cert của service dùng bind-mount, không build từ Dockerfile
+  này).** Dính thật 2026-09-28 (security review đợt 3): đợt trước đã thêm `.dockerignore` loại
+  `.env*`/DB/backup, nhưng CHƯA loại `nginx/certs/` — service `nginx`
+  ([docker-compose.yml](../../docker-compose.yml)) dùng `image: nginx:alpine` +
+  bind-mount `./nginx/certs:/etc/nginx/certs:ro` (KHÔNG build từ [Dockerfile](../../Dockerfile)),
+  nhưng `app`/`worker`/`beat` build từ Dockerfile đó với `COPY . .` lại vô tình gom luôn thư mục
+  `nginx/` (cùng cấp trong repo) → TLS **private key thật** (`server.key`, mode 600) bị đóng gói
+  vào image của 3 service không hề dùng tới nó. Verify SSH: `docker compose exec app ls
+  /app/nginx/certs/` xác nhận key đã nằm SẴN trong container `app` đang chạy trước khi fix — bất
+  kỳ ai có quyền `docker compose exec` vào app/worker/beat (rộng hơn nhóm quản lý cert) đọc được
+  thẳng. Quy tắc chung: audit `.dockerignore` không chỉ hỏi "secret của service ĐANG build có bị
+  lọt không" mà phải hỏi thêm **"repo có thư mục nào chứa secret CỦA SERVICE KHÁC (bind-mount,
+  không build từ Dockerfile này) nằm trong cùng build context không"** — build context luôn là
+  TOÀN BỘ thư mục gửi cho Docker daemon, không tự giới hạn theo service.
+- **JS: hàm `esc()` kiểu `div.textContent = s; return div.innerHTML;` chỉ an toàn khi chèn vào
+  TEXT CONTENT — KHÔNG an toàn khi chèn vào thuộc tính HTML (`title="..."`, `href="..."`...).**
+  Dính thật 2026-09-28: trick này escape đúng `&`/`<`/`>` (browser tự làm khi serialize text
+  node) nhưng KHÔNG escape `"`/`'` (2 ký tự này vô nghĩa trong ngữ cảnh text content nên không bị
+  encode) — verify bằng Node: payload `x" onmouseover="alert(1)` qua hàm này giữ nguyên dấu `"`.
+  `discovery.html` chèn kết quả vào `title="${esc(...)}"` với dữ liệu SNMP sysDescr (thiết bị
+  ngoài mạng, không tin được) → payload trên thoát khỏi `title=`, tự thêm thuộc tính
+  `onmouseover=` mới → XSS thật. Fix: đổi sang escape đầy đủ `&<>"'` bằng regex (không dùng DOM
+  round-trip) — đúng pattern đã có sẵn ở `wlan_detail.html`, áp cho MỌI usage của `esc()` bất kể
+  đang chèn vào text hay attribute (không cần 2 hàm riêng — bản full-encode an toàn cho cả 2 ngữ
+  cảnh, không có usage nào bị "quá tay"). Quy tắc chung: khi audit 1 hàm tên `esc`/`escape`, phải
+  xác định rõ nó an toàn cho ngữ cảnh nào (text content / attribute value / URL / JS string...) —
+  3 ngữ cảnh HTML đầu có luật escape KHÁC NHAU, hàm chỉ đúng cho 1 ngữ cảnh mà dùng ở chỗ khác là
+  bug, không phải "escape rồi thì luôn an toàn".
+- **"Commit trạng thái TRƯỚC, gửi notification SAU" (đúng để chặn race gửi trùng — xem bẫy
+  `_resolve_alert` thiếu lock ở trên) có tác dụng phụ: worker chết ĐÚNG lúc giữa 2 bước làm mất
+  trắng notification, không có gì để retry (trạng thái đã commit nên vòng eval sau coi là "đã xử
+  lý xong").** Dính thật 2026-09-28 (security review đợt 3, đúng như review dự đoán khi tôi tự
+  sửa `_resolve_alert` ở đợt trước): fix "lock để chặn gửi trùng" tự nó tạo ra 1 cửa sổ mất dữ
+  liệu mới nếu không kèm theo cơ chế durable-intent. `_fire_alert` vốn đã có cùng cấu trúc "commit
+  trước, gửi sau" từ trước (không phải do fix trước gây ra) nên mang cùng rủi ro — sửa đối xứng cả
+  2 (xem bẫy "hàm fire/resolve thiếu đối xứng" ở trên — cùng nguyên tắc, ở khía cạnh khác). Fix:
+  transactional-outbox-lite — ghi `AlertNotification(status="pending")` **CÙNG transaction** với
+  lúc commit trạng thái Alert (durable "ý định gửi" tồn tại dù crash ngay sau commit); gửi thật
+  xong UPDATE row đó thành sent/failed (không tạo row mới); task định kỳ quét `pending` cũ hơn
+  `grace_secs` (tránh đua với 1 lần gửi đang chạy hợp lệ) và gửi lại đúng loại đã lưu tường minh
+  (field `kind`, KHÔNG suy đoán lại từ trạng thái hiện tại — trạng thái có thể đã đổi lần nữa giữa
+  lúc ghi pending và lúc retry). Quy tắc chung: **bất kỳ đâu áp dụng pattern "commit rồi mới làm
+  side-effect không-transactional" (gửi email, gọi webhook, ghi file...) để chặn race/gửi trùng,
+  đều PHẢI đi kèm 1 dạng "durable intent" (outbox row/queue message) — nếu không, đã đổi 1 bug
+  (gửi trùng) lấy 1 bug khác (mất tin) chứ không thực sự giải quyết được cả 2.**
 
 ## 2. Deploy
 ```

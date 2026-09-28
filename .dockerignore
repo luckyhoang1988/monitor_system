@@ -7,6 +7,16 @@
 .env.*
 !.env.example
 
+# TLS private key/cert — nginx đọc trực tiếp qua bind-mount (docker-compose.yml
+# `./nginx/certs:/etc/nginx/certs:ro`, service nginx dùng image nginx:alpine, KHÔNG build
+# từ Dockerfile này) nên app/worker/beat không cần và không được có bản sao. Verify runtime
+# 2026-09-28: server.key (thật, mode 600) đã bị đóng gói vào image app/worker/beat đang chạy
+# (xác nhận qua `docker compose exec app ls /app/nginx/certs/`) trước khi có dòng loại trừ
+# này — image build lại sau fix mới hết.
+nginx/certs/
+*.key
+*.pem
+
 # VCS / editor / OS / agent tooling
 .git/
 .gitignore

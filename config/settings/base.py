@@ -182,6 +182,17 @@ CELERY_BEAT_SCHEDULE = {
         "schedule": ALERT_EVAL_INTERVAL_SECS,
         "options": {"expires": ALERT_EVAL_INTERVAL_SECS, "expire_seconds": ALERT_EVAL_INTERVAL_SECS},
     },
+    # Safety net cho transactional-outbox-lite (xem apps/alerts/engine.py) — retry
+    # AlertNotification "pending" bị kẹt do worker chết giữa commit Alert và gửi thật. 120s
+    # (không cần theo ALERT_EVAL_INTERVAL_SECS — đây là xử lý bù hiếm khi có việc, grace_secs=90
+    # mặc định trong hàm đã đủ tránh đua với lần gửi đang chạy hợp lệ). Nhớ cả expires LẪN
+    # expire_seconds — thiếu expire_seconds sẽ bị beat restart reset về None (xem CLAUDE.md
+    # mục "Celery Beat").
+    "retry-pending-alert-notifications": {
+        "task": "apps.alerts.tasks.retry_pending_alert_notifications",
+        "schedule": 120,
+        "options": {"expires": 120, "expire_seconds": 120},
+    },
     "cleanup-old-metrics": {
         "task": "apps.metrics.tasks.cleanup_old_metrics",
         "schedule": crontab(hour=3, minute=0),  # daily 3AM

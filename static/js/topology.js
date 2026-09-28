@@ -7,12 +7,18 @@
   var dagreReady = false;
 
   // mac/ip/switch_name/location... đến từ LLDP/FDB/SNMP của thiết bị trên mạng
-  // (dữ liệu ngoài tầm kiểm soát của server) — phải escape trước khi ghép vào
-  // innerHTML. Cùng pattern esc() đã dùng ở topology_links.js/wlan_detail.html.
+  // (dữ liệu ngoài tầm kiểm soát của server) — phải escape trước khi ghép vào innerHTML.
+  // ⚠️ 2026-09-28: bản cũ dùng trick div.textContent→innerHTML chỉ escape &<> (an toàn cho
+  // text content) chứ KHÔNG escape "/' — showPanel() lại chèn esc(d.detail_url) vào thuộc
+  // tính href="..." (detail_url hiện do server sinh qua reverse() nên chưa khai thác được,
+  // nhưng cùng root cause XSS-tại-thuộc-tính đã xác nhận khai thác được ở discovery.html
+  // với sys_descr trong title=). Fix escape đầy đủ &<>"' bằng regex — an toàn cho cả text
+  // content lẫn thuộc tính, đúng pattern wlan_detail.html.
   function esc(s) {
-    var div = document.createElement("div");
-    div.textContent = s == null ? "" : String(s);
-    return div.innerHTML;
+    if (s == null) return "";
+    return String(s).replace(/[&<>"']/g, function (m) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[m];
+    });
   }
 
   function ensureDagre() {

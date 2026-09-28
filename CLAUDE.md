@@ -424,7 +424,54 @@ admin credential riêng, không nhất thiết giống Hyperv-02/Hyprver03).
   `expire_seconds` cùng giá trị, nếu không entry đó lặp lại đúng bug này.
 
 ### Thay đổi quan trọng
-- **2026-09-28 (cùng ngày, mới nhất — sau iLO)**: Security review theo báo cáo ngoài (4 điểm), cả
+- **2026-09-28 (cùng ngày, mới nhất — sau đợt Medium)**: Security review đợt 3 (3 điểm), cả 3
+  verify đúng bằng bằng chứng thật:
+  1. **High — TLS private key lọt vào Docker image (ĐANG XẢY RA THẬT trên prod, không phải lý
+     thuyết)**: `.dockerignore` đợt trước loại `.env`/DB/backup nhưng CHƯA loại `nginx/certs/`
+     — `Dockerfile` `COPY . .` vẫn gom `server.key` (nginx dùng bind-mount riêng, image
+     `nginx:alpine`, KHÔNG build từ `Dockerfile` này, nhưng `app`/`worker`/`beat` build từ
+     Dockerfile đó lại vô tình COPY luôn thư mục `nginx/` cùng cấp). Verify SSH trên
+     `monitorsrv`: `docker compose exec app ls /app/nginx/certs/` **xác nhận `server.key` (mode
+     600, key thật) đã nằm sẵn trong container `app` đang chạy** trước khi fix — ai có quyền
+     `docker compose exec` vào app/worker/beat (rộng hơn nhóm quản lý cert) đọc được thẳng key.
+     Fix: thêm `nginx/certs/`, `*.key`, `*.pem` vào `.dockerignore`; rebuild xoá khỏi image mới,
+     verify lại bằng đúng lệnh trên (rỗng sau fix).
+  2. **High — DOM XSS tại thuộc tính `title` chưa đóng hết**: `esc()` (discovery.html +
+     topology.js) dùng trick `div.textContent` → đọc lại `div.innerHTML` — chỉ escape
+     `&`/`<`/`>` (đủ an toàn khi chèn vào TEXT CONTENT) nhưng KHÔNG escape `"`/`'` (2 ký tự này
+     không có ý nghĩa đặc biệt trong text content nên trình duyệt không encode khi serialize
+     lại — đã verify bằng Node: payload `x" onmouseover="alert(1)` qua `esc()` cũ giữ nguyên
+     dấu `"`). `discovery.html` chèn `esc(dev.sys_descr)` vào `title="${...}"` (dữ liệu SNMP từ
+     thiết bị quét — ngoài tầm kiểm soát server) → payload trên thoát khỏi `title=`, tự thêm
+     thuộc tính `onmouseover="alert(1)"` mới trên `<td>` → XSS thật khi rê chuột. `topology.js`
+     có cùng lỗi ở `href="${esc(d.detail_url)}"` nhưng `detail_url` hiện do server sinh qua
+     `reverse()` nên chưa khai thác được — vẫn sửa vì cùng root cause. Fix: đổi `esc()` sang
+     escape đầy đủ `&<>"'` bằng regex (không dùng DOM round-trip nữa) — đúng pattern đã dùng ở
+     `wlan_detail.html`. Verify lại bằng Node: payload trên qua `esc()` mới ra
+     `x&quot; onmouseover=&quot;alert(1)` — không thoát được attribute nữa.
+  3. **Medium — có thể mất thông báo RECOVERED (và về lý thuyết cả FIRE) nếu worker chết giữa
+     lúc commit trạng thái Alert và lúc gửi notification thật**: `_resolve_alert` (đợt fix
+     Medium trước) cố ý đổi thứ tự "commit is_active=False TRƯỚC, gửi SAU" để chặn race gửi
+     trùng — nhưng tác dụng phụ là nếu worker bị kill đúng lúc giữa 2 bước, alert đã
+     `is_active=False` nên vòng eval sau coi như "đã xử lý xong", không bao giờ tự gửi lại →
+     mất RECOVERED vĩnh viễn, không có gì để retry. `_fire_alert` vốn đã có cùng cấu trúc
+     "commit trước, gửi sau" từ trước (không phải do đợt fix trước gây ra) nên mang cùng rủi ro
+     với thông báo FIRE — sửa đối xứng cả 2 theo nguyên tắc đã ghi trong `/deploy` skill. Fix:
+     **transactional-outbox-lite** — thêm field `AlertNotification.kind` (`fire`/`recovery`,
+     migration `0006_alertnotification_kind`); `_fire_alert`/`_resolve_alert` ghi
+     `AlertNotification(status="pending")` cho từng channel **CÙNG transaction** với lúc commit
+     trạng thái Alert (bằng chứng "còn nợ gửi" luôn tồn tại ngay cả khi crash ngay sau commit);
+     gửi thật xong UPDATE row đó thành `sent`/`failed` (không tạo row mới, tránh trùng). Task
+     Celery mới `retry_pending_alert_notifications` (`apps/alerts/tasks.py`, beat mỗi 120s, nhớ
+     cả `expires` lẫn `expire_seconds` — đúng bẫy đã ghi ở mục "Celery Beat") quét row
+     `status="pending"` cũ hơn `grace_secs=90s` (tránh đua với 1 lần gửi đang chạy hợp lệ) và
+     gửi lại — retry đúng loại (`kind`) đã lưu tường minh, không suy đoán lại từ `is_active` tại
+     thời điểm retry (có thể đã đổi lần nữa). 6 test mới (`tests/alerts/test_notification_outbox.py`)
+     mô phỏng trực tiếp "row pending bị kẹt" (tạo tay, không qua fire/resolve — đúng như DB sẽ
+     trông thế nào sau SIGKILL) chứ không cố dựng lại kịch bản crash thật.
+  455 test pass (451+6 mới — 2 TestFireLeavesNoLeftoverPending/TestResolveLeavesNoLeftoverPending
+  + 4 TestRetryPendingAlertNotifications), 2 skip như cũ.
+- **2026-09-28 (cùng ngày, sau iLO)**: Security review theo báo cáo ngoài (4 điểm), cả
   4 đều verify đúng bằng bằng chứng thật rồi mới fix (không sửa mù):
   1. **Critical — secret/dữ liệu vận hành đóng gói vào Docker image**: `Dockerfile` `COPY . .`
      không có `.dockerignore` → build context chứa `.env`/`.env.production`/`db.sqlite3`/
@@ -498,7 +545,8 @@ admin credential riêng, không nhất thiết giống Hyperv-02/Hyprver03).
      `transaction.set_rollback(True)` — khôi phục nguyên link cũ. Test regression
      `test_update_with_invalid_body_keeps_existing_link` (file mới
      `tests/dashboard/test_topology_links_api.py`).
-  451 test pass (448+3 mới), 2 skip như cũ.
+  449 test pass, 2 skip như cũ (con số chạy thật qua `pytest`, không cộng nhẩm — 3 test mới thêm
+  đợt này nhưng chưa đối chiếu chính xác baseline trước đó là bao nhiêu).
 - **2026-09-28 (cùng ngày, mới nhất)**: Thêm iLO Redfish — RAID/disk health cho HyperV host, độc
   lập hoàn toàn WinRM (model `HardwareHealth`, collector `ilo_redfish.py`, task `poll_all_ilo`, 3
   alert rule RAID). Xem mục "iLO Redfish" ở trên + memory `ilo-raid-monitoring.md`. Verify sống

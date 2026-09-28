@@ -22,3 +22,17 @@ def evaluate_alert_rules() -> None:
             check_device_alerts(device, since)
         except Exception as exc:
             logger.error("Alert check failed for %s: %s", device.name, exc)
+
+
+@shared_task
+def retry_pending_alert_notifications() -> None:
+    """Safety net cho transactional-outbox-lite (xem apps/alerts/engine.py _fire_alert/
+    _resolve_alert, 2026-09-28): nhặt lại AlertNotification status="pending" bị kẹt do worker
+    chết giữa lúc commit trạng thái Alert và lúc gửi thật — không có cơ chế nào khác tự phát
+    hiện/gửi lại các row này (evaluate_alert_rules coi alert đã is_active đúng là "đã xử lý",
+    không biết notification có gửi thành công hay không)."""
+    from .engine import retry_pending_alert_notifications as _retry
+    try:
+        _retry()
+    except Exception as exc:
+        logger.error("retry_pending_alert_notifications failed: %s", exc)

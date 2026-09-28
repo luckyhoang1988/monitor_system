@@ -947,6 +947,15 @@ def _fire_alert(device: Device, rule: AlertRule, value: float) -> None:
         message = (f"{device.name}: {rule.metric} = {metric_value_str} "
                    f"(ngưỡng {rule.condition} {threshold_str})")
 
+    # ⚠️ Transactional-outbox-lite (2026-09-28, theo báo cáo review — cùng root cause với
+    # _resolve_alert bên dưới nên sửa đối xứng cả 2): ghi Alert + "ý định gửi" (AlertNotification
+    # status="pending") CÙNG 1 transaction. Nếu worker chết NGAY SAU khi commit (trước khi kịp
+    # gọi _dispatch_notifications thật bên dưới) thì DB vẫn có bằng chứng "còn nợ gửi" (row
+    # pending) để task retry_pending_alert_notifications (định kỳ) nhặt lại — trước đây không
+    # có bằng chứng nào, và vòng eval kế tiếp coi alert đã is_active=True là "đã xử lý xong" nên
+    # không bao giờ tự gửi lại → mất trắng thông báo. is_flapping tính TRONG transaction (cùng
+    # connection nên vẫn thấy `alert` vừa create dù chưa commit — read-committed) để quyết định
+    # có tạo pending row hay không (giữ nguyên hành vi cũ: flapping thì không notification nào).
     with transaction.atomic():
         Device.objects.select_for_update().filter(pk=device.pk).first()
         if Alert.objects.filter(device=device, rule=rule, is_active=True).exists():
@@ -959,12 +968,18 @@ def _fire_alert(device: Device, rule: AlertRule, value: float) -> None:
             metric_value=float(value),
             is_active=True,
         )
+        is_flapping = _is_flapping(device, rule)
+        if not is_flapping:
+            AlertNotification.objects.bulk_create([
+                AlertNotification(alert=alert, channel=ch, kind="fire", status="pending")
+                for ch in rule.channels
+            ])
     # Cache-mode: lưu bằng chứng CPU/mem vào Postgres cho sự cố này.
     _persist_incident_snapshot(device)
-    if _is_flapping(device, rule):
+    if is_flapping:
         logger.warning("ALERT flapping — bỏ qua notification: %s", alert.message)
     else:
-        _send_notifications(alert, rule.channels)
+        _dispatch_notifications(alert, rule.channels, kind="fire")
     logger.warning("ALERT fired: %s", alert.message)
 
 
@@ -989,58 +1004,111 @@ def _resolve_alert(device: Device, rule: AlertRule) -> None:
             is_active=False,
             resolved_at=resolved_at,
         )
+        # Transactional-outbox-lite — cùng transaction với claim is_active=False ở trên (xem
+        # comment đầy đủ ở _fire_alert). Chỉ tạo pending cho alert nào ĐÃ có fire notification
+        # "sent" — giữ nguyên logic chống dội RECOVERED cho alert bị flapping-suppress lúc fire.
+        notified_alert_ids = set(
+            AlertNotification.objects.filter(
+                alert__in=alerts_to_resolve, kind="fire", status="sent"
+            ).values_list("alert_id", flat=True)
+        )
+        pending_rows = [
+            AlertNotification(alert=alert, channel=ch, kind="recovery", status="pending")
+            for alert in alerts_to_resolve if alert.pk in notified_alert_ids
+            for ch in rule.channels
+        ]
+        if pending_rows:
+            AlertNotification.objects.bulk_create(pending_rows)
 
     for alert in alerts_to_resolve:
         # Gán resolved_at lên object TRƯỚC khi gửi để tin RECOVERED có ngày giờ
         # (trước đây gửi trước update → alert.resolved_at=None → hiện "N/A").
         alert.resolved_at = resolved_at
-        # Chỉ gửi RECOVERED nếu fire của alert này ĐÃ TỪNG gửi thành công. Nếu fire
-        # bị flapping-suppress (không có notification "sent") thì im lặng resolve →
-        # tránh dội ✅ RECOVERED cho cảnh báo giả/flapping mà người dùng chưa từng thấy.
-        if AlertNotification.objects.filter(alert=alert, status="sent").exists():
-            _send_recovery_notifications(alert, rule.channels)
+        if alert.pk in notified_alert_ids:
+            _dispatch_notifications(alert, rule.channels, kind="recovery")
     logger.info("ALERT resolved: %s — %s", device.name, rule.name)
 
 
-def _send_recovery_notifications(alert: Alert, channels: list[str]) -> None:
-    for channel in channels:
-        try:
-            if channel == "email":
-                from .channels.email_channel import send_email_recovery
-                send_email_recovery(alert)
-            elif channel == "telegram":
-                from .channels.telegram import send_telegram_recovery
-                send_telegram_recovery(alert)
-            elif channel == "slack":
-                from .channels.webhook import send_slack_recovery
-                send_slack_recovery(alert)
-            elif channel == "teams":
-                from .channels.webhook import send_teams_recovery
-                send_teams_recovery(alert)
-            AlertNotification.objects.create(alert=alert, channel=channel, status="sent")
-        except Exception as exc:
-            AlertNotification.objects.create(alert=alert, channel=channel,
-                                              status="failed", error=str(exc))
-            logger.error("Recovery notification failed [%s]: %s", channel, exc)
+def _send_channel_message(kind: str, channel: str, alert: Alert) -> None:
+    """Gọi thẳng hàm gửi thật theo (kind, channel) — không tự ghi AlertNotification, raise nếu
+    lỗi (caller _dispatch_notifications bắt exception để cập nhật status)."""
+    if kind == "recovery":
+        if channel == "email":
+            from .channels.email_channel import send_email_recovery
+            send_email_recovery(alert)
+        elif channel == "telegram":
+            from .channels.telegram import send_telegram_recovery
+            send_telegram_recovery(alert)
+        elif channel == "slack":
+            from .channels.webhook import send_slack_recovery
+            send_slack_recovery(alert)
+        elif channel == "teams":
+            from .channels.webhook import send_teams_recovery
+            send_teams_recovery(alert)
+    else:
+        if channel == "email":
+            from .channels.email_channel import send_email_alert
+            send_email_alert(alert)
+        elif channel == "telegram":
+            from .channels.telegram import send_telegram_alert
+            send_telegram_alert(alert)
+        elif channel == "slack":
+            from .channels.webhook import send_slack_alert
+            send_slack_alert(alert)
+        elif channel == "teams":
+            from .channels.webhook import send_teams_alert
+            send_teams_alert(alert)
 
 
-def _send_notifications(alert: Alert, channels: list[str]) -> None:
+def _dispatch_notifications(alert: Alert, channels: list[str], kind: str) -> None:
+    """Gửi notification thật + cập nhật lại ĐÚNG row AlertNotification(status="pending") đã
+    ghi sẵn trong transaction lúc fire/resolve (transactional-outbox-lite, xem comment ở
+    _fire_alert/_resolve_alert) — dùng UPDATE thay vì CREATE để không đẻ thêm row thứ 2. Không
+    thấy row pending nào (gọi ngoài luồng chuẩn, vd retry sweep gọi lại) thì tự tạo mới, giữ
+    hàm hoạt động độc lập không phụ thuộc cứng vào call site.
+    """
     for channel in channels:
         try:
-            if channel == "email":
-                from .channels.email_channel import send_email_alert
-                send_email_alert(alert)
-            elif channel == "telegram":
-                from .channels.telegram import send_telegram_alert
-                send_telegram_alert(alert)
-            elif channel == "slack":
-                from .channels.webhook import send_slack_alert
-                send_slack_alert(alert)
-            elif channel == "teams":
-                from .channels.webhook import send_teams_alert
-                send_teams_alert(alert)
-            AlertNotification.objects.create(alert=alert, channel=channel, status="sent")
+            _send_channel_message(kind, channel, alert)
+            updated = AlertNotification.objects.filter(
+                alert=alert, channel=channel, kind=kind, status="pending"
+            ).update(status="sent")
+            if not updated:
+                AlertNotification.objects.create(alert=alert, channel=channel, kind=kind, status="sent")
         except Exception as exc:
-            AlertNotification.objects.create(alert=alert, channel=channel,
-                                              status="failed", error=str(exc))
-            logger.error("Notification failed [%s]: %s", channel, exc)
+            updated = AlertNotification.objects.filter(
+                alert=alert, channel=channel, kind=kind, status="pending"
+            ).update(status="failed", error=str(exc))
+            if not updated:
+                AlertNotification.objects.create(
+                    alert=alert, channel=channel, kind=kind, status="failed", error=str(exc)
+                )
+            logger.error("%s notification failed [%s]: %s", kind, channel, exc)
+
+
+def retry_pending_alert_notifications(grace_secs: int = 90) -> int:
+    """Quét AlertNotification status="pending" bị "kẹt" (worker chết giữa lúc commit trạng
+    thái Alert và lúc gửi thật — xem transactional-outbox-lite ở _fire_alert/_resolve_alert) và
+    gửi lại. `grace_secs` tránh đua với 1 lần gửi ĐANG chạy hợp lệ (pending vừa tạo <90s trước
+    gần như chắc chắn có 1 tiến trình khác đang xử lý, không phải bị bỏ rơi). Trả về số row đã
+    retry. Gọi từ task Celery định kỳ (apps/alerts/tasks.py) — KHÔNG lock Device vì đây là xử
+    lý bù, không cạnh tranh trực tiếp với fire/resolve của cùng device tại đúng thời điểm này.
+    """
+    cutoff = timezone.now() - timedelta(seconds=grace_secs)
+    stuck = list(
+        AlertNotification.objects.select_related("alert")
+        .filter(status="pending", sent_at__lt=cutoff)
+    )
+    for n in stuck:
+        try:
+            _send_channel_message(n.kind, n.channel, n.alert)
+            n.status = "sent"
+            n.save(update_fields=["status"])
+        except Exception as exc:
+            n.status = "failed"
+            n.error = str(exc)
+            n.save(update_fields=["status", "error"])
+            logger.error("Retry %s notification failed [%s]: %s", n.kind, n.channel, exc)
+    if stuck:
+        logger.warning("Retried %d pending alert notification(s) bị kẹt", len(stuck))
+    return len(stuck)

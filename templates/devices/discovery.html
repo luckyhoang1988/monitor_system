@@ -148,11 +148,20 @@ const toastTitle = document.getElementById("toastTitle");
 
 // hostname/sys_descr đến từ reverse DNS + SNMP sysDescr của thiết bị quét được
 // (dữ liệu ngoài tầm kiểm soát của server) — phải escape trước khi ghép vào innerHTML,
-// không tin HTML thô. Cùng pattern esc() đã dùng ở topology_links.js/wlan_detail.html.
+// không tin HTML thô.
+// ⚠️ 2026-09-28: bản cũ dùng trick div.textContent→innerHTML — chỉ an toàn khi chèn vào
+// TEXT CONTENT (escape đúng &<>) nhưng KHÔNG escape "/' (không có ý nghĩa đặc biệt trong
+// text content nên trình duyệt không encode khi serialize lại). sys_descr lại được chèn
+// vào thuộc tính title="${esc(...)}" (dòng render bên dưới) — payload
+// `x" onmouseover="alert(1)` thoát khỏi dấu " của title, tạo thuộc tính onmouseover mới →
+// XSS thật khi rê chuột. Fix: đổi sang escape đầy đủ &<>"' bằng regex (không dùng DOM
+// round-trip nữa) — an toàn cho CẢ text content lẫn thuộc tính, đúng pattern đã dùng ở
+// wlan_detail.html.
 function esc(s) {
-  const div = document.createElement("div");
-  div.textContent = s == null ? "" : String(s);
-  return div.innerHTML;
+  if (s == null) return "";
+  return String(s).replace(/[&<>"']/g, m => (
+    { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[m]
+  ));
 }
 
 document.getElementById("scanForm").addEventListener("submit", function (e) {

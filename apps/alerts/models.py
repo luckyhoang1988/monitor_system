@@ -158,10 +158,17 @@ class AlertConfig(models.Model):
 
 
 class AlertNotification(models.Model):
+    KIND_CHOICES = [("fire", "Fire"), ("recovery", "Recovery")]
+
     alert    = models.ForeignKey(Alert, on_delete=models.CASCADE, related_name="notifications")
-    channel  = models.CharField(max_length=20)   # email | telegram
+    channel  = models.CharField(max_length=20)   # email | telegram | slack | teams
+    # "fire" (alert vừa nổ) hay "recovery" (đã hồi phục) — cần để phân biệt khi retry 1 row
+    # "pending" bị kẹt (xem apps/alerts/engine.py _dispatch_notifications): is_active của
+    # Alert có thể đã đổi lần nữa giữa lúc ghi pending và lúc sweep retry, nên KHÔNG thể suy
+    # ra loại thông báo cần gửi từ is_active tại thời điểm retry — phải lưu tường minh lúc tạo.
+    kind     = models.CharField(max_length=10, choices=KIND_CHOICES, default="fire")
     sent_at  = models.DateTimeField(auto_now_add=True)
-    status   = models.CharField(max_length=20)   # sent | failed
+    status   = models.CharField(max_length=20)   # pending | sent | failed
     error    = models.TextField(blank=True)
 
     class Meta:
