@@ -137,6 +137,21 @@ apps/
   - **Vì sao**: trước đây xoá `last_seen` làm `is_online`=False **ngay** (grace bị bỏ qua khi `last_seen=None`) → 1 vòng poll trượt (ICMP rớt gói/SNMP chậm/walk rỗng) đủ bắn alert `device_online` **Offline giả** rồi Recovered → **spam Telegram flapping**. Nay alert offline ([_device_online](apps/alerts/engine.py), [_sustained_device_online](apps/alerts/engine.py)) dùng `is_online_for_alert` → chỉ báo khi mất tín hiệu THẬT vượt grace; dashboard vẫn Off tức thì.
 - `Device.is_online` ([apps/devices/models.py](apps/devices/models.py)): property từ `last_seen` + grace `max(collect_interval×3, DEVICE_ONLINE_MIN_GRACE_SECS=300)`. Dùng trong `_dashboard_counts()`, render index. **Cảnh báo offline KHÔNG dùng property này** (dùng `is_online_for_alert`).
 - **Chống spam khác** ([apps/alerts/engine.py](apps/alerts/engine.py)): (1) `_resolve_alert` chỉ gửi ✅ RECOVERED nếu fire đã từng có `AlertNotification` status `sent` → fire bị flapping-suppress thì resolve im lặng (không dội recovery). (2) `mem_percent==0` coi là sentinel "không đo được" (Cisco Business/SMB không expose mem) → `_latest_mem`/`_sustained_cpu_mem` bỏ qua → rule `lt/lte` mem không fire giả.
+- ⚠️ **Rule `duration_min>0` — resolve KHÔNG cần sustain, chỉ FIRE mới cần** (fix 2026-09-28,
+  commit `d258bec`): các hàm `_sustained_*` (`_sustained_cpu_mem`/`_sustained_host_perf`/
+  `_sustained_vm_metric`/`_sustained_wifi_client_count`/`_sustained_wifi_ap_offline_count`/
+  `_sustained_uplink_traffic_max`) dùng chung `_sustained_verdict()` — hàm này trả `None` bất cứ
+  khi nào điều kiện KHÔNG còn đúng suốt window, dùng chung cho cả "chưa đủ sustain để fire" VÀ "đã
+  hồi phục". `check_device_alerts` cũ `if value is None: continue` → alert `duration_min>0` đã fire
+  **KHÔNG BAO GIỜ tự resolve được** (verify runtime: 11/13 alert active loại này đã hồi phục thật
+  từ nhiều ngày/tháng trước — cũ nhất 95 ngày — nhưng chưa từng gửi Recovered). Miễn nhiễm: metric
+  nhị phân `device_online`/`if_status` (2 hàm sustained riêng tự trả `0.0`/`1.0` rõ ràng, không bao
+  giờ `None`-khi-hồi-phục, nên offline/recovered luôn hoạt động đúng — đây là lý do bug tồn tại lâu
+  mà không ai phát hiện, vì rule online/offline test nhiều nhất lại miễn nhiễm). Fix: khi sustained
+  trả `None` mà đang có alert active → fallback đọc giá trị TỨC THỜI (`getter` plain, cùng hàm dùng
+  cho `duration_min=0`) rồi xét resolve qua hysteresis; không có dữ liệu tức thời (mất tín hiệu hoàn
+  toàn, khác "đã hồi phục") → vẫn giữ active, không đoán bừa. Chi tiết + số liệu verify đầy đủ: memory
+  `alert-sustained-never-resolve.md`.
 
 **Dashboard index — hiển thị on/off** ([templates/dashboard/index.html](templates/dashboard/index.html)):
 - Stat-card mỗi loại: `total` + `X on` + `· Y off` (chỉ hiện `off` khi Y>0).
@@ -336,6 +351,10 @@ Phase 1–7 **đã hoàn thành** (setup/models → collector SNMP/SSH + tests �
   `expire_seconds` cùng giá trị, nếu không entry đó lặp lại đúng bug này.
 
 ### Thay đổi quan trọng
+- **2026-09-28 (cùng ngày, sau đó)**: Fix alert `duration_min>0` không tự resolve dù metric đã hồi
+  phục (11/13 alert active kẹt tới 95 ngày) — xem mục "Online/offline" ⚠️ Rule `duration_min>0` ở
+  trên + memory `alert-sustained-never-resolve.md`. Commit `d258bec`. Verify runtime: 11 alert tự
+  resolve đúng (gửi Recovered trễ), 2 alert Hyperv-02 latency đúng vẫn active (RAID vẫn còn thật).
 - **2026-09-28**: Fix `poll_all_hyperv` hard-kill liên tục sau khi fleet HyperV tăng lên 3 host
   (thêm Hyprver03) trong khi Hyperv-02 đang có sự cố RAID thật ([[hyperv02-winrm-instability]] —
   không phải memory link, xem file cùng tên) khiến batch vượt hard time_limit cũ (110s, tính cho

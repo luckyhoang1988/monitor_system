@@ -159,6 +159,28 @@ Quy trình chuẩn (đã dùng để bắt bug 504 phiên đầu):
   nào chưa có trong mục "OID đã xác minh runtime" CLAUDE.md đều PHẢI coi là chưa chắc — verify
   bằng cách walk cả nhánh counter thô liên quan rồi đối chiếu UI/tool chính hãng của thiết bị,
   không chỉ tin tên OID nghe "chuẩn".
+- **Getter "sustained" cho rule `duration_min>0` trả `None` khi hết đúng điều kiện == trả `None`
+  khi ĐÃ HỒI PHỤC — nếu code chỉ `if value is None: continue` thì alert KHÔNG BAO GIỜ tự resolve.**
+  Dính thật 2026-09-28: `_sustained_verdict()` (dùng chung bởi `_sustained_cpu_mem`/
+  `_sustained_host_perf`/`_sustained_vm_metric`/`_sustained_wifi_*`/`_sustained_uplink_traffic_max`
+  trong `apps/alerts/engine.py`) trả `None` cho cả 2 case "chưa đủ sustain để fire" VÀ "đã hồi phục"
+  — không phân biệt được — nên `check_device_alerts` cũ bỏ qua thẳng, không bao giờ tới nhánh resolve.
+  Verify runtime: 11/13 alert active loại này đã hồi phục thật từ 1 ngày tới 95 ngày trước nhưng
+  chưa từng gửi Recovered. Miễn nhiễm: `device_online`/`if_status` (2 hàm sustained riêng tự trả
+  `0.0`/`1.0` rõ ràng thay vì `None`) — đây là lý do bug tồn tại lâu mà không lộ ra, vì rule
+  online/offline (test nhiều nhất) lại không dính. Fix: khi sustained=`None` mà có alert active →
+  fallback đọc giá trị TỨC THỜI (hàm `getter` plain, không sustain) để xét resolve qua hysteresis —
+  resolve không cần sustain, chỉ FIRE mới cần lọc nhiễu qua window. Không có dữ liệu tức thời (mất
+  tín hiệu hoàn toàn) → vẫn giữ active, không đoán. Quy tắc chung: **bất kỳ getter nào trả `None`
+  để nói "điều kiện fire không đúng" đều PHẢI phân biệt rõ với "đã hồi phục" nếu logic gọi nó có
+  nhánh resolve dựa trên `is None`** — 2 khái niệm khác nhau, gộp chung 1 sentinel là nguồn bug.
+  Chi tiết + số liệu verify: memory `alert-sustained-never-resolve.md`. Commit `d258bec`.
+  ⚠️ **Verify timing của task `@shared_task` PHẢI đọc log Celery thật (`docker compose logs worker
+  | grep "Task ... succeeded"`), KHÔNG gọi trực tiếp function trong `manage.py shell` rồi tự đo
+  `time.time()`** — gọi trực tiếp bỏ qua hoàn toàn `soft_time_limit`/`time_limit` (chỉ Celery worker
+  enforce khi task chạy qua queue thật) VÀ có thể trùng lúc Beat cũng tự trigger cùng task → 2 tiến
+  trình cùng tải 1 host (dính thật: gọi tay `poll_all_hyperv()` đo được 500.9s do trùng lúc Beat,
+  tưởng regression, nhưng log Celery thật cùng lúc cho thấy task qua queue chạy sạch 98.17s).
 - **PowerShell helper function 1 ký tự có thể trùng alias built-in** (`r`=`Invoke-History`,
   `h`=`Get-History`, v.v.) — PowerShell resolve alias TRƯỚC function cùng tên trong 1 số trường hợp,
   khiến hàm tự định nghĩa `function R(...)` bị gọi nhầm thành `Invoke-History`, ném lỗi mơ hồ
