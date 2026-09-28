@@ -338,6 +338,36 @@ Quy trình chuẩn (đã dùng để bắt bug 504 phiên đầu):
   side-effect không-transactional" (gửi email, gọi webhook, ghi file...) để chặn race/gửi trùng,
   đều PHẢI đi kèm 1 dạng "durable intent" (outbox row/queue message) — nếu không, đã đổi 1 bug
   (gửi trùng) lấy 1 bug khác (mất tin) chứ không thực sự giải quyết được cả 2.**
+- **"Durable intent" (outbox row) tự nó KHÔNG đủ — phải CLAIM nguyên tử row đó trước khi dùng,
+  nếu không outbox chỉ dời bug "gửi trùng" từ chỗ cũ sang chỗ mới (task retry).** Dính thật
+  2026-09-28: bản outbox-lite đầu tiên (ghi ở bẫy ngay trên) tạo row `status="pending"` đúng,
+  nhưng `retry_pending_alert_notifications` lại `list()` toàn bộ row pending rồi gửi tuần tự —
+  KHÔNG khoá/claim gì cả. 2 lần gọi hàm này chồng nhau (task trước >120s chu kỳ beat, nhiều beat
+  process, gọi tay trùng lúc sweep chạy) đọc thấy CÙNG row → cùng gửi → trùng — y hệt lớp bug mà
+  outbox pattern định giải quyết, chỉ chuyển từ `_resolve_alert` sang task retry. Phát hiện thêm
+  khi sửa: không chỉ 2 lần sweep tranh nhau — sweep còn có thể tranh với chính lệnh gọi GỐC
+  (`_dispatch_notifications`) nếu nó gửi chậm hơn ngưỡng "coi là kẹt" của sweep (channel `email`
+  qua Django `send_mail` không có `EMAIL_TIMEOUT` nên có thể treo lâu thật). Fix: **UPDATE có
+  điều kiện làm compare-and-swap** — `AlertNotification.objects.filter(pk=pk,
+  status="pending").update(status="processing")`: DB đảm bảo chỉ 1 trong N lệnh UPDATE đồng thời
+  trên CÙNG row nhận được số dòng thay đổi > 0 (row lock cấp DB), N-1 lệnh còn lại nhận 0 → tự bỏ
+  qua. Áp dụng claim này ở MỌI nơi có thể chạm vào row outbox (cả lệnh gọi gốc lẫn task retry),
+  không chỉ ở retry. Thu hồi row `processing` bị bỏ rơi (claim thành công nhưng chết trước khi
+  gửi xong) cần 1 field timestamp riêng cập nhật MỖI LẦN đổi status (`updated_at`, `auto_now=True`
+  — KHÁC field `auto_now_add` chỉ set lúc tạo, dễ nhầm) + ngưỡng "coi là kẹt" dài hơn ngưỡng ban
+  đầu (`stale_processing_secs` > `grace_secs`, vì 1 tiến trình ĐANG gửi thật hợp lệ cần thời gian
+  dài hơn "vừa tạo intent"). ⚠️ Claim lại row `processing` cũ PHẢI re-check cutoff NGAY TRONG
+  WHERE của chính câu UPDATE claim (không chỉ ở bước SELECT chọn candidate trước đó) — nếu chỉ
+  lọc candidate 1 lần rồi loop claim từng row bằng điều kiện lỏng hơn (vd chỉ `status IN
+  (pending, processing)` không kèm lại mốc thời gian), 2 lần claim chồng nhau trên row processing
+  vừa được claim xong (updated_at=NOW rất mới) vẫn cùng khớp điều kiện lỏng đó → double-claim.
+  Quy tắc chung: **outbox pattern có 2 nửa bắt buộc — (a) ghi durable intent CÙNG transaction với
+  đổi trạng thái nguồn, (b) claim nguyên tử trước khi hành động trên intent đó — thiếu nửa (b) là
+  outbox nửa vời, tự nó tạo lại đúng bug mà nửa (a) định giải quyết ở 1 tầng khác.** Migration
+  `0007` (field `updated_at` + `models.Index(fields=["status","sent_at"])`/
+  `["status","updated_at"]` — không có index này thì sweep định kỳ mỗi 120s là full-table scan
+  khi lịch sử `AlertNotification` lớn dần, phát hiện Low riêng nhưng sửa cùng lúc vì đụng chung
+  model).
 
 ## 2. Deploy
 ```

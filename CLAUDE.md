@@ -424,7 +424,41 @@ admin credential riêng, không nhất thiết giống Hyperv-02/Hyprver03).
   `expire_seconds` cùng giá trị, nếu không entry đó lặp lại đúng bug này.
 
 ### Thay đổi quan trọng
-- **2026-09-28 (cùng ngày, mới nhất — sau đợt Medium)**: Security review đợt 3 (3 điểm), cả 3
+- **2026-09-28 (cùng ngày, mới nhất — sau đợt 3)**: Security review đợt 4 (2 điểm), soi thẳng
+  vào code `retry_pending_alert_notifications` mới viết ở đợt 3 cùng ngày — cả 2 đúng:
+  1. **Medium — 2 lần gọi `retry_pending_alert_notifications` chồng nhau có thể gửi trùng**:
+     bản đợt 3 `list()` toàn bộ row `pending` rồi gửi từng row tuần tự, KHÔNG claim nguyên tử —
+     task trước chạy quá 120s (chu kỳ beat), gọi tay trùng lúc sweep định kỳ, hoặc nhiều beat
+     process đều có thể khiến 2 lần gọi cùng đọc thấy 1 row và cùng gửi. Review còn chỉ ra thêm
+     1 khe hở tôi tự phát hiện khi sửa: KHÔNG chỉ 2 lần sweep tranh nhau — chính lệnh gọi GỐC
+     (`_dispatch_notifications` từ `_fire_alert`/`_resolve_alert`) cũng có thể bị sweep tranh
+     mất cùng row nếu gửi CHẬM hơn `grace_secs` (90s) — xác nhận có thật với channel `email`:
+     Django `send_mail` KHÔNG set `EMAIL_TIMEOUT` (verify: không có key này trong
+     `config/settings/*`) nên SMTP server treo có thể giữ lâu hơn 90s; `telegram`/`webhook` có
+     `timeout=10` nên rủi ro thấp hơn. Fix: **claim bằng UPDATE có điều kiện**
+     (`.filter(status="pending").update(status="processing", ...)` — chỉ 1 caller nhận số dòng
+     >0) áp dụng ở CẢ 2 nơi (`_dispatch_notifications` lẫn `retry_pending_alert_notifications`),
+     không chỉ ở sweep. Thêm field `AlertNotification.updated_at` (`auto_now=True`, migration
+     `0007`) để track "lúc claim" — cần vì `sent_at` (`auto_now_add`) chỉ set lúc tạo, không đổi
+     khi claim. Thu hồi row `processing` bị bỏ rơi (worker chết SAU khi claim, TRƯỚC khi kịp
+     gửi): sweep còn quét thêm `status="processing"` cũ hơn `stale_processing_secs=300s` (dài
+     hơn hẳn `grace_secs` vì 1 tiến trình đang gửi thật hợp lệ có thể mất vài chục giây, nhất là
+     email không timeout) — claim lại bằng UPDATE re-check `stale_cutoff` CỐ ĐỊNH (tính 1 lần
+     trước vòng lặp) NGAY TRONG WHERE của chính câu UPDATE, không chỉ ở bước chọn candidate —
+     đây là phần mấu chốt: 2 lần claim chồng nhau trên cùng 1 row `processing` cũ, lần đến sau
+     (dù bị DB khoá row chờ lần đầu commit) re-evaluate điều kiện `updated_at < stale_cutoff`
+     trên dữ liệu MỚI COMMIT (đã update updated_at=NOW()) → không còn khớp → tự bỏ qua.
+  2. **Low — query sweep định kỳ (mỗi 120s) chưa có index cho `(status, sent_at)`**: đúng,
+     full-table scan khi lịch sử `AlertNotification` lớn dần. Fix: thêm 2
+     `models.Index` — `(status, sent_at)` (đúng đề xuất, phục vụ nhánh quét "pending") và
+     `(status, updated_at)` (phục vụ nhánh quét "processing" bị kẹt, cũng mới thêm ở fix #1).
+  6 test mới (`test_double_claim_second_caller_skips`, `test_fresh_processing_row_not_touched`,
+  `test_stale_processing_row_gets_reclaimed` + 3 test cũ vẫn giữ nguyên hành vi) — 458 test pass
+  (455+3 mới), 2 skip như cũ. Bài học (đã ghi `/deploy` skill): tự viết fix cho 1 báo cáo review
+  không có nghĩa fix đó miễn nhiễm — code mới viết trong ngày đã bị review tiếp lần nữa và bắt
+  đúng 1 bug cùng loại với bug đang sửa (đọc-sửa-ghi không khoá), cho thấy giá trị của việc để
+  review độc lập soi lại code mới thay vì tự tin là đã xong.
+- **2026-09-28 (cùng ngày, sau đợt Medium)**: Security review đợt 3 (3 điểm), cả 3
   verify đúng bằng bằng chứng thật:
   1. **High — TLS private key lọt vào Docker image (ĐANG XẢY RA THẬT trên prod, không phải lý
      thuyết)**: `.dockerignore` đợt trước loại `.env`/DB/backup nhưng CHƯA loại `nginx/certs/`

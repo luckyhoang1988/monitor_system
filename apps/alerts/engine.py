@@ -3,6 +3,7 @@ import logging
 from datetime import timedelta
 from django.conf import settings
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 from apps.devices.models import Device
 from apps.metrics import cache as metrics_cache
@@ -1061,24 +1062,42 @@ def _send_channel_message(kind: str, channel: str, alert: Alert) -> None:
 
 
 def _dispatch_notifications(alert: Alert, channels: list[str], kind: str) -> None:
-    """Gửi notification thật + cập nhật lại ĐÚNG row AlertNotification(status="pending") đã
-    ghi sẵn trong transaction lúc fire/resolve (transactional-outbox-lite, xem comment ở
-    _fire_alert/_resolve_alert) — dùng UPDATE thay vì CREATE để không đẻ thêm row thứ 2. Không
-    thấy row pending nào (gọi ngoài luồng chuẩn, vd retry sweep gọi lại) thì tự tạo mới, giữ
-    hàm hoạt động độc lập không phụ thuộc cứng vào call site.
+    """Gửi notification thật cho từng channel.
+
+    ⚠️ 2026-09-28 (theo báo cáo review — "2 retry task có thể gửi trùng"): TRƯỚC khi gửi phải
+    claim nguyên tử row AlertNotification(status="pending") đã ghi sẵn trong transaction lúc
+    fire/resolve (transactional-outbox-lite) sang "processing" bằng UPDATE có điều kiện
+    (`.filter(status="pending").update(...)` — chỉ 1 caller nhận được số dòng >0, caller khác
+    tới sau nhận 0 và tự bỏ qua). Không chỉ 2 lần gọi retry_pending_alert_notifications() chồng
+    nhau mới cần claim — chính lệnh gọi GỐC này (từ _fire_alert/_resolve_alert) cũng có thể bị
+    sweep định kỳ tranh mất cùng 1 row nếu gửi CHẬM hơn grace_secs (90s mặc định của sweep):
+    channel `email` dùng Django `send_mail` KHÔNG set `EMAIL_TIMEOUT` (verify: không có key này
+    trong config/settings/*) nên 1 SMTP server treo có thể giữ request lâu hơn 90s thật —
+    telegram/webhook có `timeout=10` nên tự thoát nhanh, rủi ro thấp hơn nhưng vẫn claim cho
+    đồng nhất, không đặc cách theo channel. Không thấy row pending nào (gọi ngoài luồng chuẩn,
+    vd test gọi thẳng hàm) → vẫn gửi + tự tạo row mới, giữ hàm hoạt động độc lập.
     """
     for channel in channels:
+        claimed = AlertNotification.objects.filter(
+            alert=alert, channel=channel, kind=kind, status="pending"
+        ).update(status="processing", updated_at=timezone.now())
+        if not claimed and AlertNotification.objects.filter(
+            alert=alert, channel=channel, kind=kind
+        ).exists():
+            # Có row nhưng KHÔNG claim được — 1 tiến trình khác (sweep, hoặc lời gọi khác) đã
+            # hoặc đang xử lý rồi. Không gửi trùng.
+            continue
         try:
             _send_channel_message(kind, channel, alert)
             updated = AlertNotification.objects.filter(
-                alert=alert, channel=channel, kind=kind, status="pending"
-            ).update(status="sent")
+                alert=alert, channel=channel, kind=kind, status="processing"
+            ).update(status="sent", updated_at=timezone.now())
             if not updated:
                 AlertNotification.objects.create(alert=alert, channel=channel, kind=kind, status="sent")
         except Exception as exc:
             updated = AlertNotification.objects.filter(
-                alert=alert, channel=channel, kind=kind, status="pending"
-            ).update(status="failed", error=str(exc))
+                alert=alert, channel=channel, kind=kind, status="processing"
+            ).update(status="failed", error=str(exc), updated_at=timezone.now())
             if not updated:
                 AlertNotification.objects.create(
                     alert=alert, channel=channel, kind=kind, status="failed", error=str(exc)
@@ -1086,29 +1105,62 @@ def _dispatch_notifications(alert: Alert, channels: list[str], kind: str) -> Non
             logger.error("%s notification failed [%s]: %s", kind, channel, exc)
 
 
-def retry_pending_alert_notifications(grace_secs: int = 90) -> int:
-    """Quét AlertNotification status="pending" bị "kẹt" (worker chết giữa lúc commit trạng
-    thái Alert và lúc gửi thật — xem transactional-outbox-lite ở _fire_alert/_resolve_alert) và
-    gửi lại. `grace_secs` tránh đua với 1 lần gửi ĐANG chạy hợp lệ (pending vừa tạo <90s trước
-    gần như chắc chắn có 1 tiến trình khác đang xử lý, không phải bị bỏ rơi). Trả về số row đã
-    retry. Gọi từ task Celery định kỳ (apps/alerts/tasks.py) — KHÔNG lock Device vì đây là xử
-    lý bù, không cạnh tranh trực tiếp với fire/resolve của cùng device tại đúng thời điểm này.
+def retry_pending_alert_notifications(grace_secs: int = 90, stale_processing_secs: int = 300) -> int:
+    """Quét + claim nguyên tử rồi gửi lại AlertNotification bị "kẹt" — 2 nhóm:
+    (1) status="pending" cũ hơn `grace_secs` — worker chết giữa lúc commit trạng thái Alert và
+        lúc kịp claim/gửi (transactional-outbox-lite, xem _fire_alert/_resolve_alert/
+        _dispatch_notifications).
+    (2) status="processing" cũ hơn `stale_processing_secs` — ĐÃ có 1 tiến trình claim (kể cả
+        chính hàm này ở lần gọi trước) nhưng chết giữa chừng, không kịp chuyển sent/failed →
+        "thu hồi" row bị bỏ rơi. `stale_processing_secs` (300s, dài hơn hẳn `grace_secs`) vì
+        1 tiến trình ĐANG THẬT SỰ gửi (không chết) có thể hợp lệ mất vài chục giây (email
+        không timeout — xem comment ở _dispatch_notifications) nên không được vội thu hồi.
+
+    ⚠️ Claim bằng UPDATE có điều kiện, re-check `stale_cutoff` NGAY TRONG WHERE của chính câu
+    UPDATE claim (không chỉ ở bước chọn candidate_ids) — đây là phần mấu chốt chặn "2 retry task
+    chạy chồng nhau (task trước kéo dài quá chu kỳ beat 120s, nhiều beat, gọi tay...) cùng gửi
+    trùng 1 row" mà review chỉ ra: candidate_ids có thể chứa cùng 1 pk ở cả 2 lần gọi, nhưng
+    UPDATE claim dùng `stale_cutoff` CỐ ĐỊNH (tính 1 lần trước vòng lặp) — lệnh UPDATE nào tới
+    DB trước sẽ set `updated_at=NOW()` (rất mới) và COMMIT; lệnh UPDATE tới sau (dù đã bị
+    Postgres tự khoá row chờ lệnh trước commit) re-evaluate WHERE trên dữ liệu MỚI COMMIT đó —
+    `updated_at` giờ không còn `< stale_cutoff` nữa (stale_cutoff là mốc cũ, "vừa claim xong"
+    luôn mới hơn) → khớp 0 dòng → tự bỏ qua, không gửi trùng. Trả về số row đã claim + xử lý
+    (gửi hoặc đánh failed). Gọi từ task Celery định kỳ (apps/alerts/tasks.py) — KHÔNG lock
+    Device vì đây là xử lý bù trên chính bảng AlertNotification, không cạnh tranh trực tiếp với
+    fire/resolve của cùng device tại đúng thời điểm này.
     """
-    cutoff = timezone.now() - timedelta(seconds=grace_secs)
-    stuck = list(
-        AlertNotification.objects.select_related("alert")
-        .filter(status="pending", sent_at__lt=cutoff)
+    now_ = timezone.now()
+    pending_cutoff = now_ - timedelta(seconds=grace_secs)
+    stale_cutoff = now_ - timedelta(seconds=stale_processing_secs)
+
+    candidate_ids = list(
+        AlertNotification.objects.filter(
+            Q(status="pending", sent_at__lt=pending_cutoff)
+            | Q(status="processing", updated_at__lt=stale_cutoff)
+        ).values_list("pk", flat=True)
     )
-    for n in stuck:
+
+    processed = 0
+    for pk in candidate_ids:
+        claimed = AlertNotification.objects.filter(
+            Q(pk=pk) & (
+                Q(status="pending")
+                | Q(status="processing", updated_at__lt=stale_cutoff)
+            )
+        ).update(status="processing", updated_at=timezone.now())
+        if not claimed:
+            continue  # bị 1 tiến trình khác claim mất giữa lúc chọn candidate và lúc tới lượt
+        n = AlertNotification.objects.select_related("alert").get(pk=pk)
         try:
             _send_channel_message(n.kind, n.channel, n.alert)
             n.status = "sent"
-            n.save(update_fields=["status"])
+            n.save(update_fields=["status", "updated_at"])
         except Exception as exc:
             n.status = "failed"
             n.error = str(exc)
-            n.save(update_fields=["status", "error"])
+            n.save(update_fields=["status", "error", "updated_at"])
             logger.error("Retry %s notification failed [%s]: %s", n.kind, n.channel, exc)
-    if stuck:
-        logger.warning("Retried %d pending alert notification(s) bị kẹt", len(stuck))
-    return len(stuck)
+        processed += 1
+    if processed:
+        logger.warning("Retried %d pending/stuck alert notification(s)", processed)
+    return processed

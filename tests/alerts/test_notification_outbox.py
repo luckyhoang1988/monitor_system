@@ -169,3 +169,73 @@ class TestRetryPendingAlertNotifications:
         # Không còn "pending" — sweep lần sau sẽ không nhặt lại nữa (tránh retry vô hạn cho
         # channel lỗi cấu hình vĩnh viễn).
         assert not AlertNotification.objects.filter(status="pending").exists()
+
+    def test_double_claim_second_caller_skips(self, device):
+        """Regression đúng phát hiện review — 'claim bằng UPDATE có điều kiện': gọi UPDATE
+        pending→processing 2 LẦN liên tiếp trên CÙNG 1 row (mô phỏng 2 lệnh gọi
+        retry_pending_alert_notifications chạy chồng nhau) — chỉ lần đầu thành công (trả 1),
+        lần 2 phải trả 0 (không claim được) → đây chính là cơ chế chặn gửi trùng, không phụ
+        thuộc vào việc test có dựng được 2 thread thật hay không."""
+        rule = make_rule(channels=["email"])
+        alert = Alert.objects.create(
+            device=device, rule=rule, severity="WARNING", message="High CPU",
+            metric_value=95.0, is_active=False, resolved_at=now(),
+        )
+        n = AlertNotification.objects.create(
+            alert=alert, channel="email", kind="recovery", status="pending",
+        )
+
+        claimed_first = AlertNotification.objects.filter(pk=n.pk, status="pending").update(
+            status="processing"
+        )
+        claimed_second = AlertNotification.objects.filter(pk=n.pk, status="pending").update(
+            status="processing"
+        )
+
+        assert claimed_first == 1
+        assert claimed_second == 0
+
+    def test_fresh_processing_row_not_touched(self, mocker, device):
+        """Row đang 'processing' (1 tiến trình khác/chính lệnh gọi gốc đang gửi thật, chưa xong)
+        và updated_at còn mới (<stale_processing_secs) — sweep KHÔNG được đụng vào, tránh gửi
+        trùng với tiến trình đang chạy hợp lệ."""
+        mock_recovery = mocker.patch("apps.alerts.channels.email_channel.send_email_recovery")
+        rule = make_rule(channels=["email"])
+        alert = Alert.objects.create(
+            device=device, rule=rule, severity="WARNING", message="High CPU",
+            metric_value=95.0, is_active=False, resolved_at=now(),
+        )
+        n = AlertNotification.objects.create(
+            alert=alert, channel="email", kind="recovery", status="processing",
+        )
+
+        retried = retry_pending_alert_notifications(grace_secs=90, stale_processing_secs=300)
+
+        assert retried == 0
+        mock_recovery.assert_not_called()
+        n.refresh_from_db()
+        assert n.status == "processing"
+
+    def test_stale_processing_row_gets_reclaimed(self, mocker, device):
+        """Row 'processing' bị bỏ rơi (tiến trình claim đã chết giữa chừng, không kịp chuyển
+        sent/failed) — sweep phải thu hồi và gửi lại sau khi vượt stale_processing_secs, đúng
+        yêu cầu review 'cần cơ chế thu hồi row processing bị kẹt khi worker chết'."""
+        mock_recovery = mocker.patch("apps.alerts.channels.email_channel.send_email_recovery")
+        rule = make_rule(channels=["email"])
+        alert = Alert.objects.create(
+            device=device, rule=rule, severity="WARNING", message="High CPU",
+            metric_value=95.0, is_active=False, resolved_at=now(),
+        )
+        n = AlertNotification.objects.create(
+            alert=alert, channel="email", kind="recovery", status="processing",
+        )
+        AlertNotification.objects.filter(pk=n.pk).update(
+            updated_at=dj_tz.now() - timedelta(seconds=400)
+        )
+
+        retried = retry_pending_alert_notifications(grace_secs=90, stale_processing_secs=300)
+
+        assert retried == 1
+        mock_recovery.assert_called_once()
+        n.refresh_from_db()
+        assert n.status == "sent"

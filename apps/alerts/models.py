@@ -168,9 +168,25 @@ class AlertNotification(models.Model):
     # ra loại thông báo cần gửi từ is_active tại thời điểm retry — phải lưu tường minh lúc tạo.
     kind     = models.CharField(max_length=10, choices=KIND_CHOICES, default="fire")
     sent_at  = models.DateTimeField(auto_now_add=True)
-    status   = models.CharField(max_length=20)   # pending | sent | failed
-    error    = models.TextField(blank=True)
+    # status: pending (đã ghi ý định, chưa gửi) | processing (đang có 1 tiến trình claim để
+    # gửi — xem apps/alerts/engine.py retry_pending_alert_notifications/_dispatch_notifications)
+    # | sent | failed.
+    status    = models.CharField(max_length=20)
+    error     = models.TextField(blank=True)
+    # Cập nhật MỖI LẦN đổi status (auto_now — KHÁC sent_at auto_now_add chỉ set lúc tạo).
+    # Dùng để: (1) claim nguyên tử pending/processing→processing có điều kiện
+    # (.filter(status=...).update(status="processing", updated_at=now())), (2) phát hiện row
+    # "processing" bị bỏ rơi (worker chết giữa chừng, không kịp chuyển sent/failed) — quá lâu
+    # không đổi status coi như kẹt, cho retry lại.
+    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         verbose_name = "Alert Notification"
         ordering = ["-sent_at"]
+        indexes = [
+            # Query định kỳ (mỗi 120s, retry_pending_alert_notifications) lọc theo status +
+            # mốc thời gian — không có index này là full-table scan lặp lại khi lịch sử
+            # notification lớn dần theo thời gian.
+            models.Index(fields=["status", "sent_at"]),
+            models.Index(fields=["status", "updated_at"]),
+        ]
