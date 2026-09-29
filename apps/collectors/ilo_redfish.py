@@ -106,6 +106,7 @@ cấu trúc iLO4 (`_parse_system_summary_ilo4`):
 from __future__ import annotations
 
 import logging
+import re
 from typing import TYPE_CHECKING, Any
 
 import requests
@@ -120,6 +121,17 @@ logger = logging.getLogger(__name__)
 _HEALTH_CODE = {"OK": 0, "WARNING": 1, "DEGRADED": 1, "CRITICAL": 2, "FAILED": 2}
 
 _REDFISH_ROOT = "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/"
+
+# Path chính xác của document đang đọc PowerSupplies/Redundancy (khớp URL fetch thật trong
+# _collect_power: "/redfish/v1/Chassis/1/Power/", literal "1" — hardcode giống nơi fetch, không
+# suy đoán multi-chassis chưa verify). Tham chiếu RedundancySet HỢP LỆ phải trỏ vào ĐÚNG document
+# này trước dấu "#" — xem bug 2026-09-29 vòng 5, docstring _compute_power_redundancy.
+_POWER_RESOURCE_PATH = "/redfish/v1/Chassis/1/Power"
+
+# JSON Pointer fragment (RFC 6901) đúng định dạng đã verify thật cho tham chiếu PowerSupplies
+# trong Redundancy[].RedundancySet — bắt buộc TOÀN BỘ fragment phải là "/PowerSupplies/<N>",
+# không chỉ lấy số cuối cùng (xem bug 2026-09-29 vòng 4, docstring _compute_power_redundancy).
+_PSU_REF_RE = re.compile(r"^/PowerSupplies/(\d+)$")
 
 
 class IloRedfishClient:
@@ -273,13 +285,27 @@ class IloRedfishClient:
         return {"fans": body.get("Fans") or [], "temperatures": body.get("Temperatures") or []}
 
     def _collect_power(self, session: requests.Session, base: str) -> dict[str, Any] | None:
-        """PowerSupplies[]/Redundancy[] — 1 document phẳng `Chassis/1/Power/`."""
+        """PowerSupplies[]/Redundancy[] — 1 document phẳng `Chassis/1/Power/`.
+
+        ⚠️ Bug đã fix 2026-09-29 (review ngoài): `body.get("PowerSupplies") or []` từng coi JSON
+        thiếu/sai kiểu `PowerSupplies` là "0 PSU" hợp lệ — nếu `Redundancy` vẫn có
+        `MinNumNeeded>0`, `_compute_power_redundancy` tính `ok_count=0 < needed` ra `False` ->
+        báo "mất redundancy" GIẢ dù thực ra chỉ thiếu dữ liệu PSU (không phải PSU thật sự down).
+        Fix: `PowerSupplies` phải là list hợp lệ mới coi nhóm Power này đã fetch đủ; thiếu/sai
+        kiểu -> cả nhóm trả `None` (all-or-nothing, giống 2 nhóm mở rộng khác)."""
         device = self.device
         status, body = self._get(session, base, "/redfish/v1/Chassis/1/Power/")
         if status != 200 or not isinstance(body, dict):
             logger.warning("iLO %s: không lấy được Chassis/1/Power/ (HTTP %s)", device.name, status)
             return None
-        return {"power_supplies": body.get("PowerSupplies") or [], "redundancy": body.get("Redundancy") or []}
+        psu_list = body.get("PowerSupplies")
+        if not isinstance(psu_list, list):
+            logger.warning(
+                "iLO %s: Power/ JSON thiếu PowerSupplies hoặc sai kiểu — không đủ dữ liệu để tính "
+                "Power Supply/Redundancy, bỏ qua thay vì suy đoán rỗng (0 PSU)", device.name,
+            )
+            return None
+        return {"power_supplies": psu_list, "redundancy": body.get("Redundancy") or []}
 
     @staticmethod
     def _members(payload: dict | None) -> list[dict] | None:
@@ -551,11 +577,17 @@ class IloRedfishClient:
         # (bug phát hiện qua review 2026-09-29, vòng 2 mở rộng sang detail-fetch của từng LD/
         # enclosure member — vòng 1 chỉ mới che lỗi ở tầng list).
         # 7 field mở rộng ngoài RAID (Battery/AMS/Processor/Memory/Fan/Temperature/PowerSupply +
-        # Power Redundancy) — bọc try/except RIÊNG, tách khỏi phần tính RAID ở trên: 1 bug ở logic
-        # mới (vd parse index redundancy lỗi) không được phép làm mất 4 field RAID đã tính đúng
-        # trong cùng data dict này (xem docstring module "Mở rộng ngoài RAID").
+        # Power Redundancy) — MỖI NHÓM (System Summary/Thermal/Power) có try/except RIÊNG, tách
+        # khỏi phần tính RAID ở trên VÀ tách khỏi NHAU: 1 bug ở logic 1 nhóm (vd parse index
+        # redundancy lỗi trong nhóm Power) không được phép làm mất field RAID ở trên LẪN field
+        # của 2 nhóm còn lại (Battery/Processor/... ở System Summary, Fan/Temperature ở Thermal).
+        # ⚠️ Bug đã fix 2026-09-29 (review ngoài, vòng 6): trước đây CẢ 3 nhóm dùng CHUNG 1 khối
+        # try/except — exception ở nhóm Power (vd RedundancySet chứa phần tử null) xoá SẠCH luôn
+        # kết quả Battery/Processor/Network dù 2 nhóm kia đã tính đúng TRƯỚC khi Power crash (biến
+        # local đã gán giá trị Critical thật rồi bị except ghi đè về None) — cảnh báo phần cứng mở
+        # rộng bị bỏ sót dù không liên quan gì tới lỗi Power. Xem docstring module "Mở rộng ngoài
+        # RAID" + docstring _compute_power_redundancy.
         battery_code = processor_code = memory_code = None
-        fan_code = temperature_code = psu_code = power_redundancy_ok = None
         bios_hardware_code = network_code = fan_redundancy_ok = None
         ams_device_discovery = ""
         try:
@@ -577,7 +609,18 @@ class IloRedfishClient:
                 bios_hardware_code = self._health_code(system_summary.get("bios_hardware_health"), device_name, "bios/hardware health")
                 network_code = self._health_code(system_summary.get("network_health"), device_name, "network health")
                 fan_redundancy_ok = self._parse_redundancy_status(system_summary.get("fan_redundancy_raw"), device_name, "fan redundancy")
+        except Exception:
+            logger.exception(
+                "iLO %s: lỗi tính hardware-health nhóm System Summary (Battery/AMS/Processor/"
+                "Memory/BIOS-Hardware/Network/FanRedundancy) — không ảnh hưởng nhóm Thermal/Power "
+                "hay RAID", device_name,
+            )
+            battery_code = processor_code = memory_code = None
+            bios_hardware_code = network_code = fan_redundancy_ok = None
+            ams_device_discovery = ""
 
+        fan_code = temperature_code = None
+        try:
             thermal = raw.get("thermal")
             if thermal:
                 fan_codes = [
@@ -594,10 +637,33 @@ class IloRedfishClient:
                     ) if c is not None
                 ]
                 temperature_code = max(temp_codes) if temp_codes else None
+        except Exception:
+            logger.exception(
+                "iLO %s: lỗi tính hardware-health nhóm Thermal (Fan/Temperature) — không ảnh "
+                "hưởng nhóm System Summary/Power hay RAID", device_name,
+            )
+            fan_code = temperature_code = None
 
-            power = raw.get("power")
+        # PSU health (đọc trực tiếp Status.Health từng PSU) và Power Redundancy (parse tham chiếu
+        # RedundancySet, xem _compute_power_redundancy) là 2 PHÉP TÍNH ĐỘC LẬP dùng chung 1 nguồn
+        # `power` — try/except RIÊNG cho từng cái: lỗi ở 1 bên (vd @odata.id sai kiểu làm
+        # _compute_power_redundancy crash) không được phép xoá bên kia đã tính đúng. Bug đã fix
+        # 2026-09-29 (review ngoài, vòng 7): trước đây CẢ 2 dùng CHUNG 1 try/except như 3 nhóm mở
+        # rộng khác từng dùng chung ở vòng 6 — cùng họ bug, lần này ở TRONG nội bộ 1 nhóm thay vì
+        # giữa 3 nhóm. Tái hiện đúng theo báo cáo: PSU Health=Critical (tính đúng, không lỗi) +
+        # 1 @odata.id sai kiểu (int 123, không phải chuỗi) khiến `_compute_power_redundancy` crash
+        # AttributeError ('int' object has no attribute 'partition') -> except (khi còn gộp chung)
+        # xoá SẠCH cả psu_code (đã tính đúng=Critical TRƯỚC khi crash) lẫn power_redundancy_ok ->
+        # cảnh báo "PSU Critical" bị bỏ sót dù không liên quan gì tới lỗi parse redundancy. Fix 2
+        # lớp: (1) type-check `isinstance(odata_id, str)` trong _compute_power_redundancy (chặn
+        # crash từ gốc, xem docstring hàm đó); (2) tách try/except này làm lớp phòng thủ thứ 2 cho
+        # bất kỳ lỗi tương tự chưa lường trước ở 1 trong 2 phép tính.
+        power = raw.get("power")
+        psu_list = power.get("power_supplies", []) if power else []
+
+        psu_code = None
+        try:
             if power:
-                psu_list = power.get("power_supplies", [])
                 psu_codes = [
                     c for c in (
                         self._health_code((p.get("Status") or {}).get("Health"), device_name, "power supply")
@@ -605,16 +671,23 @@ class IloRedfishClient:
                     ) if c is not None
                 ]
                 psu_code = max(psu_codes) if psu_codes else None
-                power_redundancy_ok = self._compute_power_redundancy(psu_list, power.get("redundancy", []))
         except Exception:
             logger.exception(
-                "iLO %s: lỗi tính hardware-health mở rộng (Battery/AMS/Processor/Memory/Fan/"
-                "Temperature/PowerSupply) — không ảnh hưởng 4 field RAID ở trên", device_name,
+                "iLO %s: lỗi tính hardware-health PowerSupply — không ảnh hưởng Power Redundancy "
+                "hay nhóm System Summary/Thermal/RAID", device_name,
             )
-            battery_code = processor_code = memory_code = None
-            fan_code = temperature_code = psu_code = power_redundancy_ok = None
-            bios_hardware_code = network_code = fan_redundancy_ok = None
-            ams_device_discovery = ""
+            psu_code = None
+
+        power_redundancy_ok = None
+        try:
+            if power:
+                power_redundancy_ok = self._compute_power_redundancy(psu_list, power.get("redundancy", []), device_name)
+        except Exception:
+            logger.exception(
+                "iLO %s: lỗi tính hardware-health Power Redundancy — không ảnh hưởng PowerSupply "
+                "health hay nhóm System Summary/Thermal/RAID", device_name,
+            )
+            power_redundancy_ok = None
 
         return {
             "controller_health_code": max(controller_codes) if controller_codes else None,
@@ -662,30 +735,178 @@ class IloRedfishClient:
         return mismatch
 
     @staticmethod
-    def _compute_power_redundancy(psu_list: list[dict], redundancy_groups: list[dict]) -> bool | None:
+    def _compute_power_redundancy(
+        psu_list: list[dict], redundancy_groups: list[dict], device_name: str = "",
+    ) -> bool | None:
         """True nếu MỌI redundancy group đủ PSU "OK" >= MinNumNeeded; None nếu 0 group (không áp
         dụng, vd host 1 PSU). `RedundancySet[]["@odata.id"]` dạng ".../Power#/PowerSupplies/<N>"
         là JSON Pointer fragment (RFC 6901) — `<N>` là index mảng `PowerSupplies` theo đặc tả,
         verify khớp thật 2026-09-29 (Hyprver03: index 0=Bay1 Critical/Offline thật, 1=Bay2 OK,
         đúng thứ tự mảng). KHÔNG dùng `Redundancy[].Status` — schema `PowerMetrics.0.11.0` (iLO4
         cũ) không có field Status ở tầng group này (verify: JSON đầy đủ không có key "Status"
-        trong Redundancy[0])."""
+        trong Redundancy[0]).
+
+        ⚠️ Bug đã fix 2026-09-29 (review ngoài): `group.get("MinNumNeeded") or 0` từng mặc định
+        field THIẾU/`None` thành `0` — 0 PSU "OK" vẫn "đủ" so với ngưỡng giả `0` nên trả `True`
+        dù PSU đang Critical thật (tái hiện được: group không có `MinNumNeeded`, PSU Critical ->
+        code cũ trả `True`). `MinNumNeeded` là field bắt buộc theo schema `Redundancy[]` đã verify
+        — thiếu nó là dữ liệu bất thường/không đủ để kết luận, phải trả `None` (chưa xác định),
+        KHÔNG suy đoán `0` (dễ hiểu nhầm PSU lỗi vẫn "đủ redundancy").
+
+        ⚠️ Bug đã fix 2026-09-29 (review ngoài, cùng họ bug): `group.get("RedundancySet", [])`
+        từng mặc định field THIẾU/sai kiểu thành `[]` — tái hiện đúng theo báo cáo: 2 PSU đều
+        `OK`, group có `MinNumNeeded=2` nhưng thiếu hẳn `RedundancySet` -> `ok_count=0 < 2` ra
+        `False` (báo GIẢ "mất redundancy" dù PSU thật đều khoẻ). Field thiếu/sai kiểu -> `None`
+        (không đủ dữ liệu để đếm PSU OK); `RedundancySet: []` HIỆN DIỆN (rỗng thật, group tham
+        chiếu đúng 0 PSU) vẫn giữ hành vi cũ (tính `ok_count=0` bình thường) — 2 case khác nhau,
+        không gộp chung.
+
+        ⚠️ Bug đã fix 2026-09-29 (review ngoài, vòng 3 — cùng họ bug, lần này ở TỪNG PHẦN TỬ bên
+        trong `RedundancySet` thay vì cả field): 1 tham chiếu `@odata.id` sai định dạng (không
+        parse được thành index, vd thiếu số/URI rỗng) hoặc trỏ tới index ngoài phạm vi
+        `PowerSupplies` từng bị `continue`/bỏ qua ÂM THẦM — `ok_count` chỉ cộng dồn từ các tham
+        chiếu ĐỌC ĐƯỢC, rồi đem so `ok_count < needed` như thể đã đếm đủ. Tái hiện đúng theo báo
+        cáo: 2 PSU đều `OK`, `MinNumNeeded=2`, nhưng 1 trong 2 tham chiếu `RedundancySet` sai định
+        dạng -> chỉ đếm được 1 PSU OK -> `1 < 2` ra `False` (báo GIẢ "mất redundancy" dù cả 2 PSU
+        thật đều khoẻ, chỉ là 1 tham chiếu không đọc được). Field `RedundancySet` mảng vẫn hợp lệ
+        (đã qua check `isinstance(..., list)` ở trên) nhưng 1 PHẦN TỬ bên trong nó không đọc được
+        vẫn là dữ liệu không đủ tin cậy để kết luận — trả `None` ngay khi gặp tham chiếu không
+        resolve được, không tiếp tục đếm thiếu rồi so sánh.
+
+        ⚠️ Bug đã fix 2026-09-29 (review ngoài, vòng 4 — 2 lỗi trong CHÍNH cách đọc `@odata.id` của
+        vòng 3): (1) `int(uri.rstrip("/").rsplit("/", 1)[-1])` chỉ lấy SỐ CUỐI CÙNG của URI, không
+        xác nhận toàn bộ path thực sự trỏ vào `PowerSupplies` — 1 tham chiếu dạng
+        `".../Power#/Other/0"` (trỏ vào mảng KHÁC, không phải PowerSupplies) vẫn parse ra `idx=0`
+        và bị tính nhầm thành PSU 0. Fix: dùng `_PSU_REF_RE` khớp TOÀN BỘ fragment sau `#` phải
+        đúng dạng `/PowerSupplies/<N>` — sai path (trỏ mảng khác) hoặc thiếu `#` đều trả `None`
+        (không đủ tin cậy), không chỉ khớp mỗi con số cuối. (2) KHÔNG có gì chặn 1 index bị tham
+        chiếu TRÙNG LẶP nhiều lần trong cùng `RedundancySet` — `ok_count` cộng dồn theo SỐ THAM
+        CHIẾU, không theo SỐ PSU PHÂN BIỆT, nên PSU 0 `OK` được tham chiếu 2 lần cộng ra
+        `ok_count=2`, đạt `MinNumNeeded=2` dù PSU 1 thật đang `Critical` (chỉ có 1 PSU khoẻ thật,
+        không phải 2). Fix: dùng `set()` theo dõi index ĐÃ đếm — tham chiếu trùng tới cùng 1 index
+        chỉ tính 1 lần, không cộng dồn thêm.
+
+        ⚠️ Bug đã fix 2026-09-29 (review ngoài, vòng 5 — `_PSU_REF_RE` của vòng 4 chỉ khớp PHẦN
+        SAU dấu `#`, chưa xác thực phần TRƯỚC dấu `#` có đúng là document `Chassis/1/Power` đang
+        đọc hay không): tham chiếu `"/redfish/v1/Chassis/2/Power#/PowerSupplies/0"` (trỏ sang
+        Chassis KHÁC — 2, không phải 1) vẫn khớp `_PSU_REF_RE` vì regex chỉ nhìn fragment
+        `/PowerSupplies/0`, nên bị tính nhầm thành PSU 0 của `psu_list` (thuộc Chassis 1) — 1
+        dạng "phản hồi không nhất quán" của iLO (chưa quan sát thật, chỉ là rủi ro suy ra từ code
+        chưa được chặn). Fix: xác thực CẢ URI — tách `uri.partition("#")`, phần trước `#` (sau khi
+        bỏ dấu `/` cuối nếu có) phải khớp CHÍNH XÁC `_POWER_RESOURCE_PATH`
+        (`"/redfish/v1/Chassis/1/Power"`, đúng URL literal mà `_collect_power` đã fetch — không
+        suy đoán multi-chassis chưa verify) rồi mới khớp fragment bằng `_PSU_REF_RE`; sai document
+        gốc (trỏ Chassis khác/resource khác) đều trả `None`.
+
+        ⚠️ Bug đã fix 2026-09-29 (review ngoài, vòng 6 — 2 vấn đề: kiểu phần tử KHÔNG được kiểm
+        tra + phạm vi try/except ở `normalize()` quá rộng): (1) 1 phần tử `RedundancySet` không
+        phải object (vd `RedundancySet: [null]`) khiến `ref.get("@odata.id")` crash
+        `AttributeError: 'NoneType' object has no attribute 'get'` — hàm này KHÔNG tự bắt lỗi, để
+        crash lan lên `normalize()`. Fix: thêm `isinstance(ref, dict)` ngay đầu vòng lặp, phần tử
+        sai kiểu trả `None` (không đủ tin cậy) giống các nhánh không-resolve-được khác, không dựa
+        vào exception. (2) Hệ quả của (1) khi CHƯA có check này: `normalize()`
+        (`apps/collectors/ilo_redfish.py`) từng bọc CẢ 3 nhóm mở rộng (System Summary/Thermal/
+        Power) trong 1 khối `try/except` DUY NHẤT — exception ở nhóm Power (crash tại đây) xoá
+        SẠCH cả kết quả Battery/Processor/Memory/BIOS/Network/Fan/Temperature dù các nhóm đó đã
+        tính đúng TRƯỚC khi Power crash (Python chạy tuần tự trong cùng try, các biến local đã gán
+        đúng giá trị Critical thật rồi bị except ghi đè về `None`). Tái hiện đúng theo báo cáo:
+        `RedundancySet: [null]` → lỗi đọc tham chiếu Power → except xoá luôn Battery/Processor/
+        Network đang Critical → cảnh báo phần cứng mở rộng bị BỎ SÓT dù RAID (tính TRƯỚC khối
+        try/except này, không nằm trong nó) vẫn được giữ đúng. Fix: tách 1 khối try/except DUY
+        NHẤT thành 3 khối ĐỘC LẬP (System Summary / Thermal / Power) — lỗi ở 1 nhóm chỉ reset field
+        của CHÍNH nhóm đó, không đụng 2 nhóm còn lại. Kết hợp cả 2 fix: crash ở (2) giờ không còn
+        xảy ra nhờ (1) (đã chặn từ gốc), nhưng vẫn giữ cô lập try/except làm lớp phòng thủ thứ 2
+        cho bất kỳ lỗi tương tự chưa lường trước ở bất kỳ nhóm nào trong 3 nhóm này.
+
+        ⚠️ Bug đã fix 2026-09-29 (review ngoài, vòng 7 — cùng họ bug với vòng 6 nhưng ở TRONG nội
+        bộ nhóm Power, giữa PSU health và Power Redundancy, chứ không phải giữa 3 nhóm): (1)
+        `uri = ref.get("@odata.id") or ""` không kiểm tra KIỂU của `@odata.id` trước khi gọi
+        `.partition()` — nếu field này tồn tại nhưng KHÔNG PHẢI chuỗi (vd số nguyên `123`, do
+        `x or ""` chỉ thay thế khi `x` falsy, số khác 0 vẫn giữ nguyên kiểu int), `uri.partition("#")`
+        crash `AttributeError: 'int' object has no attribute 'partition'`. Fix: thêm
+        `isinstance(odata_id, str)` ngay sau khi đọc field, sai kiểu trả `None` giống các nhánh
+        không-resolve-được khác. (2) Hệ quả: trước đây `normalize()` tính `psu_code` (PSU health,
+        đọc thẳng `Status.Health` từng PSU — KHÔNG phụ thuộc gì vào việc parse `RedundancySet`) và
+        `power_redundancy_ok` (gọi hàm này) trong CÙNG 1 try/except của riêng nhóm Power — crash ở
+        (1) xoá SẠCH cả `psu_code` dù đã tính đúng (vd Critical) TRƯỚC khi crash xảy ra ở bước tính
+        redundancy ngay sau đó. Tái hiện đúng theo báo cáo: PSU Health=Critical (đúng, không lỗi
+        gì) + 1 `@odata.id` sai kiểu (int `123`) trong `RedundancySet` -> except (khi 2 phép tính
+        còn gộp chung) xoá cả `power_supply_worst_code` lẫn `power_redundancy_ok` về `None` ->
+        cảnh báo PSU Critical bị bỏ sót dù PSU health tự nó tính đúng, không liên quan gì tới lỗi
+        parse redundancy. Fix: tách try/except của nhóm Power (vốn đã tách khỏi 2 nhóm kia ở vòng
+        6) thành 2 khối ĐỘC LẬP hơn nữa — 1 cho PSU health, 1 cho Power Redundancy — lỗi ở phép
+        tính này không đụng phép tính kia. Xem `normalize()`."""
         if not redundancy_groups:
             return None
         for group in redundancy_groups:
-            needed = group.get("MinNumNeeded") or 0
-            ok_count = 0
-            for ref in group.get("RedundancySet", []):
-                uri = ref.get("@odata.id") or ""
-                try:
-                    idx = int(uri.rstrip("/").rsplit("/", 1)[-1])
-                except ValueError:
+            needed = group.get("MinNumNeeded")
+            if needed is None:
+                logger.warning(
+                    "iLO %s: redundancy group thiếu MinNumNeeded — không đủ dữ liệu để kết luận "
+                    "Power Redundancy, coi là chưa xác định (None) thay vì mặc định 0",
+                    device_name,
+                )
+                return None
+            redundancy_set = group.get("RedundancySet")
+            if not isinstance(redundancy_set, list):
+                logger.warning(
+                    "iLO %s: redundancy group thiếu RedundancySet hoặc sai kiểu — không đủ dữ "
+                    "liệu để đếm PSU OK, coi là chưa xác định (None) thay vì mặc định rỗng",
+                    device_name,
+                )
+                return None
+            ok_indexes: set[int] = set()
+            for ref in redundancy_set:
+                if not isinstance(ref, dict):
+                    logger.warning(
+                        "iLO %s: RedundancySet có phần tử không phải object (%r, vd null) — "
+                        "không đủ dữ liệu để đếm PSU OK, coi là chưa xác định (None) thay vì "
+                        "crash/bỏ qua",
+                        device_name, ref,
+                    )
+                    return None
+                odata_id = ref.get("@odata.id")
+                if odata_id is not None and not isinstance(odata_id, str):
+                    logger.warning(
+                        "iLO %s: RedundancySet có @odata.id không phải chuỗi (%r, kiểu %s) — "
+                        "không đủ dữ liệu để đếm PSU OK, coi là chưa xác định (None) thay vì "
+                        "crash/suy đoán",
+                        device_name, odata_id, type(odata_id).__name__,
+                    )
+                    return None
+                uri = odata_id or ""
+                resource_path, sep, fragment = uri.partition("#")
+                if not sep or resource_path.rstrip("/") != _POWER_RESOURCE_PATH:
+                    logger.warning(
+                        "iLO %s: RedundancySet có tham chiếu @odata.id không trỏ vào chính "
+                        "document Chassis/1/Power đang đọc (%r) — không đủ dữ liệu để đếm PSU "
+                        "OK, coi là chưa xác định (None) thay vì suy đoán từ fragment",
+                        device_name, uri,
+                    )
+                    return None
+                match = _PSU_REF_RE.match(fragment)
+                if not match:
+                    logger.warning(
+                        "iLO %s: RedundancySet có tham chiếu @odata.id không trỏ đúng vào "
+                        "PowerSupplies (%r) — không đủ dữ liệu để đếm PSU OK, coi là chưa xác "
+                        "định (None) thay vì suy đoán từ số cuối URI",
+                        device_name, uri,
+                    )
+                    return None
+                idx = int(match.group(1))
+                if not (0 <= idx < len(psu_list)):
+                    logger.warning(
+                        "iLO %s: RedundancySet tham chiếu index %d ngoài phạm vi PowerSupplies "
+                        "(len=%d) — không đủ dữ liệu để đếm PSU OK, coi là chưa xác định (None)",
+                        device_name, idx, len(psu_list),
+                    )
+                    return None
+                if idx in ok_indexes:
                     continue
-                if 0 <= idx < len(psu_list):
-                    health = ((psu_list[idx].get("Status") or {}).get("Health") or "").upper()
-                    if health == "OK":
-                        ok_count += 1
-            if ok_count < needed:
+                health = ((psu_list[idx].get("Status") or {}).get("Health") or "").upper()
+                if health == "OK":
+                    ok_indexes.add(idx)
+            if len(ok_indexes) < needed:
                 return False
         return True
 

@@ -395,9 +395,206 @@ class TestNormalizeExtendedHardwareHealth:
         assert result["power_supply_worst_code"] is None
         assert result["power_redundancy_ok"] is None
 
+    def test_power_redundancy_none_when_min_num_needed_missing(self, ilo_device):
+        """Bug review ngoài 2026-09-29: `MinNumNeeded` thiếu từng bị `or 0` mặc định thành 0 ->
+        0 PSU OK vẫn "đủ" so với ngưỡng giả 0 -> trả True dù PSU đang Critical thật. Group thiếu
+        hẳn field bắt buộc này là dữ liệu bất thường/không đủ để kết luận -> phải None, không
+        suy đoán 0."""
+        raw = _raw_healthy_controller()
+        raw["power"] = {
+            "power_supplies": [
+                {"Status": {"Health": "Critical", "State": "Offline"}},
+                {"Status": {"Health": "OK", "State": "Enabled"}},
+            ],
+            "redundancy": [{
+                # Không có "MinNumNeeded" ở đây (khác test _degraded_matches_real_hyprver03_case
+                # ở trên, có MinNumNeeded=2).
+                "RedundancySet": [
+                    {"@odata.id": "/redfish/v1/Chassis/1/Power#/PowerSupplies/0"},
+                    {"@odata.id": "/redfish/v1/Chassis/1/Power#/PowerSupplies/1"},
+                ],
+            }],
+        }
+        result = IloRedfishClient(ilo_device).normalize(raw)
+
+        assert result["power_redundancy_ok"] is None
+
+    def test_power_redundancy_none_when_min_num_needed_explicit_null(self, ilo_device):
+        raw = _raw_healthy_controller()
+        raw["power"] = {
+            "power_supplies": [{"Status": {"Health": "Critical"}}],
+            "redundancy": [{"MinNumNeeded": None, "RedundancySet": []}],
+        }
+        result = IloRedfishClient(ilo_device).normalize(raw)
+
+        assert result["power_redundancy_ok"] is None
+
+    def test_power_redundancy_none_when_redundancy_set_missing(self, ilo_device):
+        """Bug review ngoài 2026-09-29 (vòng tiếp theo, cùng họ bug với MinNumNeeded ở trên):
+        `group.get("RedundancySet", [])` từng mặc định field THIẾU (không phải rỗng thật) thành
+        [] -> 0 PSU "khớp" ra được dù cả 2 PSU đang OK thật, MinNumNeeded=2 -> `0 < 2` ra False
+        (báo "mất redundancy" GIẢ). Tái hiện đúng theo báo cáo: 2 PSU OK, group có MinNumNeeded=2
+        nhưng thiếu hẳn RedundancySet."""
+        raw = _raw_healthy_controller()
+        raw["power"] = {
+            "power_supplies": [
+                {"Status": {"Health": "OK", "State": "Enabled"}},
+                {"Status": {"Health": "OK", "State": "Enabled"}},
+            ],
+            "redundancy": [{"MinNumNeeded": 2}],  # thiếu hẳn "RedundancySet"
+        }
+        result = IloRedfishClient(ilo_device).normalize(raw)
+
+        assert result["power_redundancy_ok"] is None
+
+    def test_power_redundancy_none_when_redundancy_set_wrong_type(self, ilo_device):
+        raw = _raw_healthy_controller()
+        raw["power"] = {
+            "power_supplies": [{"Status": {"Health": "OK", "State": "Enabled"}}],
+            "redundancy": [{"MinNumNeeded": 1, "RedundancySet": "not-a-list"}],
+        }
+        result = IloRedfishClient(ilo_device).normalize(raw)
+
+        assert result["power_redundancy_ok"] is None
+
+    def test_power_redundancy_still_false_when_redundancy_set_valid_empty_list(self, ilo_device):
+        """Phân biệt "thiếu RedundancySet" (None, 2 test ở trên) khỏi "RedundancySet rỗng THẬT"
+        (dữ liệu hợp lệ, group tham chiếu đúng 0 PSU) — giữ nguyên hành vi cũ: vẫn tính
+        ok_count=0, so với MinNumNeeded vẫn ra False/True bình thường, không đổi thành None."""
+        raw = _raw_healthy_controller()
+        raw["power"] = {
+            "power_supplies": [{"Status": {"Health": "OK", "State": "Enabled"}}],
+            "redundancy": [{"MinNumNeeded": 1, "RedundancySet": []}],
+        }
+        result = IloRedfishClient(ilo_device).normalize(raw)
+
+        assert result["power_redundancy_ok"] is False
+
+    def test_power_redundancy_none_when_redundancy_ref_malformed(self, ilo_device):
+        """Bug review ngoài 2026-09-29 (vòng 3, tại DÒNG 724 cũ — TỪNG PHẦN TỬ bên trong
+        RedundancySet, không phải cả field): 1 tham chiếu @odata.id sai định dạng (không parse
+        được index) bị `continue` bỏ qua âm thầm, ok_count chỉ cộng từ tham chiếu đọc được rồi
+        đem so ngưỡng như đã đếm đủ. Tái hiện đúng theo báo cáo: 2 PSU đều OK, MinNumNeeded=2,
+        nhưng 1 trong 2 tham chiếu sai định dạng -> chỉ đếm được 1 PSU OK -> 1 < 2 ra False
+        (báo GIẢ mất redundancy) dù cả 2 PSU thật đều khoẻ."""
+        raw = _raw_healthy_controller()
+        raw["power"] = {
+            "power_supplies": [
+                {"Status": {"Health": "OK", "State": "Enabled"}},
+                {"Status": {"Health": "OK", "State": "Enabled"}},
+            ],
+            "redundancy": [{
+                "MinNumNeeded": 2,
+                "RedundancySet": [
+                    {"@odata.id": "/redfish/v1/Chassis/1/Power#/PowerSupplies/0"},
+                    {"@odata.id": "not-a-valid-pointer"},  # sai định dạng, không parse được index
+                ],
+            }],
+        }
+        result = IloRedfishClient(ilo_device).normalize(raw)
+
+        assert result["power_redundancy_ok"] is None
+
+    def test_power_redundancy_none_when_redundancy_ref_index_out_of_range(self, ilo_device):
+        """Cùng họ bug với test trên nhưng ở nhánh index NGOÀI PHẠM VI PowerSupplies (thay vì
+        không parse được) — trước đây cũng bị bỏ qua âm thầm (không tăng ok_count nhưng không
+        báo lỗi/trả None), cùng hệ quả đếm thiếu rồi kết luận sai."""
+        raw = _raw_healthy_controller()
+        raw["power"] = {
+            "power_supplies": [
+                {"Status": {"Health": "OK", "State": "Enabled"}},
+                {"Status": {"Health": "OK", "State": "Enabled"}},
+            ],
+            "redundancy": [{
+                "MinNumNeeded": 2,
+                "RedundancySet": [
+                    {"@odata.id": "/redfish/v1/Chassis/1/Power#/PowerSupplies/0"},
+                    {"@odata.id": "/redfish/v1/Chassis/1/Power#/PowerSupplies/5"},  # index 5 ngoài phạm vi (chỉ có 2 PSU)
+                ],
+            }],
+        }
+        result = IloRedfishClient(ilo_device).normalize(raw)
+
+        assert result["power_redundancy_ok"] is None
+
+    def test_power_redundancy_none_when_ref_points_outside_power_supplies(self, ilo_device):
+        """Bug review ngoài 2026-09-29 (vòng 4): `int(uri...rsplit("/",1)[-1])` chỉ lấy SỐ CUỐI
+        của URI, không xác nhận cả path thực sự trỏ vào PowerSupplies. Tái hiện đúng theo báo cáo:
+        tham chiếu ".../Other/0" (trỏ mảng KHÁC, không phải PowerSupplies) từng bị tính nhầm thành
+        PSU 0 -> nếu PSU 0 đang OK, group đủ redundancy GIẢ dù tham chiếu không hề hợp lệ."""
+        raw = _raw_healthy_controller()
+        raw["power"] = {
+            "power_supplies": [
+                {"Status": {"Health": "OK", "State": "Enabled"}},
+                {"Status": {"Health": "OK", "State": "Enabled"}},
+            ],
+            "redundancy": [{
+                "MinNumNeeded": 2,
+                "RedundancySet": [
+                    {"@odata.id": "/redfish/v1/Chassis/1/Power#/PowerSupplies/0"},
+                    {"@odata.id": "/redfish/v1/Chassis/1/Power#/Other/0"},  # KHÔNG trỏ vào PowerSupplies
+                ],
+            }],
+        }
+        result = IloRedfishClient(ilo_device).normalize(raw)
+
+        assert result["power_redundancy_ok"] is None
+
+    def test_power_redundancy_false_when_same_psu_referenced_twice(self, ilo_device):
+        """Bug review ngoài 2026-09-29 (vòng 4): không có gì chặn 1 index PowerSupplies bị tham
+        chiếu TRÙNG LẶP trong cùng RedundancySet -> ok_count từng cộng dồn theo SỐ THAM CHIẾU thay
+        vì SỐ PSU PHÂN BIỆT. Tái hiện đúng theo báo cáo: PSU 0 OK được tham chiếu 2 lần,
+        MinNumNeeded=2 -> code cũ đếm ok_count=2 "đạt" ngưỡng dù PSU 1 thật đang Critical (chỉ có
+        đúng 1 PSU khoẻ thật, không phải 2)."""
+        raw = _raw_healthy_controller()
+        raw["power"] = {
+            "power_supplies": [
+                {"Status": {"Health": "OK", "State": "Enabled"}},
+                {"Status": {"Health": "Critical", "State": "Offline"}},
+            ],
+            "redundancy": [{
+                "MinNumNeeded": 2,
+                "RedundancySet": [
+                    {"@odata.id": "/redfish/v1/Chassis/1/Power#/PowerSupplies/0"},
+                    {"@odata.id": "/redfish/v1/Chassis/1/Power#/PowerSupplies/0"},  # trùng lặp PSU 0
+                ],
+            }],
+        }
+        result = IloRedfishClient(ilo_device).normalize(raw)
+
+        assert result["power_redundancy_ok"] is False
+
+    def test_power_redundancy_none_when_ref_points_to_different_chassis(self, ilo_device):
+        """Bug review ngoài 2026-09-29 (vòng 5): `_PSU_REF_RE` (vòng 4) chỉ khớp phần SAU dấu #,
+        chưa xác thực phần TRƯỚC dấu # có đúng là document Chassis/1/Power đang đọc hay không.
+        Tái hiện đúng theo báo cáo: tham chiếu "/redfish/v1/Chassis/2/Power#/PowerSupplies/0" (trỏ
+        sang Chassis KHÁC, không phải Chassis 1 đang fetch) vẫn bị tính nhầm là PSU 0 của
+        psu_list (thuộc Chassis 1) -> nếu PSU 0 thật đang OK, group tính đủ redundancy GIẢ dù
+        tham chiếu đó không hề trỏ vào document đang đọc."""
+        raw = _raw_healthy_controller()
+        raw["power"] = {
+            "power_supplies": [
+                {"Status": {"Health": "OK", "State": "Enabled"}},
+                {"Status": {"Health": "OK", "State": "Enabled"}},
+            ],
+            "redundancy": [{
+                "MinNumNeeded": 2,
+                "RedundancySet": [
+                    {"@odata.id": "/redfish/v1/Chassis/1/Power#/PowerSupplies/0"},
+                    {"@odata.id": "/redfish/v1/Chassis/2/Power#/PowerSupplies/0"},  # trỏ sang Chassis khác
+                ],
+            }],
+        }
+        result = IloRedfishClient(ilo_device).normalize(raw)
+
+        assert result["power_redundancy_ok"] is None
+
     def test_exception_in_extended_fields_does_not_break_raid_fields(self, ilo_device, mocker):
         """Bug ở logic mới (vd _compute_power_redundancy raise) KHÔNG được làm mất 4 field RAID
-        đã tính đúng trong cùng data dict."""
+        đã tính đúng trong cùng data dict, VÀ (vòng 7, 2026-09-29) không được làm mất
+        power_supply_worst_code — PSU health tính ĐỘC LẬP với Power Redundancy (try/except riêng
+        từ vòng 7), nên lỗi ở _compute_power_redundancy chỉ xoá power_redundancy_ok, KHÔNG xoá
+        power_supply_worst_code đã tính đúng (OK) trước đó."""
         raw = _raw_unhealthy_controller()
         raw["power"] = {
             "power_supplies": [{"Status": {"Health": "OK"}}],
@@ -411,7 +608,81 @@ class TestNormalizeExtendedHardwareHealth:
         assert result["logical_drive_worst_code"] == 1
         assert result["missing_disk_count"] == 2
         assert result["enclosure_mismatch_count"] == 1
-        assert result["power_supply_worst_code"] is None
+        assert result["power_supply_worst_code"] == 0
+        assert result["power_redundancy_ok"] is None
+
+    def test_power_redundancy_none_when_redundancy_set_has_non_dict_element(self, ilo_device):
+        """Bug review ngoài 2026-09-29 (vòng 6, phần 1): 1 phần tử RedundancySet không phải object
+        (vd null trong JSON -> None trong Python) khiến `ref.get("@odata.id")` crash
+        AttributeError. Tái hiện đúng theo báo cáo: RedundancySet: [null]. Fix: isinstance(ref,
+        dict) ngay đầu vòng lặp -> trả None (không đủ tin cậy) thay vì crash."""
+        raw = _raw_healthy_controller()
+        raw["power"] = {
+            "power_supplies": [{"Status": {"Health": "OK", "State": "Enabled"}}],
+            "redundancy": [{"MinNumNeeded": 1, "RedundancySet": [None]}],
+        }
+        result = IloRedfishClient(ilo_device).normalize(raw)
+
+        assert result["power_redundancy_ok"] is None
+
+    def test_power_group_exception_does_not_wipe_other_groups(self, ilo_device, mocker):
+        """Bug review ngoài 2026-09-29 (vòng 6, phần 2): trước đây CẢ 3 nhóm mở rộng (System
+        Summary/Thermal/Power) dùng CHUNG 1 khối try/except -> lỗi ở nhóm Power xoá SẠCH luôn kết
+        quả Battery/Processor/Network dù 2 nhóm đó đã tính đúng TRƯỚC khi Power crash (biến local
+        đã gán giá trị Critical thật rồi bị except ghi đè về None). Tái hiện đúng ý báo cáo (dùng
+        mock để đảm bảo có exception thật ở nhóm Power, độc lập với fix isinstance ở test trên):
+        Battery/Processor/Network đang Critical thật phải được GIỮ NGUYÊN, không bị xoá theo Power."""
+        raw = _raw_healthy_controller()
+        raw["system_summary"] = {
+            "battery_conditions": ["Critical"],
+            "ams_device_discovery": "NoAMS",
+            "processor_health": "Critical",
+            "memory_health": "OK",
+            "bios_hardware_health": None,
+            "network_health": "Critical",
+            "fan_redundancy_raw": None,
+        }
+        raw["thermal"] = {
+            "fans": [{"FanName": "Fan 1", "Status": {"Health": "OK", "State": "Enabled"}}],
+            "temperatures": [],
+        }
+        raw["power"] = {
+            "power_supplies": [{"Status": {"Health": "OK", "State": "Enabled"}}],
+            "redundancy": [{"MinNumNeeded": 1, "RedundancySet": []}],
+        }
+        mocker.patch.object(IloRedfishClient, "_compute_power_redundancy", side_effect=RuntimeError("boom"))
+
+        result = IloRedfishClient(ilo_device).normalize(raw)
+
+        # Nhóm Power lỗi -> chỉ field của CHÍNH nó bị None
+        assert result["power_redundancy_ok"] is None
+        # 2 nhóm còn lại KHÔNG bị ảnh hưởng — vẫn giữ đúng dữ liệu Critical thật, không bị xoá
+        # theo lỗi ở nhóm Power (khác biệt cốt lõi so với code cũ dùng chung try/except).
+        assert result["battery_health_code"] == 2
+        assert result["processor_health_code"] == 2
+        assert result["network_health_code"] == 2
+        assert result["fan_worst_code"] == 0
+
+    def test_power_supply_health_preserved_when_redundancy_ref_has_wrong_type(self, ilo_device):
+        """Bug review ngoài 2026-09-29 (vòng 7): trong CHÍNH nhóm Power, PSU health và Power
+        Redundancy từng dùng CHUNG 1 try/except -> 1 @odata.id sai kiểu (int, không phải chuỗi)
+        khiến `uri.partition("#")` crash AttributeError, xoá SẠCH cả power_supply_worst_code (đã
+        tính đúng=Critical TRƯỚC khi crash) lẫn power_redundancy_ok. Tái hiện đúng theo báo cáo:
+        PSU Health=Critical + 1 @odata.id=123 (int) trong RedundancySet -> cảnh báo PSU Critical
+        bị bỏ sót dù PSU health không liên quan gì tới lỗi parse redundancy. Fix 2 lớp: (1)
+        isinstance(odata_id, str) trong _compute_power_redundancy chặn crash từ gốc; (2) tách
+        try/except PSU health khỏi Power Redundancy trong normalize() làm lớp phòng thủ thứ 2."""
+        raw = _raw_healthy_controller()
+        raw["power"] = {
+            "power_supplies": [{"Status": {"Health": "Critical", "State": "Enabled"}}],
+            "redundancy": [{"MinNumNeeded": 1, "RedundancySet": [{"@odata.id": 123}]}],
+        }
+        result = IloRedfishClient(ilo_device).normalize(raw)
+
+        # PSU health tính đúng, KHÔNG bị xoá theo lỗi parse redundancy (khác biệt cốt lõi so với
+        # code cũ dùng chung try/except).
+        assert result["power_supply_worst_code"] == 2
+        # Redundancy không đủ dữ liệu để kết luận (tham chiếu sai kiểu) -> None, không suy đoán.
         assert result["power_redundancy_ok"] is None
 
 
@@ -607,6 +878,57 @@ class TestCollectRawExtendedHardwareHealth:
         assert normalized["fan_worst_code"] is None
         assert normalized["temperature_worst_code"] is None
         assert normalized["power_supply_worst_code"] == 0
+
+
+class TestCollectPowerMalformedPowerSupplies:
+    """Bug review ngoài 2026-09-29: `_collect_power` từng `body.get("PowerSupplies") or []` —
+    JSON thiếu/sai kiểu PowerSupplies bị coi là "0 PSU" hợp lệ. Nếu Redundancy vẫn có
+    MinNumNeeded>0, `_compute_power_redundancy` tính ok_count=0 < needed -> False -> báo "mất
+    redundancy" GIẢ dù thực ra chỉ thiếu dữ liệu PSU (không phải PSU thật sự down). Fix: thiếu/
+    sai kiểu PowerSupplies -> toàn bộ nhóm Power trả None (all-or-nothing, giống 2 nhóm kia)."""
+
+    def _fake_get(self, mocker, power_body):
+        def fake_get(url, timeout=None, headers=None):
+            resp = mocker.MagicMock()
+            resp.status_code = 200
+            resp.json.return_value = power_body
+            return resp
+        return fake_get
+
+    def test_returns_none_when_power_supplies_key_missing(self, ilo_device, mocker):
+        mocker.patch("requests.Session.get", side_effect=self._fake_get(
+            mocker, {"Redundancy": [{"MinNumNeeded": 2, "RedundancySet": []}]},
+        ))
+        result = IloRedfishClient(ilo_device)._collect_power(requests.Session(), "https://10.0.198.254")
+        assert result is None
+
+    def test_returns_none_when_power_supplies_wrong_type(self, ilo_device, mocker):
+        mocker.patch("requests.Session.get", side_effect=self._fake_get(
+            mocker, {"PowerSupplies": {"unexpected": "dict, not a list"}, "Redundancy": []},
+        ))
+        result = IloRedfishClient(ilo_device)._collect_power(requests.Session(), "https://10.0.198.254")
+        assert result is None
+
+    def test_still_returns_data_when_power_supplies_is_valid_empty_list(self, ilo_device, mocker):
+        """[] hợp lệ (đã xác nhận đúng kiểu) khác hẳn "thiếu key" — vẫn giữ nguyên hành vi cũ."""
+        mocker.patch("requests.Session.get", side_effect=self._fake_get(
+            mocker, {"PowerSupplies": [], "Redundancy": []},
+        ))
+        result = IloRedfishClient(ilo_device)._collect_power(requests.Session(), "https://10.0.198.254")
+        assert result == {"power_supplies": [], "redundancy": []}
+
+    def test_end_to_end_missing_power_supplies_does_not_fire_false_redundancy_alert(self, ilo_device):
+        """Kiểm chứng end-to-end qua normalize(): trước fix, raw["power"] có sẵn (không None) với
+        power_supplies rỗng do fetch lỗi + redundancy MinNumNeeded=2 -> power_redundancy_ok=False
+        GIẢ. Sau fix, _collect_power đã tự trả None ở tầng collect_raw() nên raw["power"] never
+        có power_supplies rỗng kèm redundancy thật — mô phỏng trực tiếp ở tầng normalize() bằng
+        raw["power"]=None (đúng những gì _collect_power giờ trả về cho case này)."""
+        raw = _raw_healthy_controller()
+        raw["power"] = None
+        result = IloRedfishClient(ilo_device).normalize(raw)
+
+        assert result["power_redundancy_ok"] is None
+        assert result["power_supply_worst_code"] is None
 
 
 class TestGetRetry:

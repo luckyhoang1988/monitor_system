@@ -5,6 +5,7 @@ Usage:
     python manage.py seed_alert_rules
     python manage.py seed_alert_rules --channels email telegram
     python manage.py seed_alert_rules --overwrite
+    python manage.py seed_alert_rules --metric-prefix ilo_ raid_
 """
 from django.core.management.base import BaseCommand
 from apps.alerts.models import AlertRule
@@ -200,13 +201,30 @@ class Command(BaseCommand):
             "--overwrite", action="store_true",
             help="Ghi đè rules đã tồn tại",
         )
+        parser.add_argument(
+            "--metric-prefix", nargs="+", default=None,
+            help=(
+                "Chỉ seed rule có `metric` bắt đầu bằng 1 trong các prefix này (vd: ilo_ raid_). "
+                "Mặc định (không truyền): seed toàn bộ DEFAULT_RULES. Dùng khi chỉ muốn đảm bảo "
+                "1 nhóm rule cụ thể tồn tại (vd chạy tự động ở entrypoint.sh) mà KHÔNG đụng tới "
+                "các rule khác — kể cả rule đã bị người dùng xoá chủ động qua UI (xem CLAUDE.md "
+                "mục 'Thay đổi quan trọng' 2026-09-29, review ngoài: seed toàn bộ DEFAULT_RULES "
+                "vô điều kiện mỗi lần app khởi động sẽ tạo lại y hệt bất kỳ rule mặc định nào đã "
+                "bị xoá có chủ ý, vì seed chỉ so khớp theo tên, không phân biệt được 'chưa từng "
+                "tạo' với 'đã xoá chủ động')."
+            ),
+        )
 
     def handle(self, *args, **options):
         channels  = options["channels"]
         overwrite = options["overwrite"]
+        prefixes  = options["metric_prefix"]
+        rules = DEFAULT_RULES
+        if prefixes:
+            rules = [r for r in DEFAULT_RULES if r["metric"].startswith(tuple(prefixes))]
         created = updated = skipped = 0
 
-        for rule_data in DEFAULT_RULES:
+        for rule_data in rules:
             rule_data["channels"] = channels
             existing = AlertRule.objects.filter(name=rule_data["name"]).first()
             if existing:

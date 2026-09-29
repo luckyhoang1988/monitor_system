@@ -558,7 +558,245 @@ Storage.Status.Health, Temperatures.Status.Health
   `expire_seconds` cùng giá trị, nếu không entry đó lặp lại đúng bug này.
 
 ### Thay đổi quan trọng
-- **2026-09-29 (cùng ngày, mới nhất — vòng 2, iLO5 + 3 mục bonus)**: Ngay sau khi deploy vòng 1
+- **2026-09-29 (cùng ngày, mới nhất — review ngoài vòng 7: try/except CHUNG ở TRONG nội bộ nhóm
+  Power, giữa PSU health và Power Redundancy — cùng họ bug với vòng 6 nhưng lồng sâu hơn 1 lớp)**:
+  User dán tiếp báo cáo, soi vào chính nhóm Power vừa được tách riêng ở vòng 6 —
+  `apps/collectors/ilo_redfish.py` line 645 (bản trước fix) — verify bằng đọc code + 2 test thất
+  bại đúng dự đoán trên code cũ trước khi sửa (1 test có sẵn từ vòng trước hoá ra đã encode đúng
+  hành vi BUG, phải sửa lại assertion):
+  1. **`uri = ref.get("@odata.id") or ""` không kiểm tra KIỂU trước khi gọi `.partition()`** —
+     nếu `@odata.id` tồn tại nhưng KHÔNG PHẢI chuỗi (vd số nguyên `123`, `or ""` chỉ thay thế khi
+     giá trị falsy, số khác 0 vẫn giữ nguyên) → `uri.partition("#")` crash
+     `AttributeError: 'int' object has no attribute 'partition'`. Fix: thêm
+     `isinstance(odata_id, str)` ngay sau khi đọc field, sai kiểu trả `None` giống các nhánh
+     không-resolve-được khác đã có (đúng pattern `isinstance(ref, dict)` của vòng 6).
+  2. **Hệ quả: `psu_code` (PSU health, đọc thẳng `Status.Health` — KHÔNG phụ thuộc gì vào việc
+     parse `RedundancySet`) và `power_redundancy_ok` (gọi `_compute_power_redundancy`) vẫn dùng
+     CHUNG 1 try/except của riêng nhóm Power** (nhóm này đã được tách khỏi 2 nhóm kia ở vòng 6,
+     nhưng BÊN TRONG nó vẫn gộp chung 2 phép tính độc lập) — crash ở (1) xoá SẠCH cả `psu_code` dù
+     đã tính đúng (Critical) TRƯỚC khi crash. Tái hiện đúng theo báo cáo: PSU Health=Critical +
+     1 `@odata.id`=123 (int) trong `RedundancySet` → cả `power_supply_worst_code` lẫn
+     `power_redundancy_ok` thành `None` → cảnh báo PSU Critical bị bỏ sót. Fix: tách try/except
+     thành 2 khối ĐỘC LẬP — 1 cho PSU health, 1 cho Power Redundancy.
+  1 test mới (`test_power_supply_health_preserved_when_redundancy_ref_has_wrong_type`, tái hiện
+  đúng ca báo cáo) + 1 test CŨ phải sửa lại assertion
+  (`test_exception_in_extended_fields_does_not_break_raid_fields` — assertion cũ
+  `power_supply_worst_code is None` khi mock exception ở `_compute_power_redundancy` hoá ra đang
+  encode đúng HÀNH VI BUG chứ không phải hành vi đúng, vì test này vốn đã đặt PSU Health=OK cùng
+  lúc mock lỗi redundancy — sau fix, 2 phép tính độc lập nên phải đổi thành `== 0`). Tự chứng minh
+  bằng cách tạm revert riêng 2 đoạn sửa của vòng 7 (không dùng `git stash` — sẽ lùi luôn cả 6 vòng
+  trước vì chưa commit gì trong session) → cả 2 test FAIL đúng dự đoán (`assert None == 2`,
+  `assert None == 0`, traceback xác nhận đúng `AttributeError: 'int' object has no attribute
+  'partition'`) → khôi phục lại, pass lại. 65/65 test trong file collector pass, `manage.py check`
+  sạch. Bài học mở rộng: tách try/except ở TẦNG NGOÀI (giữa 3 nhóm, vòng 6) không có nghĩa ĐÃ ĐỦ
+  nếu BÊN TRONG 1 nhóm vẫn còn gộp chung nhiều phép tính độc lập — cùng 1 nguyên tắc ("lỗi ở khối A
+  không được xoá khối B đã tính đúng") phải áp dụng ĐỆ QUY xuống từng tầng lồng nhau, không chỉ 1
+  lần ở tầng cao nhất.
+- **2026-09-29 (cùng ngày, review ngoài vòng 6: try/except CHUNG cho 3 nhóm mở rộng ở
+  `normalize()`, không phải trong `_compute_power_redundancy` như 5 vòng trước)**: User dán tiếp
+  báo cáo, lần này soi vào tầng CAO HƠN — chỗ gọi `_compute_power_redundancy` trong `normalize()`
+  ([apps/collectors/ilo_redfish.py](apps/collectors/ilo_redfish.py)), không phải logic bên trong
+  hàm đó nữa — verify bằng đọc code + 2 test thất bại đúng dự đoán trên code cũ trước khi sửa:
+  1. **`RedundancySet` chứa 1 phần tử KHÔNG PHẢI object (vd `null` → `None` trong Python) khiến
+     `ref.get("@odata.id")` crash `AttributeError`** — hàm `_compute_power_redundancy` không tự
+     bắt lỗi này, để crash lan lên `normalize()`. Fix: thêm `isinstance(ref, dict)` ngay đầu vòng
+     lặp — phần tử sai kiểu trả `None` (không đủ tin cậy) giống các nhánh không-resolve-được khác
+     đã có, không dựa vào exception để xử lý trường hợp có thể lường trước.
+  2. **Hệ quả nghiêm trọng hơn của (1): `normalize()` bọc CẢ 3 nhóm mở rộng (System Summary/
+     Thermal/Power) trong 1 khối `try/except` DUY NHẤT** — exception ở nhóm Power (crash tại đây)
+     xoá SẠCH luôn kết quả Battery/Processor/Memory/BIOS/Network/Fan/Temperature dù các nhóm đó đã
+     tính đúng TRƯỚC khi Power crash (Python chạy tuần tự trong cùng try, biến local đã gán đúng
+     giá trị Critical thật rồi bị except ghi đè về `None`). Tái hiện đúng theo báo cáo:
+     `RedundancySet: [null]` → lỗi đọc tham chiếu Power → except xoá luôn Battery/Processor/
+     Network đang Critical → cảnh báo phần cứng mở rộng bị BỎ SÓT dù RAID (tính TRƯỚC khối
+     try/except này, không nằm trong nó) vẫn được giữ đúng. Fix: tách 1 khối try/except DUY NHẤT
+     thành 3 khối ĐỘC LẬP (System Summary / Thermal / Power) — lỗi ở 1 nhóm chỉ reset field của
+     CHÍNH nhóm đó, không đụng 2 nhóm còn lại.
+  2 test mới (`tests/collectors/test_ilo_redfish.py`):
+  `test_power_redundancy_none_when_redundancy_set_has_non_dict_element` (đúng ca báo cáo, xác nhận
+  fix #1 không crash), `test_power_group_exception_does_not_wipe_other_groups` (dùng
+  `mocker.patch` ép exception thật ở nhóm Power, độc lập với fix #1 — xác nhận fix #2: Battery/
+  Processor/Network Critical thật KHÔNG bị xoá theo Power) — tự chứng minh bằng
+  `git stash push -- apps/collectors/ilo_redfish.py` → test thứ 2 FAIL đúng dự đoán (`assert None
+  == 2`, log traceback xác nhận đúng nhánh except cũ) → `git stash pop` khôi phục, pass lại. 533
+  test pass (531+2 mới), 2 skip như cũ, `manage.py check` sạch. Bài học mở rộng: khi bọc nhiều
+  KHỐI TÍNH ĐỘC LẬP (mỗi khối đọc 1 nguồn dữ liệu riêng, ghi vào field riêng) trong CÙNG 1
+  try/except để "phòng lỗi", phải tự hỏi "lỗi ở khối A có được phép xoá dữ liệu khối B đã tính
+  đúng không" — nếu KHÔNG (như ở đây, 3 nhóm hoàn toàn độc lập cả nguồn dữ liệu lẫn ý nghĩa
+  alert), mỗi khối cần try/except RIÊNG, không dùng chung 1 lớp bảo vệ "an toàn hơn không" nhưng
+  lại làm giảm độ tin cậy của dữ liệu đã đúng.
+- **2026-09-29 (cùng ngày, review ngoài bắt tiếp vòng 5: `_PSU_REF_RE` của vòng 4 chưa
+  xác thực URI GỐC trước dấu `#`)**: User dán tiếp báo cáo, soi đúng vào chính fix vòng 4 (entry
+  kế tiếp) — `_compute_power_redundancy`
+  ([apps/collectors/ilo_redfish.py](apps/collectors/ilo_redfish.py)) đã khớp đúng FRAGMENT sau `#`
+  (`/PowerSupplies/<N>`) nhưng chưa xác thực PHẦN TRƯỚC `#` có đúng là document `Chassis/1/Power`
+  đang đọc hay không — verify bằng đọc code + test thất bại đúng dự đoán trên code cũ trước khi
+  sửa: tham chiếu `"/redfish/v1/Chassis/2/Power#/PowerSupplies/0"` (trỏ sang Chassis **2**, không
+  phải Chassis 1 mà `_collect_power` đang fetch) vẫn khớp `_PSU_REF_RE` (regex chỉ nhìn fragment)
+  nên bị tính nhầm là PSU 0 của `psu_list` (thuộc Chassis 1) — nếu PSU 0 thật đang OK, group tính
+  "đủ redundancy" GIẢ dù tham chiếu đó không hề trỏ vào document đang đọc. Review ghi rõ đây là
+  "phản hồi không nhất quán, chưa quan sát trên iLO thực" — rủi ro suy ra từ code, không phải sự cố
+  đã xảy ra. Fix: thêm hằng `_POWER_RESOURCE_PATH = "/redfish/v1/Chassis/1/Power"` (khớp đúng URL
+  literal mà `_collect_power` đã fetch, không suy đoán multi-chassis chưa verify); tách
+  `uri.partition("#")`, phần TRƯỚC `#` (bỏ dấu `/` cuối nếu có) phải khớp CHÍNH XÁC hằng này rồi
+  mới khớp fragment bằng `_PSU_REF_RE` — sai document gốc (trỏ Chassis khác/resource khác) đều trả
+  `None` ngay, không chỉ kiểm tra fragment. 1 test mới
+  (`test_power_redundancy_none_when_ref_points_to_different_chassis`,
+  `tests/collectors/test_ilo_redfish.py`) — tự chứng minh bằng
+  `git stash push -- apps/collectors/ilo_redfish.py` → FAIL đúng dự đoán (`assert True is None`) →
+  `git stash pop` khôi phục, pass lại. 531 test pass (530+1 mới), 2 skip như cũ, `manage.py check`
+  sạch. Đây là vòng review thứ 5 liên tiếp cho riêng hàm `_compute_power_redundancy` (schema
+  "PSU reference" hoá ra có nhiều lớp cần xác thực hơn tưởng: field cả khối → phần tử bên trong →
+  cách parse 1 phần tử → phạm vi document gốc của phần tử đó) — bài học chung: khi validate 1 URI
+  tham chiếu chéo (cross-reference), phải xác thực CẢ 2 phần (resource gốc VÀ fragment/con trỏ bên
+  trong resource đó), xác thực 1 phần rồi tự tin "đã đủ" là nguồn lỗi lặp lại nhiều vòng.
+- **2026-09-29 (cùng ngày, review ngoài bắt tiếp vòng 4: 2 lỗi CHÍNH trong cách đọc
+  `@odata.id` mà vòng 3 vừa viết)**: User dán tiếp báo cáo, soi đúng vào 2 chỗ trong
+  `_compute_power_redundancy` ([apps/collectors/ilo_redfish.py](apps/collectors/ilo_redfish.py))
+  mà bản fix vòng 3 (entry kế tiếp) chưa xử lý đúng — verify bằng đọc code + test thất bại đúng dự
+  đoán trên code cũ trước khi sửa:
+  1. **`int(uri.rstrip("/").rsplit("/", 1)[-1])` chỉ lấy SỐ CUỐI CÙNG của URI, không xác nhận cả
+     path thực sự trỏ vào `PowerSupplies`** — 1 tham chiếu dạng `".../Power#/Other/0"` (trỏ vào
+     mảng KHÁC, không phải PowerSupplies) vẫn parse ra `idx=0` và bị tính nhầm thành PSU 0. Tái
+     hiện đúng theo báo cáo: PSU 0 đang OK, tham chiếu sai path này khiến group tính "đủ
+     redundancy" GIẢ dù tham chiếu không hề hợp lệ. Fix: thêm regex module-level `_PSU_REF_RE =
+     re.compile(r"^/PowerSupplies/(\d+)$")`, khớp TOÀN BỘ fragment sau `#` (không chỉ số cuối) —
+     sai path (trỏ mảng khác) hoặc thiếu `#` đều trả `None` (không đủ tin cậy để kết luận), thay
+     vì suy đoán từ mỗi con số cuối URI.
+  2. **Không có gì chặn 1 index PowerSupplies bị tham chiếu TRÙNG LẶP nhiều lần trong cùng
+     `RedundancySet` — `ok_count` cộng dồn theo SỐ THAM CHIẾU, không theo SỐ PSU PHÂN BIỆT.** Tái
+     hiện đúng theo báo cáo: PSU 0 `OK` được tham chiếu 2 lần, `MinNumNeeded=2` → code cũ đếm
+     `ok_count=2` "đạt" ngưỡng dù PSU 1 thật đang `Critical` (chỉ có đúng 1 PSU khoẻ thật, không
+     phải 2) → trả `True` sai (đủ redundancy giả). Fix: đổi `ok_count` (int) sang `ok_indexes`
+     (`set[int]`) — chỉ thêm index vào set khi PSU đó `OK`, tham chiếu trùng tới cùng 1 index
+     không cộng dồn thêm; so sánh cuối dùng `len(ok_indexes) < needed`.
+  2 test mới (`tests/collectors/test_ilo_redfish.py`):
+  `test_power_redundancy_none_when_ref_points_outside_power_supplies` (đúng ca báo cáo #1),
+  `test_power_redundancy_false_when_same_psu_referenced_twice` (đúng ca báo cáo #2) — tự chứng
+  minh bằng `git stash push -- apps/collectors/ilo_redfish.py` → cả 2 FAIL đúng dự đoán
+  (`assert True is None`, `assert True is False`) → `git stash pop` khôi phục, pass lại. 530 test
+  pass (528+2 mới), 2 skip như cũ, `manage.py check` sạch. Bài học mở rộng: fix "1 phần tử không
+  resolve được → None" (vòng 3) chưa đủ nếu cách RESOLVE đó tự nó sai — 1) chỉ khớp phần cuối của
+  1 path thay vì xác nhận TOÀN BỘ cấu trúc path là dạng bug con của "parse lỏng lẻo hơn schema thật
+  cho phép"; 2) đếm theo số THAM CHIẾU thay vì số THỰC THỂ PHÂN BIỆT là dạng bug "list tham chiếu
+  ≠ tập hợp phân biệt" — cả 2 đều là lỗi thường gặp khi parse JSON Pointer/URI tham chiếu chéo,
+  không phải lỗi thiếu/sai kiểu dữ liệu như 3 vòng review trước của cùng hàm.
+- **2026-09-29 (cùng ngày, review ngoài bắt tiếp P2 ở CHÍNH bản fix RedundancySet ngay
+  dưới đây, + 1 ghi chú vận hành xác nhận đúng ý)**: User dán tiếp báo cáo, 1 điểm sửa + 1 điểm chỉ
+  xác nhận hành vi:
+  1. **P2 — 1 tham chiếu `RedundancySet` sai định dạng/ngoài phạm vi bị bỏ qua âm thầm, vẫn dùng
+     số đếm thiếu để kết luận `False`** (`_compute_power_redundancy`,
+     [apps/collectors/ilo_redfish.py](apps/collectors/ilo_redfish.py)): bản fix P2 ngay dưới đây
+     (entry kế tiếp) đã xử lý đúng trường hợp CẢ FIELD `RedundancySet` thiếu/sai kiểu, nhưng vòng
+     lặp `for ref in redundancy_set:` bên trong vẫn `continue` âm thầm khi 1 PHẦN TỬ không parse
+     được `@odata.id` thành index (`ValueError`) — `ok_count` chỉ cộng dồn từ tham chiếu đọc được
+     rồi đem so `ok_count < needed` như thể đã đếm đủ. Tái hiện đúng theo báo cáo: 2 PSU đều `OK`,
+     `MinNumNeeded=2`, 1 trong 2 tham chiếu sai định dạng → chỉ đếm được 1 PSU OK → `1 < 2` ra
+     `False` (báo GIẢ mất redundancy dù PSU thật đều khoẻ). Cùng họ bug với `MinNumNeeded`/
+     `RedundancySet` ở entry dưới, nhưng ở tầng SÂU HƠN — trong TỪNG PHẦN TỬ của 1 field vốn đã
+     qua được check `isinstance(list)`. Fix: cả 2 nhánh không resolve được tham chiếu (`ValueError`
+     parse index LẪN index ngoài phạm vi `PowerSupplies`, review chỉ nêu nhánh đầu nhưng nhánh sau
+     cùng kiểu lỗi im lặng nên sửa đối xứng) đều trả `None` ngay lập tức thay vì `continue` đếm
+     thiếu. 2 test mới (`tests/collectors/test_ilo_redfish.py`):
+     `test_power_redundancy_none_when_redundancy_ref_malformed` (đúng ca báo cáo),
+     `test_power_redundancy_none_when_redundancy_ref_index_out_of_range` (đối chứng cùng họ lỗi) —
+     tự chứng minh bằng `git stash push -- apps/collectors/ilo_redfish.py` → cả 2 FAIL đúng dự
+     đoán (`assert False is None`) → `git stash pop` khôi phục, pass lại.
+  2. **Ghi chú vận hành (không phải bug)**: user xác nhận đúng — 13 rule iLO/RAID bị xoá qua UI
+     vẫn được seed lại ở lần app khởi động kế tiếp (`entrypoint.sh` dòng ~41,
+     `--metric-prefix ilo_ raid_`) — đây LÀ hành vi có chủ đích của chính fix P1 ở entry dưới (đảm
+     bảo 13 rule này luôn tồn tại sau deploy, xem test đối chứng
+     `test_metric_prefix_still_recreates_deleted_matching_rule`). `AlertRule` đã có sẵn field
+     `enabled` (`BooleanField(default=True)`, [apps/alerts/models.py](apps/alerts/models.py) dòng
+     88) — muốn ngừng 1 rule trong 13 rule này thì tắt qua UI (`enabled=False`), KHÔNG xoá, nếu
+     không nó sẽ tự sống lại. Không cần sửa code, chỉ ghi lại làm hướng dẫn vận hành.
+  528 test pass (526+2 mới), 2 skip như cũ, `manage.py check` sạch. Bài học mở rộng: fix "field cả
+  khối thiếu/sai kiểu → None" (entry dưới) không tự động che fix "1 PHẦN TỬ bên trong khối đó
+  không đọc được" — đúng mẫu đã lặp lại nhiều lần ở file này (list rỗng do lỗi ≠ lỗi ở 1 member cụ
+  thể trong list vốn đã đúng), giờ thêm 1 biến thể: field đã qua validate kiểu (`isinstance(list)`)
+  không có nghĩa MỌI phần tử bên trong nó đều parse được.
+- **2026-09-29 (cùng ngày, review ngoài bắt tiếp 2 điểm ở CHÍNH bản fix "3 điểm" ngay
+  dưới đây)**: User dán tiếp báo cáo review, soi đúng vào bản fix P1/P2 #2 vừa viết ở entry ngay
+  dưới (2 điểm, cả 2 verify đúng bằng đọc code + viết test thất bại đúng dự đoán trước khi sửa):
+  1. **P1 — Seed khi khởi động có thể tạo lại rule ĐÃ BỊ XOÁ chủ ý**: bản fix trước gọi
+     `manage.py seed_alert_rules --channels telegram` KHÔNG giới hạn phạm vi — seed nguyên `DEFAULT_RULES`
+     (26 rule, không chỉ 10-13 rule iLO/RAID mới). `seed_alert_rules` chỉ so khớp theo TÊN (xem
+     `Command.handle()`), không phân biệt được "rule chưa từng tạo" với "rule đã bị xoá chủ ý qua UI"
+     (`rule_delete`, [apps/alerts/views.py](apps/alerts/views.py) dòng ~201, hard `rule.delete()`,
+     không soft-delete/tombstone) — nên BẤT KỲ rule mặc định nào (kể cả 13 rule không liên quan
+     iLO, vd "Switch CPU Critical") bị xoá tay sẽ tự sống lại ở lần app khởi động kế tiếp. Verify
+     bằng test tái hiện đúng: xoá rule "Switch CPU Critical", gọi lại seed KHÔNG có cờ giới hạn →
+     rule sống lại (`assert not exists()` FAIL đúng dự đoán). Fix: thêm cờ mới
+     `--metric-prefix` vào `seed_alert_rules.py` (`nargs="+"`, lọc `DEFAULT_RULES` theo
+     `rule["metric"].startswith(tuple(prefixes))`) — [entrypoint.sh](entrypoint.sh) đổi sang
+     `python manage.py seed_alert_rules --channels telegram --metric-prefix ilo_ raid_`, giới hạn
+     đúng 13 rule có metric bắt đầu `ilo_`/`raid_` (khớp đúng phạm vi gốc của fix P1 trước), không
+     đụng 13 rule còn lại dù chúng có bị xoá chủ ý. Không dùng phương án "ghi nhận rule đã xoá có
+     chủ ý" (soft-delete/tombstone) vì nặng hơn nhiều so với mức cần thiết — lọc theo tiền tố
+     metric tái dùng đúng cấu trúc dữ liệu đã có sẵn (mọi rule iLO/RAID đặt tên metric theo tiền
+     tố này từ đầu), tự động bao trùm rule iLO mới thêm sau này mà không cần sửa lại danh sách tên
+     cứng trong entrypoint.sh mỗi lần thêm rule. 4 test mới
+     (`tests/alerts/test_seed_alert_rules.py`) — verify không-prefix seed đủ 26 rule; có-prefix chỉ
+     tạo đúng 13 rule khớp; rule ngoài phạm vi bị xoá KHÔNG sống lại; rule TRONG phạm vi bị xoá vẫn
+     được tạo lại (đối chứng, hành vi đúng ý — đảm bảo 13 rule iLO/RAID luôn tồn tại sau deploy).
+  2. **P2 — Thiếu `RedundancySet` vẫn gây cảnh báo mất dự phòng giả**: cùng họ bug với
+     `MinNumNeeded` đã fix ở entry dưới — `_compute_power_redundancy`
+     (`apps/collectors/ilo_redfish.py`) dùng `group.get("RedundancySet", [])`, mặc định field
+     THIẾU/sai kiểu thành `[]` → tái hiện đúng theo báo cáo: 2 PSU đều `OK`, group có
+     `MinNumNeeded=2` nhưng thiếu hẳn `RedundancySet` → `ok_count=0 < 2` ra `False` (báo GIẢ "mất
+     redundancy" dù PSU thật đều khoẻ). Fix: `RedundancySet` phải là `list` hợp lệ mới tính
+     `ok_count`; thiếu/sai kiểu → trả `None` (không đủ dữ liệu), tương tự cách đã sửa cho
+     `MinNumNeeded`. `RedundancySet: []` HIỆN DIỆN (rỗng thật, group tham chiếu đúng 0 PSU) vẫn
+     giữ hành vi cũ (không đổi thành `None`) — phân biệt rõ "thiếu" khỏi "rỗng thật", đúng triết lý
+     đã áp dụng nhất quán trong file này. 3 test mới (`tests/collectors/test_ilo_redfish.py`):
+     thiếu key, sai kiểu (string thay vì list), `[]` hợp lệ vẫn giữ `False` như cũ.
+  526 test pass (519+7 mới — 3 test RedundancySet + 4 test seed_alert_rules), 2 skip như cũ,
+  `manage.py check` sạch. Bài học ghi thêm vào `/deploy` skill: seed/reconcile command chạy tự
+  động ở entrypoint (khác lệnh chạy tay 1 lần) phải tự giới hạn đúng phạm vi rule nó CÓ TRÁCH
+  NHIỆM đảm bảo tồn tại — không mặc định "toàn bộ danh sách mặc định" chỉ vì đó là hành vi sẵn có
+  của command, nếu không sẽ xung đột với quyền xoá/tuỳ chỉnh của người dùng qua UI cho các rule
+  KHÁC không liên quan tính năng vừa thêm.
+- **2026-09-29 (cùng ngày, review ngoài sau khi deploy vòng 2 iLO, 3 điểm)**: User dán
+  báo cáo review ngoài, 3 điểm liên quan iLO mở rộng ngoài RAID (2 vòng deploy trên) — cả 3 verify
+  đúng bằng đọc code + test thật (tự viết test thất bại đúng dự đoán trên code cũ trước, sửa xong
+  pass lại, đúng quy trình §0):
+  1. **P1 — Deploy không tự tạo 10 rule iLO mới**: `DEFAULT_RULES` (`seed_alert_rules.py`) chỉ là
+     data Python, `deploy.sh`/`entrypoint.sh` chưa từng gọi `manage.py seed_alert_rules` — quên
+     chạy tay lệnh này sau deploy (đúng như bước 5 trong plan gốc yêu cầu làm THỦ CÔNG) thì
+     collector vẫn thu thập dữ liệu bình thường nhưng KHÔNG rule nào tồn tại để cảnh báo (im lặng,
+     không lỗi gì lộ ra). Fix: thêm `python manage.py seed_alert_rules --channels telegram` vào
+     [entrypoint.sh](entrypoint.sh), chạy ở nhánh "app" (cùng chỗ `migrate`/`sync_beat_expires`) —
+     AN TOÀN chạy lại mỗi lần container khởi động vì mặc định (không `--overwrite`) command này
+     chỉ CREATE rule tên chưa tồn tại, SKIP (không đụng) rule đã có, kể cả rule đã tùy chỉnh qua
+     UI. Từ nay thêm rule mới vào `DEFAULT_RULES` sẽ tự có trên prod ở lần deploy kế tiếp, không
+     cần nhớ chạy tay.
+  2. **P2 — `_compute_power_redundancy` (`apps/collectors/ilo_redfish.py`) coi `MinNumNeeded`
+     THIẾU là `0`**: `group.get("MinNumNeeded") or 0` khiến 1 redundancy group không có field bắt
+     buộc này trả `True` (đủ redundancy) NGAY CẢ KHI mọi PSU trong group đang Critical (0 PSU
+     "OK" vẫn "đủ" so với ngưỡng giả `0`) — tái hiện đúng bằng test (`ok_count=0 < needed=0` luôn
+     `False`). Fix: `needed = group.get("MinNumNeeded")`, `None` (thiếu hoặc `null` tường minh) →
+     trả `None` cho TOÀN BỘ phép tính (không đủ dữ liệu để kết luận), không suy đoán `0`. 2 test
+     mới: `test_power_redundancy_none_when_min_num_needed_missing`,
+     `test_power_redundancy_none_when_min_num_needed_explicit_null`.
+  3. **P2 — `_collect_power` coi `PowerSupplies` THIẾU/sai kiểu là mảng rỗng hợp lệ**:
+     `body.get("PowerSupplies") or []` — nếu `Power/` trả JSON thiếu hẳn `PowerSupplies` (hoặc sai
+     kiểu) nhưng `Redundancy` vẫn còn với `MinNumNeeded>0`, `_compute_power_redundancy` tính
+     `ok_count=0 < needed` ra `False` → cảnh báo "mất redundancy" GIẢ dù chỉ là thiếu dữ liệu PSU,
+     không phải PSU thật sự down (chiều ngược lại với bug #2 — lần này là báo động giả thay vì bỏ
+     sót). Fix: `PowerSupplies` phải là `list` hợp lệ mới coi nhóm Power đã fetch đủ; thiếu/sai
+     kiểu → cả nhóm (`_collect_power`) trả `None` (cùng thiết kế "all-or-nothing" đã áp cho 3 nhóm
+     mở rộng ngoài RAID). 4 test mới (`tests/collectors/test_ilo_redfish.py`,
+     `TestCollectPowerMalformedPowerSupplies`): thiếu key, sai kiểu (dict thay vì list), `[]` hợp
+     lệ vẫn giữ hành vi cũ (phân biệt "thiếu" khỏi "rỗng thật"), và 1 test end-to-end qua
+     `normalize()` xác nhận không fire alert giả.
+  519 test pass (513+6 mới thật sự đếm qua `pytest` — 4 test ở điểm #3 + 2 test ở điểm #2), 2 skip
+  như cũ, `manage.py check` sạch. Bài học chung (đã khớp mẫu đã ghi nhiều lần trong `/deploy`
+  skill "0 phần tử sau khi liệt kê"/"field thiếu bị mặc định thành giá trị trông như đã xác
+  minh"): `x.get(key) or <default>` trên 1 field NGHIỆP VỤ BẮT BUỘC (không phải optional thật) là
+  điểm đáng ngờ — phải phân biệt rõ "field thiếu/sai kiểu" (bất thường, nên trả `None`/thất bại)
+  khỏi "field có giá trị hợp lệ nhưng trùng giá trị mặc định" (`0`, `[]`) — 2 case cần xử lý khác
+  nhau, gộp chung là nguồn bug (đúng bài học đã đúc kết ở 4 vòng fix trước đó cho cùng file này).
+- **2026-09-29 (cùng ngày, vòng 2 — iLO5 + 3 mục bonus)**: Ngay sau khi deploy vòng 1
   (8 mục hardware health), verify sống trên prod phát hiện Hyperv-01 thực ra là ProLiant DL380
   Gen10 + iLO5 (không phải Gen9/iLO4 như 2 host kia) — 4 field Battery/AMS/Processor/Memory null
   hoàn toàn vì `Systems/1/` trên iLO5 dùng `Oem.Hpe` thay vì `Oem.Hp`. User chọn "fix + thêm luôn
