@@ -93,6 +93,55 @@ DEFAULT_RULES = [
         "condition": "gte", "threshold": 1.0,
         "severity": "CRITICAL", "duration_min": 0,
     },
+    # HyperV hardware health mở rộng ngoài RAID (iLO Redfish, 2026-09-29 — Battery/Processor/Memory/
+    # Fan/Temperature/PowerSupply/Redundancy, xem apps/collectors/ilo_redfish.py). duration_min=0
+    # như 3 rule RAID ở trên (state phần cứng rời rạc). Tên "Warning+" cho ngưỡng gte 1.0 (bắt cả
+    # Warning/Critical) khớp precedent "RAID Logical Drive Warning+" — không đặt tên "Critical" cho
+    # rule severity WARNING. PSU dùng ngưỡng Critical-only (gte 2.0) vì dữ liệu thật chỉ thấy
+    # OK/Critical (không có Warning cho PSU trên HPE). Không có rule cho ams_device_discovery
+    # (thông tin "có/không cài Agentless Management Service", không phải lỗi phần cứng).
+    {
+        "name": "HyperV Battery Warning+",
+        "device_type": "hyperv", "metric": "ilo_battery_health",
+        "condition": "gte", "threshold": 1.0,
+        "severity": "WARNING", "duration_min": 0,
+    },
+    {
+        "name": "HyperV Processor Warning+",
+        "device_type": "hyperv", "metric": "ilo_processor_health",
+        "condition": "gte", "threshold": 1.0,
+        "severity": "WARNING", "duration_min": 0,
+    },
+    {
+        "name": "HyperV Memory Warning+",
+        "device_type": "hyperv", "metric": "ilo_memory_health",
+        "condition": "gte", "threshold": 1.0,
+        "severity": "WARNING", "duration_min": 0,
+    },
+    {
+        "name": "HyperV Fan Warning+",
+        "device_type": "hyperv", "metric": "ilo_fan_health",
+        "condition": "gte", "threshold": 1.0,
+        "severity": "WARNING", "duration_min": 0,
+    },
+    {
+        "name": "HyperV Temperature Warning+",
+        "device_type": "hyperv", "metric": "ilo_temperature_health",
+        "condition": "gte", "threshold": 1.0,
+        "severity": "WARNING", "duration_min": 0,
+    },
+    {
+        "name": "HyperV Power Supply Critical",
+        "device_type": "hyperv", "metric": "ilo_power_supply_health",
+        "condition": "gte", "threshold": 2.0,
+        "severity": "CRITICAL", "duration_min": 0,
+    },
+    {
+        "name": "HyperV Power Not Redundant",
+        "device_type": "hyperv", "metric": "ilo_power_redundancy",
+        "condition": "eq", "threshold": 0.0,
+        "severity": "CRITICAL", "duration_min": 0,
+    },
     # Wireless rules
     {
         "name": "AP Offline",

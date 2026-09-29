@@ -185,6 +185,264 @@ class TestNormalize:
         assert result["enclosure_mismatch_count"] == 1
 
 
+class TestNormalizeExtendedHardwareHealth:
+    """Regression 2026-09-29: mở rộng ngoài RAID (Battery/AMS/Processor/Memory/Fan/Temperature/
+    PowerSupply/Power Redundancy) — 3 nhóm ĐỘC LẬP với RAID/controllers trong raw
+    (`system_summary`/`thermal`/`power`), mỗi nhóm 1 GET phẳng all-or-nothing (khác pattern nested
+    completeness-flag của RAID vì Fans/Temperatures/PowerSupplies/Redundancy/Battery đã nhúng sẵn
+    đầy đủ trong 1 document)."""
+
+    def test_battery_ok_and_ams_discovery_string(self, ilo_device):
+        raw = _raw_healthy_controller()
+        raw["system_summary"] = {
+            "battery": [{"Condition": "Ok", "Index": 1}],
+            "ams_device_discovery": "NoAMS",
+            "processor_health": "OK",
+            "memory_health": "OK",
+        }
+        result = IloRedfishClient(ilo_device).normalize(raw)
+
+        assert result["battery_health_code"] == 0
+        assert result["ams_device_discovery"] == "NoAMS"
+        assert result["processor_health_code"] == 0
+        assert result["memory_health_code"] == 0
+
+    def test_battery_degraded_matches_screenshot_scenario(self, ilo_device):
+        """Ảnh Health Summary iLO cho thấy 'Smart Storage Battery Status: Degraded' — verify
+        normalize() map đúng 'Degraded' -> code 1 (Warning), khác 0 (OK) lẫn 2 (Critical)."""
+        raw = _raw_healthy_controller()
+        raw["system_summary"] = {
+            "battery": [{"Condition": "Degraded", "Index": 1}],
+            "ams_device_discovery": "",
+            "processor_health": "OK",
+            "memory_health": "OK",
+        }
+        result = IloRedfishClient(ilo_device).normalize(raw)
+
+        assert result["battery_health_code"] == 1
+
+    def test_system_summary_none_leaves_new_fields_none_raid_unaffected(self, ilo_device):
+        """Systems/1/ fetch lỗi (None trong raw) -> battery/processor/memory None, ams rỗng —
+        KHÔNG suy diễn 0/OK. 4 field RAID (đã fetch OK trong cùng raw) không bị ảnh hưởng."""
+        raw = _raw_healthy_controller()
+        raw["system_summary"] = None
+        result = IloRedfishClient(ilo_device).normalize(raw)
+
+        assert result["battery_health_code"] is None
+        assert result["processor_health_code"] is None
+        assert result["memory_health_code"] is None
+        assert result["ams_device_discovery"] == ""
+        assert result["controller_health_code"] == 0
+
+    def test_fan_worst_code_ignores_absent_fans(self, ilo_device):
+        """Fan Absent (không có Status.Health) phải bị BỎ QUA khi tính worst — verify runtime:
+        DL380 Gen9 1-CPU có Fan1/2 Absent theo thiết kế, không phải lỗi."""
+        raw = _raw_healthy_controller()
+        raw["thermal"] = {
+            "fans": [
+                {"FanName": "Fan 1", "Status": {"State": "Absent"}},
+                {"FanName": "Fan 2", "Status": {"State": "Absent"}},
+                {"FanName": "Fan 3", "Status": {"Health": "OK", "State": "Enabled"}},
+            ],
+            "temperatures": [],
+        }
+        result = IloRedfishClient(ilo_device).normalize(raw)
+
+        assert result["fan_worst_code"] == 0
+
+    def test_fan_worst_code_critical_among_absent(self, ilo_device):
+        raw = _raw_healthy_controller()
+        raw["thermal"] = {
+            "fans": [
+                {"FanName": "Fan 1", "Status": {"State": "Absent"}},
+                {"FanName": "Fan 2", "Status": {"Health": "Critical", "State": "Enabled"}},
+            ],
+            "temperatures": [],
+        }
+        result = IloRedfishClient(ilo_device).normalize(raw)
+
+        assert result["fan_worst_code"] == 2
+
+    def test_temperature_worst_code_ignores_absent_sensors(self, ilo_device):
+        raw = _raw_healthy_controller()
+        raw["thermal"] = {
+            "fans": [],
+            "temperatures": [
+                {"Name": "03-CPU 2", "Status": {"State": "Absent"}},
+                {"Name": "02-CPU 1", "Status": {"Health": "OK", "State": "Enabled"}},
+            ],
+        }
+        result = IloRedfishClient(ilo_device).normalize(raw)
+
+        assert result["temperature_worst_code"] == 0
+
+    def test_thermal_none_leaves_fan_and_temperature_none(self, ilo_device):
+        raw = _raw_healthy_controller()
+        raw["thermal"] = None
+        result = IloRedfishClient(ilo_device).normalize(raw)
+
+        assert result["fan_worst_code"] is None
+        assert result["temperature_worst_code"] is None
+
+    def test_power_supply_worst_code(self, ilo_device):
+        raw = _raw_healthy_controller()
+        raw["power"] = {
+            "power_supplies": [
+                {"Status": {"Health": "Critical", "State": "Offline"}},
+                {"Status": {"Health": "OK", "State": "Enabled"}},
+            ],
+            "redundancy": [],
+        }
+        result = IloRedfishClient(ilo_device).normalize(raw)
+
+        assert result["power_supply_worst_code"] == 2
+
+    def test_power_redundancy_degraded_matches_real_hyprver03_case(self, ilo_device):
+        """Mirror sự cố PSU thật Hyprver03 2026-09-29: Bay1 Critical/Offline (index 0), Bay2 OK
+        (index 1), MinNumNeeded=2 -> chỉ 1 PSU OK < 2 cần -> power_redundancy_ok=False."""
+        raw = _raw_healthy_controller()
+        raw["power"] = {
+            "power_supplies": [
+                {"Status": {"Health": "Critical", "State": "Offline"}},
+                {"Status": {"Health": "OK", "State": "Enabled"}},
+            ],
+            "redundancy": [{
+                "MinNumNeeded": 2,
+                "RedundancySet": [
+                    {"@odata.id": "/redfish/v1/Chassis/1/Power#/PowerSupplies/0"},
+                    {"@odata.id": "/redfish/v1/Chassis/1/Power#/PowerSupplies/1"},
+                ],
+            }],
+        }
+        result = IloRedfishClient(ilo_device).normalize(raw)
+
+        assert result["power_supply_worst_code"] == 2
+        assert result["power_redundancy_ok"] is False
+
+    def test_power_redundancy_ok_when_enough_psu_healthy(self, ilo_device):
+        raw = _raw_healthy_controller()
+        raw["power"] = {
+            "power_supplies": [
+                {"Status": {"Health": "OK", "State": "Enabled"}},
+                {"Status": {"Health": "OK", "State": "Enabled"}},
+            ],
+            "redundancy": [{
+                "MinNumNeeded": 2,
+                "RedundancySet": [
+                    {"@odata.id": "/redfish/v1/Chassis/1/Power#/PowerSupplies/0"},
+                    {"@odata.id": "/redfish/v1/Chassis/1/Power#/PowerSupplies/1"},
+                ],
+            }],
+        }
+        result = IloRedfishClient(ilo_device).normalize(raw)
+
+        assert result["power_redundancy_ok"] is True
+
+    def test_power_redundancy_none_when_no_redundancy_group(self, ilo_device):
+        """0 redundancy group (vd host 1 PSU) -> None (không áp dụng), KHÔNG suy diễn True/False."""
+        raw = _raw_healthy_controller()
+        raw["power"] = {
+            "power_supplies": [{"Status": {"Health": "OK", "State": "Enabled"}}],
+            "redundancy": [],
+        }
+        result = IloRedfishClient(ilo_device).normalize(raw)
+
+        assert result["power_redundancy_ok"] is None
+
+    def test_power_none_leaves_psu_and_redundancy_none(self, ilo_device):
+        raw = _raw_healthy_controller()
+        raw["power"] = None
+        result = IloRedfishClient(ilo_device).normalize(raw)
+
+        assert result["power_supply_worst_code"] is None
+        assert result["power_redundancy_ok"] is None
+
+    def test_exception_in_extended_fields_does_not_break_raid_fields(self, ilo_device, mocker):
+        """Bug ở logic mới (vd _compute_power_redundancy raise) KHÔNG được làm mất 4 field RAID
+        đã tính đúng trong cùng data dict."""
+        raw = _raw_unhealthy_controller()
+        raw["power"] = {
+            "power_supplies": [{"Status": {"Health": "OK"}}],
+            "redundancy": [{"MinNumNeeded": 1, "RedundancySet": []}],
+        }
+        mocker.patch.object(IloRedfishClient, "_compute_power_redundancy", side_effect=RuntimeError("boom"))
+
+        result = IloRedfishClient(ilo_device).normalize(raw)
+
+        assert result["controller_health_code"] == 2
+        assert result["logical_drive_worst_code"] == 1
+        assert result["missing_disk_count"] == 2
+        assert result["enclosure_mismatch_count"] == 1
+        assert result["power_supply_worst_code"] is None
+        assert result["power_redundancy_ok"] is None
+
+
+class TestCollectRawExtendedHardwareHealth:
+    """collect_raw() gọi 3 nhóm mới (Systems/1/, Chassis/1/Thermal/, Chassis/1/Power/) độc lập
+    RAID — 1 nhóm lỗi không xoá controllers đã fetch thành công."""
+
+    def _controllers_only_fake_get(self, mocker, root: str, ac_uri: str):
+        def fake_get(url, timeout=None, headers=None):
+            path = url.replace("https://10.0.198.254", "")
+            resp = mocker.MagicMock()
+            if path == root:
+                resp.status_code = 200
+                resp.json.return_value = {"Members": [{"@odata.id": ac_uri}]}
+            elif path == ac_uri:
+                resp.status_code = 200
+                resp.json.return_value = {"Status": {"Health": "OK"}}
+            elif path == ac_uri + "LogicalDrives/":
+                resp.status_code = 200
+                resp.json.return_value = {"Members": []}
+            elif path == ac_uri + "StorageEnclosures/":
+                resp.status_code = 200
+                resp.json.return_value = {"Members": []}
+            elif path == "/redfish/v1/Systems/1/":
+                resp.status_code = 200
+                resp.json.return_value = {
+                    "Oem": {"Hp": {
+                        "Battery": [{"Condition": "Ok", "Index": 1}],
+                        "DeviceDiscoveryComplete": {"AMSDeviceDiscovery": "NoAMS"},
+                    }},
+                    "ProcessorSummary": {"Status": {"HealthRollUp": "OK"}},
+                    "MemorySummary": {"Status": {"HealthRollUp": "OK"}},
+                }
+            elif path == "/redfish/v1/Chassis/1/Thermal/":
+                resp.status_code = 500  # lỗi thật -- nhóm này phải None
+                resp.json.side_effect = ValueError("not json")
+            elif path == "/redfish/v1/Chassis/1/Power/":
+                resp.status_code = 200
+                resp.json.return_value = {
+                    "PowerSupplies": [{"Status": {"Health": "OK"}}],
+                    "Redundancy": [],
+                }
+            else:
+                raise AssertionError(f"Unexpected path probed in test: {path}")
+            return resp
+        return fake_get
+
+    def test_thermal_failure_does_not_wipe_controllers_or_other_groups(self, ilo_device, mocker):
+        root = "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/"
+        ac_uri = root + "0/"
+        mocker.patch("requests.Session.get", side_effect=self._controllers_only_fake_get(mocker, root, ac_uri))
+
+        raw = IloRedfishClient(ilo_device).collect_raw()
+
+        assert raw is not None
+        assert len(raw["controllers"]) == 1  # RAID không bị ảnh hưởng bởi Thermal/ lỗi
+        assert raw["thermal"] is None
+        assert raw["system_summary"] is not None
+        assert raw["power"] is not None
+
+        normalized = IloRedfishClient(ilo_device).normalize(raw)
+        assert normalized["controller_health_code"] == 0
+        assert normalized["battery_health_code"] == 0
+        assert normalized["ams_device_discovery"] == "NoAMS"
+        assert normalized["fan_worst_code"] is None
+        assert normalized["temperature_worst_code"] is None
+        assert normalized["power_supply_worst_code"] == 0
+
+
 class TestGetRetry:
     """iLO4/5 đóng TCP connection sau ĐÚNG 1 request dù keep-alive (verify runtime 2026-09-28)
     -> _get() phải retry 1 lần bằng session mới khi ConnectionError."""
@@ -312,6 +570,16 @@ class TestCollectRaw:
             elif path == ac_uri + "StorageEnclosures/0/":
                 resp.status_code = 200
                 resp.json.return_value = {"Id": "0", "DriveBayCount": 4, "Location": "1I:3", "Status": {"Health": "OK"}}
+            elif path in (
+                "/redfish/v1/Systems/1/",
+                "/redfish/v1/Chassis/1/Thermal/",
+                "/redfish/v1/Chassis/1/Power/",
+            ):
+                # 3 nhóm mở rộng ngoài RAID (2026-09-29) — collect_raw() gọi unconditional sau khi
+                # root RAID đã OK; test này chỉ quan tâm RAID nên trả 404 (nhóm mới -> None, không
+                # phá assertion RAID sẵn có).
+                resp.status_code = 404
+                resp.json.return_value = {}
             else:
                 raise AssertionError(f"Unexpected path probed in test: {path}")
             return resp
@@ -380,6 +648,13 @@ class TestCollectRaw:
             elif path == ac_uri + "StorageEnclosures/":
                 resp.status_code = 200
                 resp.json.return_value = {"Members": []}
+            elif path in (
+                "/redfish/v1/Systems/1/",
+                "/redfish/v1/Chassis/1/Thermal/",
+                "/redfish/v1/Chassis/1/Power/",
+            ):
+                resp.status_code = 404
+                resp.json.return_value = {}
             else:
                 for disk_id, (location, capacity_gb) in disk_specs.items():
                     if path == ac_uri + f"DiskDrives/{disk_id}/":
@@ -429,6 +704,16 @@ class TestCollectRaw:
             elif path == ac_uri + "StorageEnclosures/":
                 resp.status_code = 200
                 resp.json.return_value = {"Members": []}
+            elif path in (
+                "/redfish/v1/Systems/1/",
+                "/redfish/v1/Chassis/1/Thermal/",
+                "/redfish/v1/Chassis/1/Power/",
+            ):
+                # 3 nhóm mở rộng ngoài RAID (2026-09-29) — collect_raw() gọi unconditional sau khi
+                # root RAID đã OK; test này chỉ quan tâm RAID nên trả 404 (nhóm mới -> None, không
+                # phá assertion RAID sẵn có).
+                resp.status_code = 404
+                resp.json.return_value = {}
             else:
                 raise AssertionError(f"Unexpected path probed in test: {path}")
             return resp
@@ -476,6 +761,16 @@ class TestCollectRaw:
             elif path == ac_uri + "StorageEnclosures/0/":
                 resp.status_code = 500  # detail fetch lỗi thật -- khác list root ở trên (200)
                 resp.json.side_effect = ValueError("not json")
+            elif path in (
+                "/redfish/v1/Systems/1/",
+                "/redfish/v1/Chassis/1/Thermal/",
+                "/redfish/v1/Chassis/1/Power/",
+            ):
+                # 3 nhóm mở rộng ngoài RAID (2026-09-29) — collect_raw() gọi unconditional sau khi
+                # root RAID đã OK; test này chỉ quan tâm RAID nên trả 404 (nhóm mới -> None, không
+                # phá assertion RAID sẵn có).
+                resp.status_code = 404
+                resp.json.return_value = {}
             else:
                 raise AssertionError(f"Unexpected path probed in test: {path}")
             return resp
@@ -533,6 +828,16 @@ class TestCollectRaw:
             elif path == ac_uri + "StorageEnclosures/":
                 resp.status_code = 200
                 resp.json.return_value = {"Members": []}
+            elif path in (
+                "/redfish/v1/Systems/1/",
+                "/redfish/v1/Chassis/1/Thermal/",
+                "/redfish/v1/Chassis/1/Power/",
+            ):
+                # 3 nhóm mở rộng ngoài RAID (2026-09-29) — collect_raw() gọi unconditional sau khi
+                # root RAID đã OK; test này chỉ quan tâm RAID nên trả 404 (nhóm mới -> None, không
+                # phá assertion RAID sẵn có).
+                resp.status_code = 404
+                resp.json.return_value = {}
             else:
                 raise AssertionError(f"Unexpected path probed in test: {path}")
             return resp
@@ -578,6 +883,16 @@ class TestCollectRaw:
             elif path == ac_uri + "StorageEnclosures/":
                 resp.status_code = 200
                 resp.json.return_value = {"Members": []}
+            elif path in (
+                "/redfish/v1/Systems/1/",
+                "/redfish/v1/Chassis/1/Thermal/",
+                "/redfish/v1/Chassis/1/Power/",
+            ):
+                # 3 nhóm mở rộng ngoài RAID (2026-09-29) — collect_raw() gọi unconditional sau khi
+                # root RAID đã OK; test này chỉ quan tâm RAID nên trả 404 (nhóm mới -> None, không
+                # phá assertion RAID sẵn có).
+                resp.status_code = 404
+                resp.json.return_value = {}
             else:
                 raise AssertionError(f"Unexpected path probed in test: {path}")
             return resp
@@ -625,6 +940,16 @@ class TestCollectRaw:
             elif path == ac_uri + "StorageEnclosures/":
                 resp.status_code = 200
                 resp.json.return_value = {"Members": []}
+            elif path in (
+                "/redfish/v1/Systems/1/",
+                "/redfish/v1/Chassis/1/Thermal/",
+                "/redfish/v1/Chassis/1/Power/",
+            ):
+                # 3 nhóm mở rộng ngoài RAID (2026-09-29) — collect_raw() gọi unconditional sau khi
+                # root RAID đã OK; test này chỉ quan tâm RAID nên trả 404 (nhóm mới -> None, không
+                # phá assertion RAID sẵn có).
+                resp.status_code = 404
+                resp.json.return_value = {}
             else:
                 raise AssertionError(f"Unexpected path probed in test: {path}")
             return resp
@@ -665,6 +990,16 @@ class TestCollectRaw:
             elif path == ac_uri + "StorageEnclosures/":
                 resp.status_code = 200  # OK thật -- KHÔNG phải lỗi HTTP
                 resp.json.return_value = {}  # JSON hợp lệ (dict) nhưng thiếu "Members"
+            elif path in (
+                "/redfish/v1/Systems/1/",
+                "/redfish/v1/Chassis/1/Thermal/",
+                "/redfish/v1/Chassis/1/Power/",
+            ):
+                # 3 nhóm mở rộng ngoài RAID (2026-09-29) — collect_raw() gọi unconditional sau khi
+                # root RAID đã OK; test này chỉ quan tâm RAID nên trả 404 (nhóm mới -> None, không
+                # phá assertion RAID sẵn có).
+                resp.status_code = 404
+                resp.json.return_value = {}
             else:
                 raise AssertionError(f"Unexpected path probed in test: {path}")
             return resp

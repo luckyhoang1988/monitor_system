@@ -437,6 +437,67 @@ memory `ilo-raid-monitoring.md` mục "Trạng thái rollout iLO IP".
   `IloRedfishClient._members(payload)` (trả list hợp lệ hoặc `None`) áp dụng thống nhất cho cả 3
   chỗ, thay pattern `.get("Members", [])`/check rời rạc cũ. Xem "Thay đổi quan trọng" (vòng 4).
 
+**Mở rộng ngoài RAID — 8 mục hardware health (từ 2026-09-29)**: phát sinh khi user đối chiếu
+"Health Summary" thật của iLO (ảnh UI) với phạm vi giám sát — hệ thống trước đó chỉ đọc đúng 1/12
+mục (Storage). Probe trực tiếp trên iLO thật tìm ra 8 mục có nguồn Redfish rõ, hầu như miễn phí
+(nằm sẵn trong `Systems/1/`, hoặc 1 request mới `Thermal/`/`Power/`) — bỏ qua BIOS/Hardware Health,
+Fan Redundancy, Network (chưa có field Redfish rõ ràng/đáng tin trên schema iLO4 cũ này).
+
+**Endpoint mới đã verify runtime thật (Hyperv-01/02/Hyprver03, 2026-09-29)**:
+- `Systems/1/` → `Oem.Hp.Battery[]` (`Condition`, vd `"Ok"`) = Smart Storage Battery;
+  `Oem.Hp.DeviceDiscoveryComplete.AMSDeviceDiscovery` (string, thấy `"NoAMS"`) = Agentless
+  Management Service (**chỉ hiển thị, KHÔNG alert** — thông tin "có/không cài AMS agent", không
+  phải lỗi phần cứng); `ProcessorSummary`/`MemorySummary.Status.HealthRollUp`.
+- `Chassis/1/Thermal/` → `Fans[]`, `Temperatures[]` (44 sensor trên DL380 Gen9, phần lớn `Absent`
+  do server 1 CPU — **bỏ qua sensor Absent khi tính "worst"**, không suy đoán trạng thái cho sensor
+  không tồn tại; verify: sensor `Enabled` có `Status.Health` populated thật, vd Fan 3-6 = `"OK"`).
+- `Chassis/1/Power/` → `PowerSupplies[]`, `Redundancy[]`. ⚠️ **`Redundancy[]` schema này
+  (`PowerMetrics.0.11.0`, iLO4 cũ) KHÔNG có field `Status`** ở tầng group — phải tự tính redundancy
+  từ `MinNumNeeded` + đếm PSU `"OK"` (`IloRedfishClient._compute_power_redundancy`).
+  `RedundancySet[]["@odata.id"]` dạng `".../Power#/PowerSupplies/<N>"` là JSON Pointer fragment
+  (RFC 6901) — `<N>` là index mảng `PowerSupplies` theo đặc tả, verify khớp thật (index 0 = Bay1,
+  1 = Bay2). Phát hiện sống lúc probe: **Hyprver03 PSU Bay1 Critical/Offline (`ACPowerLost`) thật**
+  — ca xác nhận rule "HyperV Power Not Redundant" fire đúng ngay lần seed đầu.
+
+**Thiết kế**: 3 nhóm MỚI, mỗi nhóm = **1 GET phẳng, all-or-nothing** (khác hẳn pattern nested
+per-member completeness-flag của RAID ở trên — Fans/Temperatures/PowerSupplies/Redundancy/Battery
+đã nhúng sẵn đầy đủ trong 1 document, không cần fetch từng member riêng như LogicalDrives). Độc lập
+với nhau VÀ độc lập với `controllers` — 1 nhóm lỗi (`None`) không xoá dữ liệu nhóm khác đã fetch
+thành công, và khối tính 7 field mới trong `normalize()` bọc **try/except riêng** (1 bug ở logic
+mới không được làm mất 4 field RAID đã tính đúng trong cùng `data` dict).
+
+**Model** — 8 field mới trên `HardwareHealth`: `battery_health_code`, `ams_device_discovery`
+(CharField, không phải health scale — không vào `_ILO_FIELD_MAP`/không alert),
+`processor_health_code`, `memory_health_code`, `fan_worst_code`, `temperature_worst_code`,
+`power_supply_worst_code` (cùng scale 0/1/2 như controller/LD), `power_redundancy_ok`
+(`BooleanField(null=True)` — `None`=không áp dụng khi 0 redundancy group, vd host 1 PSU). Migration
+`0010_hardwarehealth_ams_device_discovery_and_more`.
+
+**Alert**: `AlertRule.RAID_HEALTH_NAMES` đổi tên → **`HEALTH_CODE_NAMES`** (dùng chung 8 metric
+OK/Warning/Critical, không chỉ RAID nữa). 7 entry mới trong `_ILO_FIELD_MAP` (loop có sẵn tự đăng
+ký `METRIC_GETTERS`, không cần sửa `check_device_alerts`/`_latest_ilo`/`_sustained_ilo`).
+`power_redundancy_ok` là `BooleanField`: `__isnull=False` chỉ loại NULL thật (không loại `False`),
+`float(True)=1.0`/`float(False)=0.0` qua `values_list` hoạt động đúng không cần sửa gì thêm; rule
+dùng `condition="eq"` (không phải gte/lte), khớp cách `device_online`/`if_status` xử lý metric nhị
+phân. 7 rule seed mới (`duration_min=0`, đặt tên "Warning+" cho ngưỡng gte 1.0 khớp precedent
+"RAID Logical Drive Warning+"): `ilo_battery_health`/`ilo_processor_health`/`ilo_memory_health`/
+`ilo_fan_health`/`ilo_temperature_health` đều gte 1.0 WARNING; `ilo_power_supply_health` gte 2.0
+CRITICAL (PSU thật chỉ thấy OK/Critical, không có Warning); `ilo_power_redundancy` eq 0.0 CRITICAL.
+
+**UI**: "System Health Summary" strip (badge nhỏ) trong card "Storage Health (iLO)"
+(`templates/dashboard/hyperv_detail.html`) đọc TRỰC TIẾP từ field code trên `latest_hardware_health`
+(0/1/2 → OK/Warning/Critical), KHÔNG qua `raw` JSON như bảng Controller/LD/Disk/Enclosure — các mục
+mới chỉ cần badge "worst", không hiển thị chi tiết từng item con (44 sensor nhiệt độ quá nhiều cho
+UI tóm tắt — quyết định phạm vi có chủ đích).
+
+**Giới hạn đã biết (ghi rõ, không thiết kế lại cho tình huống chưa có thiết bị thật)**:
+- 3 nhóm mới vẫn phụ thuộc root `ArrayControllers/` đã xác thực OK trước đó (root 401/404/lỗi →
+  `collect_raw()` trả `None` ngay, không tới 3 nhóm mới) — 1 HyperV host có iLO nhưng KHÔNG có
+  Smart Array/RAID controller sẽ không bao giờ lấy được 8 mục mới dù không liên quan RAID. Vô hại
+  với fleet hiện tại (cả 3 host đều P440ar).
+- `Oem.Hp` chỉ verify trên **iLO4** (cả 3 host thật). iLO5 có thể dùng namespace OEM khác
+  (`Oem.Hpe`) — CHƯA có thiết bị iLO5 để verify, không viết fallback đoán mò.
+
 ## Celery Beat — `expire_seconds` bị reset mỗi lần `beat` restart (fix gốc 2026-07-07)
 > Phát hiện khi audit lại điều kiện poll HyperV — không phải bug riêng HyperV, ảnh hưởng
 > **mọi** `PeriodicTask` có khai báo `options.expires` trong `CELERY_BEAT_SCHEDULE`
@@ -464,7 +525,23 @@ memory `ilo-raid-monitoring.md` mục "Trạng thái rollout iLO IP".
   `expire_seconds` cùng giá trị, nếu không entry đó lặp lại đúng bug này.
 
 ### Thay đổi quan trọng
-- **2026-09-29 (cùng ngày, mới nhất — vòng 4, review ngoài bắt tiếp cùng họ bug ở 3 collection CON)**:
+- **2026-09-29 (cùng ngày, mới nhất — mở rộng iLO ngoài RAID, 8 mục hardware health)**: User dán
+  ảnh chụp "Health Summary" thật của iLO (12 mục: Agentless Management Service, Smart Storage
+  Battery Status, BIOS/Hardware Health, Fan Redundancy, Fans, Memory, Network, Power Status, Power
+  Supplies, Processors, Storage, Temperatures), hỏi so sánh với phạm vi giám sát hiện tại. Đối
+  chiếu: hệ thống chỉ đọc đúng 1/12 mục (Storage). Probe trực tiếp trên iLO thật (Hyperv-01/02/
+  Hyprver03) tìm ra 8 mục có nguồn Redfish rõ ràng (bỏ BIOS/Hardware Health, Fan Redundancy, Network
+  — chưa có field đáng tin) — user chọn triển khai đủ 8 mục. Trong lúc probe phát hiện **sự cố thật
+  đang xảy ra**: Hyprver03 PSU Bay1 Critical/Offline (`ACPowerLost`), 2 quạt Absent — dùng chính ca
+  này để verify thiết kế "Power Redundancy" đúng. Chi tiết đầy đủ (endpoint, field, thiết kế
+  3-group độc lập, giới hạn đã biết): xem mục "iLO Redfish" → "Mở rộng ngoài RAID" ở trên. Đổi tên
+  `AlertRule.RAID_HEALTH_NAMES` → `HEALTH_CODE_NAMES` (dùng chung 8 metric, không chỉ RAID). 7 rule
+  seed mới + 8 field mới trên `HardwareHealth` (migration `0010_...`). 25 test mới (11 collector +
+  8 alert + rà soát 7 test collector cũ dùng `fake_get` phải thêm nhánh trả 404 cho 3 endpoint mới
+  vì `collect_raw()` giờ gọi unconditional — không phải bug, chỉ là test cũ cần biết endpoint mới
+  tồn tại). 498 test pass (473 cũ + 25 mới, số cũ ước tính từ lần chạy suite trước đó), 2 skip như
+  cũ, `manage.py check` sạch.
+- **2026-09-29 (cùng ngày, vòng 4, review ngoài bắt tiếp cùng họ bug ở 3 collection CON)**:
   User chỉ đúng: "các collection con `/LogicalDrives/`, `/DataDrives/` và `/StorageEnclosures/` vẫn
   coi HTTP 200 với JSON thiếu Members là danh sách rỗng hợp lệ. Khi đó cờ `*_complete` giữ `True`,
   nên snapshot có thể ghi số đĩa mất hoặc enclosure bất thường bằng 0 và resolve alert sai. Collection

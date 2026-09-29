@@ -58,6 +58,31 @@ các nhánh lỗi root khác, `poll_all_ilo` tự bỏ qua không lưu; (2) `nor
 lập (đề phòng raw dựng tay/gọi trực tiếp không qua `collect_raw()`) — `controllers_list` rỗng thì
 hạ cả 3 cờ `disks_complete`/`enclosures_complete`/`logical_drives_complete` về `False`. Suy ra từ
 đọc code, CHƯA verify trên iLO thật (chưa từng quan sát `Members` rỗng khi status=200).
+
+Mở rộng ngoài RAID (2026-09-29, cùng ngày): thêm 3 nhóm dữ liệu ĐỘC LẬP với RAID/`controllers`
+(mỗi nhóm = 1 GET phẳng, all-or-nothing — KHÁC hẳn pattern nested completeness-flag của RAID vì
+Fans/Temperatures/PowerSupplies/Redundancy/Battery đã nhúng sẵn đầy đủ trong 1 document, không
+cần fetch từng member riêng như LogicalDrives):
+- `Systems/1/` → `Oem.Hp.Battery[]` (Smart Storage Battery), `Oem.Hp.DeviceDiscoveryComplete.
+  AMSDeviceDiscovery` (Agentless Management Service, chỉ hiển thị — KHÔNG phải lỗi phần cứng nên
+  không có alert rule), `ProcessorSummary`/`MemorySummary.Status.HealthRollUp`.
+- `Chassis/1/Thermal/` → `Fans[]`, `Temperatures[]` (44 sensor trên DL380 Gen9, phần lớn `Absent`
+  do server 1 CPU — bỏ qua sensor Absent khi tính "worst", không suy đoán trạng thái cho sensor
+  không tồn tại).
+- `Chassis/1/Power/` → `PowerSupplies[]`, `Redundancy[]`. ⚠️ Verify runtime 2026-09-29 (Hyprver03,
+  đang có PSU Bay1 thật Critical/Offline `ACPowerLost`): `Redundancy[]` schema này
+  (`PowerMetrics.0.11.0`, iLO4 cũ) KHÔNG có field `Status` ở tầng group — phải tự tính redundancy
+  từ `MinNumNeeded` + đếm PSU "OK" (xem `_compute_power_redundancy`). `RedundancySet[]["@odata.id"]`
+  dạng `".../Power#/PowerSupplies/<N>"` là JSON Pointer fragment (RFC 6901) — `<N>` là index mảng
+  `PowerSupplies` theo đặc tả, verify khớp thật (index 0 = Bay1 Critical, 1 = Bay2 OK).
+
+Giới hạn đã biết (ghi rõ, không thiết kế lại cho tình huống chưa có thiết bị thật):
+- 3 nhóm mới vẫn phụ thuộc root `ArrayControllers/` đã xác thực OK trước đó (nếu root 401/404/lỗi
+  thì `collect_raw()` trả `None` ngay từ đầu, không tới các nhóm mới) — 1 HyperV host có iLO nhưng
+  KHÔNG có Smart Array/RAID controller sẽ không bao giờ lấy được 8 mục mới dù chúng không liên
+  quan RAID. Vô hại với fleet hiện tại (cả 3 host đều P440ar).
+- `Oem.Hp` chỉ verify trên iLO4 (cả 3 host thật). iLO5 có thể dùng namespace OEM khác (`Oem.Hpe`)
+  — CHƯA có thiết bị iLO5 để verify, không viết fallback đoán mò.
 """
 from __future__ import annotations
 
@@ -140,7 +165,57 @@ class IloRedfishClient:
             )
             return None
 
-        return {"controllers": controllers}
+        return {
+            "controllers": controllers,
+            # 3 nhóm mở rộng ngoài RAID (xem docstring module "Mở rộng ngoài RAID") — độc lập với
+            # controllers VÀ độc lập với nhau: 1 nhóm lỗi (None) không xoá dữ liệu nhóm khác đã
+            # fetch thành công.
+            "system_summary": self._collect_system_summary(session, base),
+            "thermal": self._collect_thermal(session, base),
+            "power": self._collect_power(session, base),
+        }
+
+    def _collect_system_summary(self, session: requests.Session, base: str) -> dict[str, Any] | None:
+        """Battery/AMS/Processor/Memory — tất cả nằm chung 1 document `Systems/1/` (1 GET, không
+        cần fetch từng member như ArrayControllers)."""
+        device = self.device
+        status, body = self._get(session, base, "/redfish/v1/Systems/1/")
+        if status != 200 or not isinstance(body, dict):
+            logger.warning("iLO %s: không lấy được Systems/1/ (HTTP %s)", device.name, status)
+            return None
+        oem_hp = (body.get("Oem") or {}).get("Hp")
+        if not isinstance(oem_hp, dict):
+            logger.warning(
+                "iLO %s: Systems/1/ thiếu Oem.Hp — schema khác (iLO5 dùng Oem.Hpe? chưa verify "
+                "trên thiết bị thật, xem docstring module)", device.name,
+            )
+            return None
+        return {
+            "battery": oem_hp.get("Battery") or [],
+            "ams_device_discovery": (oem_hp.get("DeviceDiscoveryComplete") or {}).get("AMSDeviceDiscovery") or "",
+            "processor_health": ((body.get("ProcessorSummary") or {}).get("Status") or {}).get("HealthRollUp"),
+            "memory_health": ((body.get("MemorySummary") or {}).get("Status") or {}).get("HealthRollUp"),
+        }
+
+    def _collect_thermal(self, session: requests.Session, base: str) -> dict[str, Any] | None:
+        """Fans[]/Temperatures[] — 1 document phẳng `Chassis/1/Thermal/`, mỗi phần tử đã có sẵn
+        Status.Health (khi State=Enabled) hoặc chỉ State=Absent (bỏ qua khi tính worst — verify
+        runtime: DL380 Gen9 1-CPU có nhiều fan bay/sensor Absent theo thiết kế, không phải lỗi)."""
+        device = self.device
+        status, body = self._get(session, base, "/redfish/v1/Chassis/1/Thermal/")
+        if status != 200 or not isinstance(body, dict):
+            logger.warning("iLO %s: không lấy được Chassis/1/Thermal/ (HTTP %s)", device.name, status)
+            return None
+        return {"fans": body.get("Fans") or [], "temperatures": body.get("Temperatures") or []}
+
+    def _collect_power(self, session: requests.Session, base: str) -> dict[str, Any] | None:
+        """PowerSupplies[]/Redundancy[] — 1 document phẳng `Chassis/1/Power/`."""
+        device = self.device
+        status, body = self._get(session, base, "/redfish/v1/Chassis/1/Power/")
+        if status != 200 or not isinstance(body, dict):
+            logger.warning("iLO %s: không lấy được Chassis/1/Power/ (HTTP %s)", device.name, status)
+            return None
+        return {"power_supplies": body.get("PowerSupplies") or [], "redundancy": body.get("Redundancy") or []}
 
     @staticmethod
     def _members(payload: dict | None) -> list[dict] | None:
@@ -411,11 +486,77 @@ class IloRedfishClient:
         # giá trị KHÔNG-null gần nhất trước đó thay vì coi 1 poll không đầy đủ là "đã hồi phục"
         # (bug phát hiện qua review 2026-09-29, vòng 2 mở rộng sang detail-fetch của từng LD/
         # enclosure member — vòng 1 chỉ mới che lỗi ở tầng list).
+        # 7 field mở rộng ngoài RAID (Battery/AMS/Processor/Memory/Fan/Temperature/PowerSupply +
+        # Power Redundancy) — bọc try/except RIÊNG, tách khỏi phần tính RAID ở trên: 1 bug ở logic
+        # mới (vd parse index redundancy lỗi) không được phép làm mất 4 field RAID đã tính đúng
+        # trong cùng data dict này (xem docstring module "Mở rộng ngoài RAID").
+        battery_code = processor_code = memory_code = None
+        fan_code = temperature_code = psu_code = power_redundancy_ok = None
+        ams_device_discovery = ""
+        try:
+            system_summary = raw.get("system_summary")
+            if system_summary:
+                battery_codes = [
+                    c for c in (
+                        self._health_code(b.get("Condition"), device_name, f"battery {b.get('Index')}")
+                        for b in system_summary.get("battery", [])
+                    ) if c is not None
+                ]
+                battery_code = max(battery_codes) if battery_codes else None
+                ams_device_discovery = system_summary.get("ams_device_discovery", "")
+                processor_code = self._health_code(system_summary.get("processor_health"), device_name, "processor summary")
+                memory_code = self._health_code(system_summary.get("memory_health"), device_name, "memory summary")
+
+            thermal = raw.get("thermal")
+            if thermal:
+                fan_codes = [
+                    c for c in (
+                        self._health_code((f.get("Status") or {}).get("Health"), device_name, f"fan {f.get('FanName')}")
+                        for f in thermal.get("fans", [])
+                    ) if c is not None
+                ]
+                fan_code = max(fan_codes) if fan_codes else None
+                temp_codes = [
+                    c for c in (
+                        self._health_code((t.get("Status") or {}).get("Health"), device_name, f"temperature {t.get('Name')}")
+                        for t in thermal.get("temperatures", [])
+                    ) if c is not None
+                ]
+                temperature_code = max(temp_codes) if temp_codes else None
+
+            power = raw.get("power")
+            if power:
+                psu_list = power.get("power_supplies", [])
+                psu_codes = [
+                    c for c in (
+                        self._health_code((p.get("Status") or {}).get("Health"), device_name, "power supply")
+                        for p in psu_list
+                    ) if c is not None
+                ]
+                psu_code = max(psu_codes) if psu_codes else None
+                power_redundancy_ok = self._compute_power_redundancy(psu_list, power.get("redundancy", []))
+        except Exception:
+            logger.exception(
+                "iLO %s: lỗi tính hardware-health mở rộng (Battery/AMS/Processor/Memory/Fan/"
+                "Temperature/PowerSupply) — không ảnh hưởng 4 field RAID ở trên", device_name,
+            )
+            battery_code = processor_code = memory_code = None
+            fan_code = temperature_code = psu_code = power_redundancy_ok = None
+            ams_device_discovery = ""
+
         return {
             "controller_health_code": max(controller_codes) if controller_codes else None,
             "logical_drive_worst_code": max(ld_codes) if (logical_drives_complete and ld_codes) else None,
             "missing_disk_count": missing_count if disks_complete else None,
             "enclosure_mismatch_count": enclosure_mismatch if (disks_complete and enclosures_complete) else None,
+            "battery_health_code": battery_code,
+            "ams_device_discovery": ams_device_discovery,
+            "processor_health_code": processor_code,
+            "memory_health_code": memory_code,
+            "fan_worst_code": fan_code,
+            "temperature_worst_code": temperature_code,
+            "power_supply_worst_code": psu_code,
+            "power_redundancy_ok": power_redundancy_ok,
             "raw": raw,
         }
 
@@ -444,6 +585,34 @@ class IloRedfishClient:
             if bay_count > 0 and present_by_prefix.get(prefix, 0) == 0:
                 mismatch += 1
         return mismatch
+
+    @staticmethod
+    def _compute_power_redundancy(psu_list: list[dict], redundancy_groups: list[dict]) -> bool | None:
+        """True nếu MỌI redundancy group đủ PSU "OK" >= MinNumNeeded; None nếu 0 group (không áp
+        dụng, vd host 1 PSU). `RedundancySet[]["@odata.id"]` dạng ".../Power#/PowerSupplies/<N>"
+        là JSON Pointer fragment (RFC 6901) — `<N>` là index mảng `PowerSupplies` theo đặc tả,
+        verify khớp thật 2026-09-29 (Hyprver03: index 0=Bay1 Critical/Offline thật, 1=Bay2 OK,
+        đúng thứ tự mảng). KHÔNG dùng `Redundancy[].Status` — schema `PowerMetrics.0.11.0` (iLO4
+        cũ) không có field Status ở tầng group này (verify: JSON đầy đủ không có key "Status"
+        trong Redundancy[0])."""
+        if not redundancy_groups:
+            return None
+        for group in redundancy_groups:
+            needed = group.get("MinNumNeeded") or 0
+            ok_count = 0
+            for ref in group.get("RedundancySet", []):
+                uri = ref.get("@odata.id") or ""
+                try:
+                    idx = int(uri.rstrip("/").rsplit("/", 1)[-1])
+                except ValueError:
+                    continue
+                if 0 <= idx < len(psu_list):
+                    health = ((psu_list[idx].get("Status") or {}).get("Health") or "").upper()
+                    if health == "OK":
+                        ok_count += 1
+            if ok_count < needed:
+                return False
+        return True
 
     @staticmethod
     def _health_code(health_value: Any, device_name: str, context: str) -> int | None:

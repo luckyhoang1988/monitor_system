@@ -56,12 +56,22 @@ class AlertRule(models.Model):
         "raid_logical_drive_health": "RAID Logical Drive Health (iLO)",
         "raid_missing_disk_count": "Số đĩa mất (iLO)",
         "raid_enclosure_mismatch": "Số enclosure bất thường (iLO)",
+        "ilo_battery_health": "Smart Storage Battery Health (iLO)",
+        "ilo_processor_health": "Processor Health (iLO)",
+        "ilo_memory_health": "Memory Health (iLO)",
+        "ilo_fan_health": "Fan Health (iLO)",
+        "ilo_temperature_health": "Temperature Health (iLO)",
+        "ilo_power_supply_health": "Power Supply Health (iLO)",
+        "ilo_power_redundancy": "Power Redundancy (iLO)",
     }
 
-    # Scale health code dùng chung controller/logical drive (verify runtime iLO4 P440ar
-    # 2026-09-28, xem apps/metrics/models.py HardwareHealth). Dùng chung cho threshold_label ở
-    # đây và _fmt_metric trong apps/alerts/engine.py — tránh lệch nếu ai chỉ sửa 1 chỗ.
-    RAID_HEALTH_NAMES = {0: "OK", 1: "Warning", 2: "Critical"}
+    # Scale health code dùng chung cho mọi metric dạng OK/Warning/Critical (RAID controller/logical
+    # drive + 6 metric iLO mở rộng 2026-09-29: Battery/Processor/Memory/Fan/Temperature/PowerSupply
+    # — verify runtime iLO4 P440ar 2026-09-28/29, xem apps/metrics/models.py HardwareHealth). Đổi
+    # tên từ RAID_HEALTH_NAMES (tên cũ chỉ đúng khi còn 2 metric RAID, nay dùng chung 8 metric nên
+    # giữ tên cũ sẽ gây hiểu lầm cho người đọc sau). Dùng chung cho threshold_label ở đây và
+    # _fmt_metric trong apps/alerts/engine.py — tránh lệch nếu ai chỉ sửa 1 chỗ.
+    HEALTH_CODE_NAMES = {0: "OK", 1: "Warning", 2: "Critical"}
 
     name         = models.CharField(max_length=100, unique=True, verbose_name="Tên rule")
     device_type  = models.CharField(max_length=20, default="all",
@@ -118,10 +128,14 @@ class AlertRule(models.Model):
             return f"{t:.2f}"
         if m == "avg_io_size_kb":
             return f"{t:.1f} KB"
-        if m in ("raid_controller_health", "raid_logical_drive_health"):
-            return self.RAID_HEALTH_NAMES.get(int(t), f"code={t:.0f}")
+        if m in ("raid_controller_health", "raid_logical_drive_health",
+                 "ilo_battery_health", "ilo_processor_health", "ilo_memory_health",
+                 "ilo_fan_health", "ilo_temperature_health", "ilo_power_supply_health"):
+            return self.HEALTH_CODE_NAMES.get(int(t), f"code={t:.0f}")
         if m in ("raid_missing_disk_count", "raid_enclosure_mismatch"):
             return f"{t:.0f}"
+        if m == "ilo_power_redundancy":
+            return "OK" if t == 1 else "DEGRADED"
         return f"{t:.2f}"
 
 

@@ -131,6 +131,84 @@ class TestCheckDeviceAlertsIlo:
         assert "2.00" not in alert.message
 
 
+@pytest.mark.django_db
+class TestLatestIloExtended:
+    """Regression 2026-09-29: mở rộng ngoài RAID (Battery/Processor/Memory/Fan/Temperature/
+    PowerSupply/Power Redundancy) — _ILO_FIELD_MAP/_latest_ilo đã generic theo field name, chỉ
+    cần verify wiring đúng, không cần sửa logic."""
+
+    def test_returns_latest_value_for_power_supply_and_redundancy(self):
+        device = HyperVDeviceFactory(ilo_ip_address="10.0.198.254")
+        HardwareHealth.objects.create(
+            device=device, timestamp=now() - timedelta(minutes=5),
+            power_supply_worst_code=2, power_redundancy_ok=False,
+            battery_health_code=1, fan_worst_code=0,
+        )
+        assert _latest_ilo(device, since(), "ilo_power_supply_health") == 2.0
+        # BooleanField False -> float(False) == 0.0 qua values_list, không cần sửa _latest_ilo.
+        assert _latest_ilo(device, since(), "ilo_power_redundancy") == 0.0
+        assert _latest_ilo(device, since(), "ilo_battery_health") == 1.0
+        assert _latest_ilo(device, since(), "ilo_fan_health") == 0.0
+
+    def test_none_when_field_is_null(self):
+        device = HyperVDeviceFactory(ilo_ip_address="10.0.198.254")
+        HardwareHealth.objects.create(device=device, timestamp=now(), power_redundancy_ok=None)
+        assert _latest_ilo(device, since(), "ilo_power_redundancy") is None
+
+
+@pytest.mark.django_db
+class TestCheckDeviceAlertsIloExtended:
+    def test_fires_critical_on_power_not_redundant_matches_real_hyprver03_case(self):
+        """Mirror sự cố PSU thật Hyprver03 2026-09-29 (PSU Bay1 Critical/Offline ACPowerLost,
+        Bay2 OK, MinNumNeeded=2) -> power_redundancy_ok=False -> rule 'HyperV Power Not
+        Redundant' (condition=eq, threshold=0.0) phải fire CRITICAL."""
+        device = HyperVDeviceFactory(ilo_ip_address="10.0.198.254")
+        rule = make_rule(
+            name="HyperV Power Not Redundant", metric="ilo_power_redundancy",
+            condition="eq", threshold=0.0, severity="CRITICAL",
+        )
+        HardwareHealth.objects.create(
+            device=device, timestamp=now(), power_redundancy_ok=False, power_supply_worst_code=2,
+        )
+
+        check_device_alerts(device, since())
+
+        alert = Alert.objects.get(device=device, rule=rule, is_active=True)
+        assert "ilo_power_redundancy" not in alert.message
+        assert "Power Redundancy (iLO)" in alert.message
+        assert "DEGRADED" in alert.message
+
+    def test_resolves_when_redundancy_restored(self):
+        device = HyperVDeviceFactory(ilo_ip_address="10.0.198.254")
+        rule = make_rule(
+            name="HyperV Power Not Redundant", metric="ilo_power_redundancy",
+            condition="eq", threshold=0.0, severity="CRITICAL",
+        )
+        HardwareHealth.objects.create(device=device, timestamp=now() - timedelta(minutes=5), power_redundancy_ok=False)
+        check_device_alerts(device, since())
+        assert Alert.objects.filter(device=device, rule=rule, is_active=True).exists()
+
+        HardwareHealth.objects.create(device=device, timestamp=now(), power_redundancy_ok=True)
+        check_device_alerts(device, since())
+
+        assert not Alert.objects.filter(device=device, rule=rule, is_active=True).exists()
+
+    def test_battery_degraded_message_is_human_readable(self):
+        device = HyperVDeviceFactory(ilo_ip_address="10.0.198.254")
+        rule = make_rule(
+            name="HyperV Battery Warning+", metric="ilo_battery_health",
+            condition="gte", threshold=1.0, severity="WARNING",
+        )
+        HardwareHealth.objects.create(device=device, timestamp=now(), battery_health_code=1)
+
+        check_device_alerts(device, since())
+
+        alert = Alert.objects.get(device=device, rule=rule, is_active=True)
+        assert "ilo_battery_health" not in alert.message
+        assert "Smart Storage Battery Health (iLO)" in alert.message
+        assert "Warning" in alert.message
+
+
 class TestMetricChoicesIncludeIlo:
     """Regression: apps/alerts/forms.py::METRIC_CHOICES từng tự chép tay và thiếu 4 metric
     raid_* (+ 11 metric host-perf HyperV) — dropdown sửa rule không có option khớp giá trị đang
@@ -151,4 +229,11 @@ class TestMetricChoicesIncludeIlo:
             "raid_logical_drive_health",
             "raid_missing_disk_count",
             "raid_enclosure_mismatch",
+            "ilo_battery_health",
+            "ilo_processor_health",
+            "ilo_memory_health",
+            "ilo_fan_health",
+            "ilo_temperature_health",
+            "ilo_power_supply_health",
+            "ilo_power_redundancy",
         } <= keys

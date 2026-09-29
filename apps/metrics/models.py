@@ -285,8 +285,21 @@ class HardwareHealth(models.Model):
     logical_drive_worst_code = models.IntegerField(null=True, blank=True, verbose_name="Logical Drive Health (worst)")
     missing_disk_count = models.IntegerField(null=True, blank=True, verbose_name="Số đĩa mất (404)")
     enclosure_mismatch_count = models.IntegerField(null=True, blank=True, verbose_name="Số enclosure bất thường")
-    # Detail đầy đủ controllers[]/logical_drives[]/disks[]/enclosures[] cho UI — không dùng để
-    # rollup/alert (chỉ 4 field code ở trên dùng cho alert engine).
+    # 8 field mở rộng 2026-09-29 — Battery/AMS/Processor/Memory từ Systems/1/, Fan/Temperature từ
+    # Chassis/1/Thermal/, PowerSupply/Redundancy từ Chassis/1/Power/ (xem apps/collectors/ilo_redfish.py
+    # docstring mục "Mở rộng ngoài RAID"). Cùng scale 0/1/2 như 2 field controller/LD ở trên, trừ
+    # power_redundancy_ok (Boolean, không có state trung gian) và ams_device_discovery (string mô tả,
+    # không phải health — không alert).
+    battery_health_code = models.IntegerField(null=True, blank=True, verbose_name="Smart Storage Battery Health")
+    ams_device_discovery = models.CharField(max_length=40, blank=True, default="", verbose_name="Agentless Management Service")
+    processor_health_code = models.IntegerField(null=True, blank=True, verbose_name="Processor Health")
+    memory_health_code = models.IntegerField(null=True, blank=True, verbose_name="Memory Health")
+    fan_worst_code = models.IntegerField(null=True, blank=True, verbose_name="Fan Health (worst)")
+    temperature_worst_code = models.IntegerField(null=True, blank=True, verbose_name="Temperature Health (worst)")
+    power_supply_worst_code = models.IntegerField(null=True, blank=True, verbose_name="Power Supply Health (worst)")
+    power_redundancy_ok = models.BooleanField(null=True, blank=True, verbose_name="Power Redundancy OK")
+    # Detail đầy đủ controllers[]/logical_drives[]/disks[]/enclosures[] + system_summary/thermal/power
+    # cho UI — không dùng để rollup/alert (chỉ các field code/boolean ở trên dùng cho alert engine).
     raw = models.JSONField(default=dict, blank=True)
 
     class Meta:

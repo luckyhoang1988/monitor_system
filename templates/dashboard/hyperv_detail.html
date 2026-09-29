@@ -327,6 +327,51 @@
         <i class="bi bi-hdd-rack fs-2 d-block mb-2"></i>Chưa có dữ liệu iLO. Chờ vòng poll_all_ilo kế tiếp (mặc định mỗi 300s).
       </div>
     {% else %}
+      <!-- System Health Summary (2026-09-29) — Battery/Processor/Memory/Fan/Temperature/PowerSupply/
+           Redundancy đọc TRỰC TIẾP từ field code trên latest_hardware_health (0/1/2), KHÔNG qua raw
+           JSON như card Controller/LD/Disk/Enclosure bên dưới — các mục này chỉ cần badge tóm tắt
+           "worst", không cần hiển thị chi tiết từng item con (44 sensor nhiệt độ quá nhiều cho UI). -->
+      <div class="d-flex flex-wrap gap-2 mb-4 pb-4 border-bottom">
+        {% with code=latest_hardware_health.battery_health_code %}
+        <span class="badge {% if code == 0 %}bg-success{% elif code == 1 %}bg-warning text-dark{% elif code == 2 %}bg-danger{% else %}bg-secondary{% endif %}">
+          Battery: {% if code == 0 %}OK{% elif code == 1 %}Warning{% elif code == 2 %}Critical{% else %}—{% endif %}
+        </span>
+        {% endwith %}
+        {% with code=latest_hardware_health.processor_health_code %}
+        <span class="badge {% if code == 0 %}bg-success{% elif code == 1 %}bg-warning text-dark{% elif code == 2 %}bg-danger{% else %}bg-secondary{% endif %}">
+          Processors: {% if code == 0 %}OK{% elif code == 1 %}Warning{% elif code == 2 %}Critical{% else %}—{% endif %}
+        </span>
+        {% endwith %}
+        {% with code=latest_hardware_health.memory_health_code %}
+        <span class="badge {% if code == 0 %}bg-success{% elif code == 1 %}bg-warning text-dark{% elif code == 2 %}bg-danger{% else %}bg-secondary{% endif %}">
+          Memory: {% if code == 0 %}OK{% elif code == 1 %}Warning{% elif code == 2 %}Critical{% else %}—{% endif %}
+        </span>
+        {% endwith %}
+        {% with code=latest_hardware_health.fan_worst_code %}
+        <span class="badge {% if code == 0 %}bg-success{% elif code == 1 %}bg-warning text-dark{% elif code == 2 %}bg-danger{% else %}bg-secondary{% endif %}">
+          Fans: {% if code == 0 %}OK{% elif code == 1 %}Warning{% elif code == 2 %}Critical{% else %}—{% endif %}
+        </span>
+        {% endwith %}
+        {% with code=latest_hardware_health.temperature_worst_code %}
+        <span class="badge {% if code == 0 %}bg-success{% elif code == 1 %}bg-warning text-dark{% elif code == 2 %}bg-danger{% else %}bg-secondary{% endif %}">
+          Temperatures: {% if code == 0 %}OK{% elif code == 1 %}Warning{% elif code == 2 %}Critical{% else %}—{% endif %}
+        </span>
+        {% endwith %}
+        {% with code=latest_hardware_health.power_supply_worst_code %}
+        <span class="badge {% if code == 0 %}bg-success{% elif code == 1 %}bg-warning text-dark{% elif code == 2 %}bg-danger{% else %}bg-secondary{% endif %}">
+          Power Supplies: {% if code == 0 %}OK{% elif code == 1 %}Warning{% elif code == 2 %}Critical{% else %}—{% endif %}
+        </span>
+        {% endwith %}
+        {% with ok=latest_hardware_health.power_redundancy_ok %}
+        <span class="badge {% if ok == True %}bg-success{% elif ok == False %}bg-danger{% else %}bg-secondary{% endif %}">
+          Power Redundancy: {% if ok == True %}OK{% elif ok == False %}DEGRADED{% else %}—{% endif %}
+        </span>
+        {% endwith %}
+        {% if latest_hardware_health.ams_device_discovery %}
+        <span class="badge bg-secondary">AMS: {{ latest_hardware_health.ams_device_discovery }}</span>
+        {% endif %}
+      </div>
+
       {% for c in latest_hardware_health.raw.controllers %}
       <div class="mb-4 {% if not forloop.last %}border-bottom pb-4{% endif %}">
         <div class="d-flex align-items-center flex-wrap gap-2 mb-2">
