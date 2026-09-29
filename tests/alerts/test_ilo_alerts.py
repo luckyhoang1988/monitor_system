@@ -80,6 +80,27 @@ class TestCheckDeviceAlertsIlo:
 
         assert not Alert.objects.filter(device=device, rule=rule, is_active=True).exists()
 
+    def test_incomplete_poll_does_not_falsely_resolve_missing_disk_alert(self):
+        """Regression 2026-09-29: poll không đầy đủ (endpoint con /LogicalDrives//DataDrives/
+        iLO lỗi) từng khiến normalize() ghi missing_disk_count=0 GIẢ (xem
+        apps/collectors/ilo_redfish.py) -> alert bị resolve dù RAID thật chưa chắc đã hồi phục.
+        Nay poll không đầy đủ phải ghi None (không phải 0) -- _latest_ilo lọc
+        `missing_disk_count__isnull=False` nên tự rơi về giá trị KHÔNG-null gần nhất (2) thay vì
+        coi None là "đã về 0", alert phải VẪN active."""
+        device = HyperVDeviceFactory(ilo_ip_address="10.0.198.254")
+        rule = make_rule(metric="raid_missing_disk_count", condition="gte", threshold=1.0)
+        HardwareHealth.objects.create(
+            device=device, timestamp=now() - timedelta(minutes=5), missing_disk_count=2,
+        )
+        check_device_alerts(device, since())
+        assert Alert.objects.filter(device=device, rule=rule, is_active=True).exists()
+
+        # Poll kế tiếp KHÔNG đầy đủ (giả lập endpoint con lỗi) -- field None, KHÔNG phải 0.
+        HardwareHealth.objects.create(device=device, timestamp=now(), missing_disk_count=None)
+        check_device_alerts(device, since())
+
+        assert Alert.objects.filter(device=device, rule=rule, is_active=True).exists()
+
     def test_does_not_fire_for_non_hyperv_device(self):
         from tests.conftest import CiscoSNMPDeviceFactory
         device = CiscoSNMPDeviceFactory()
@@ -88,3 +109,46 @@ class TestCheckDeviceAlertsIlo:
         # cũng xác nhận rule không áp dụng nhầm device_type khác qua device_type filter.
         check_device_alerts(device, since())
         assert not Alert.objects.filter(device=device, rule=rule).exists()
+
+    def test_controller_critical_message_is_human_readable(self):
+        """Regression: _fmt_metric() từng không có nhánh raid_* (rơi về f"{v:.2f}") và message
+        dùng rule.metric thô — tin nhắn thực tế trước fix là
+        "Hyperv-02: raid_controller_health = 2.00 (ngưỡng gte 2.00)". Nay phải đọc được: dùng
+        metric_label + tên health code (OK/Warning/Critical) thay vì số thô."""
+        device = HyperVDeviceFactory(ilo_ip_address="10.0.198.254")
+        rule = make_rule(
+            name="HyperV RAID Controller Critical",
+            metric="raid_controller_health", condition="gte", threshold=2.0,
+        )
+        HardwareHealth.objects.create(device=device, timestamp=now(), controller_health_code=2)
+
+        check_device_alerts(device, since())
+
+        alert = Alert.objects.get(device=device, rule=rule, is_active=True)
+        assert "raid_controller_health" not in alert.message
+        assert "RAID Controller Health (iLO)" in alert.message
+        assert "Critical" in alert.message
+        assert "2.00" not in alert.message
+
+
+class TestMetricChoicesIncludeIlo:
+    """Regression: apps/alerts/forms.py::METRIC_CHOICES từng tự chép tay và thiếu 4 metric
+    raid_* (+ 11 metric host-perf HyperV) — dropdown sửa rule không có option khớp giá trị đang
+    lưu, HTML <select> tự chọn option đầu tiên, bấm Lưu âm thầm đổi sai metric của rule. Nay
+    forms.METRIC_CHOICES phải đọc thẳng từ AlertRule.METRIC_LABELS (nguồn sự thật duy nhất)."""
+
+    def test_metric_choices_is_built_from_alertrule_metric_labels(self):
+        from apps.alerts.forms import METRIC_CHOICES
+
+        assert dict(METRIC_CHOICES) == AlertRule.METRIC_LABELS
+
+    def test_metric_choices_contains_all_ilo_metrics(self):
+        from apps.alerts.forms import METRIC_CHOICES
+
+        keys = {k for k, _ in METRIC_CHOICES}
+        assert {
+            "raid_controller_health",
+            "raid_logical_drive_health",
+            "raid_missing_disk_count",
+            "raid_enclosure_mismatch",
+        } <= keys

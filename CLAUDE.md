@@ -399,14 +399,43 @@ sustain): `raid_controller_health >= 2` (Critical), `raid_logical_drive_health >
 → vòng `poll_all_ilo` đầu tiên (20.3s/2-3 host) ghi đúng `HardwareHealth` (Hyperv-02:
 `controller=2,ld_worst=1,missing=2,enclosure_mismatch=1`; Hyprver03: toàn `0` — khớp Redfish dump
 thủ công trước đó) → `evaluate_alert_rules` (safety net, 90s) fire đúng cả 3 alert ngay vòng đầu →
-Telegram gửi thành công cả 3 (`AlertNotification.status="sent"`). ⚠️ **Hyperv-01 (`10.0.198.253`)
-trả 401 Unauthorized** — user cần nhập lại đúng username/password iLO qua UI (mỗi iLO có local
-admin credential riêng, không nhất thiết giống Hyperv-02/Hyprver03).
+Telegram gửi thành công cả 3 (`AlertNotification.status="sent"`). Hyperv-01 (`10.0.198.253`) từng
+trả 401 Unauthorized (password nhập sai qua UI, mỗi iLO có local admin credential riêng) —
+**đã fix cùng ngày 2026-09-28** (user cung cấp lại đúng password, cập nhật qua Django ORM, verify
+`collect_raw()` thành công) — cả 3 host Hyperv-01/02/Hyprver03 đều kết nối iLO OK từ đó. Chi tiết:
+memory `ilo-raid-monitoring.md` mục "Trạng thái rollout iLO IP".
 - ⚠️ Chưa test qua `_poll_device_once`/inline alert eval — `poll_all_ilo` KHÔNG gọi
   `check_device_alerts` ngay sau khi ghi (khác pattern `_poll_device_once`), dựa hoàn toàn vào
   `evaluate_alert_rules` (safety net, 90s) để phát hiện — vẫn đủ nhanh cho ngưỡng "sự cố phần cứng"
   (không phải mili-giây) nhưng khác 1 chút so với pattern "eval inline sau mỗi poll" mô tả ở mục
   "Online/offline" bên dưới (pattern đó áp cho `_poll_device_once`, không áp cho `poll_all_ilo`).
+- ⚠️ **Fix 2026-09-29** (review ngoài phát hiện, xem "Thay đổi quan trọng" cùng ngày): poll không
+  đầy đủ (fetch lỗi ở sub-endpoint `/LogicalDrives/`/`/DataDrives/`/`/StorageEnclosures/`, KHÔNG
+  phải lỗi toàn phần ở `ArrayControllers/` gốc) từng bị `normalize()` âm thầm tính ra
+  `missing_disk_count=0`/`enclosure_mismatch_count=0` GIẢ (list rỗng do fetch lỗi, không phải do
+  đã verify sạch) → alert engine đọc 0 này tưởng RAID đã hồi phục, tự resolve giả. Fix: 2 field
+  này trả `None` (không phải 0) khi `_collect_controller` không lấy đủ dữ liệu con —
+  `_latest_ilo`/`_sustained_ilo` vốn đã filter `__isnull=False` nên tự rơi về giá trị KHÔNG-null
+  gần nhất thay vì suy diễn "đã hồi phục". Xem `apps/collectors/ilo_redfish.py` docstring module.
+  ⚠️ **Vòng 2 cùng ngày**: fix trên chỉ che lỗi ở tầng LIST (`/LogicalDrives/`/`/DataDrives/`/
+  `/StorageEnclosures/`) — lỗi fetch DETAIL của từng member riêng lẻ (`LogicalDrives/{ld}/`,
+  `StorageEnclosures/{n}/`) vẫn bị nuốt im lặng (chỉ bỏ qua khỏi list, không hạ cờ complete), khiến
+  `logical_drive_worst_code`/`enclosure_mismatch_count` có thể tính ra kết quả TỐT HƠN thực tế nếu
+  đúng member lỗi fetch là cái đang Critical/mismatch. Fix: thêm cờ `logical_drives_complete`
+  (song song `disks_complete`/`enclosures_complete`), mở rộng theo dõi cả tầng detail-member. Xem
+  "Thay đổi quan trọng" cùng ngày (vòng 2) + `apps/collectors/ilo_redfish.py` docstring module.
+  ⚠️ **Vòng 3 cùng ngày**: bug tương tự ở tầng GỐC — `ArrayControllers/` root trả HTTP 200 nhưng
+  `Members` rỗng/thiếu (`ac_root` vẫn TRUTHY nên không trúng check lỗi root sẵn có) → `controllers=[]`
+  → `normalize()` vòng for không chạy → mọi counter/cờ giữ nguyên khởi tạo (`0`/`True`) → trông như
+  "đã verify sạch" dù KHÔNG đọc được controller nào. Fix: `collect_raw()` tự trả `None` khi
+  `controllers` rỗng (giống các nhánh lỗi root khác); `normalize()` phòng thủ độc lập thêm — 0
+  controller thì hạ cả 3 cờ complete. Xem "Thay đổi quan trọng" cùng ngày (vòng 3).
+  ⚠️ **Vòng 4 cùng ngày (rủi ro suy luận, CHƯA quan sát trên iLO thật)**: 3 collection CON
+  (`/LogicalDrives/`, `/DataDrives/`, `/StorageEnclosures/`) vẫn dùng `payload.get("Members", [])`
+  trực tiếp — gộp chung "Members: [] rỗng THẬT" (hợp lệ) với "JSON 200 nhưng thiếu hẳn key Members"
+  (bất thường) thành cùng 1 kết quả `[]`, khiến cờ complete không bị hạ. Fix: helper
+  `IloRedfishClient._members(payload)` (trả list hợp lệ hoặc `None`) áp dụng thống nhất cho cả 3
+  chỗ, thay pattern `.get("Members", [])`/check rời rạc cũ. Xem "Thay đổi quan trọng" (vòng 4).
 
 ## Celery Beat — `expire_seconds` bị reset mỗi lần `beat` restart (fix gốc 2026-07-07)
 > Phát hiện khi audit lại điều kiện poll HyperV — không phải bug riêng HyperV, ảnh hưởng
@@ -435,6 +464,169 @@ admin credential riêng, không nhất thiết giống Hyperv-02/Hyprver03).
   `expire_seconds` cùng giá trị, nếu không entry đó lặp lại đúng bug này.
 
 ### Thay đổi quan trọng
+- **2026-09-29 (cùng ngày, mới nhất — vòng 4, review ngoài bắt tiếp cùng họ bug ở 3 collection CON)**:
+  User chỉ đúng: "các collection con `/LogicalDrives/`, `/DataDrives/` và `/StorageEnclosures/` vẫn
+  coi HTTP 200 với JSON thiếu Members là danh sách rỗng hợp lệ. Khi đó cờ `*_complete` giữ `True`,
+  nên snapshot có thể ghi số đĩa mất hoặc enclosure bất thường bằng 0 và resolve alert sai. Collection
+  gốc đã phân biệt trường hợp thiếu Members, nhưng các collection con chưa làm vậy... Đây là rủi ro
+  với phản hồi JSON bất thường, chưa quan sát được trên iLO thật." Verify bằng đọc code trực tiếp
+  (đúng §0): xác nhận đúng — cả 3 chỗ (`LogicalDrives`, `DataDrives`, `StorageEnclosures`) dùng
+  `payload.get("Members", [])` (hoặc tương đương) trực tiếp, gộp chung "JSON đúng cấu trúc `Members:
+  []` rỗng THẬT" (hợp lệ) với "JSON 200 nhưng thiếu hẳn key `Members`/sai kiểu" (bất thường) thành
+  cùng kết quả `[]` — vòng for không chạy lần nào, cờ complete không bị hạ. `StorageEnclosures` còn
+  có biến thể tệ hơn: check cũ `encl_status == 200 and encl_list is not None` coi `encl_list={}`
+  (dict rỗng, thiếu Members) là `enclosures_complete=True` SAI, rồi `elif encl_list:` (truthy check)
+  lại bỏ qua vòng lặp vì `{}` falsy — không log, không hạ cờ, hoàn toàn im lặng. Fix: thêm helper
+  `IloRedfishClient._members(payload)` (staticmethod) — trả `payload["Members"]` nếu là list hợp lệ,
+  `None` nếu thiếu key hoặc không phải list; áp dụng thống nhất cho cả 3 sub-collection, thay hẳn
+  pattern `.get("Members", [])`/check rời rạc cũ. Case `None` → hạ đúng cờ tương ứng
+  (`disks_complete`/`logical_drives_complete` cho LogicalDrives+DataDrives,
+  `enclosures_complete` cho StorageEnclosures); case list rỗng THẬT vẫn giữ nguyên hợp lệ — KHÔNG
+  áp lý luận "nghiệp vụ ngầm định ≥1 phần tử" của vòng 3 xuống tầng này (chưa có bằng chứng 1 LD/
+  DataDrive/enclosure luôn ≥1, chỉ fix đúng phạm vi user chỉ ra là "JSON thiếu Members"). 3 test
+  mới (`test_logical_drives_json_missing_members_key_marks_incomplete`,
+  `test_data_drives_json_missing_members_key_marks_disks_incomplete`,
+  `test_storage_enclosures_json_missing_members_key_marks_incomplete` —
+  `tests/collectors/test_ilo_redfish.py`, mock JSON `{}`/thiếu key Members dù HTTP 200 thật, end-to-end
+  qua `collect_raw()`) — tự chứng minh bằng `git stash push -- apps/collectors/ilo_redfish.py` (giữ
+  test mới) → cả 3 FAIL đúng dự đoán (`KeyError: 'disks_complete'`/`'enclosures_complete'` — do stash
+  lùi về bản trước cả 4 vòng fix trong session, chưa từng có field này) → `git stash pop` khôi phục,
+  pass lại. 479 test pass (476+3 mới), 2 skip như cũ, `manage.py check` sạch. Quy tắc chung ghi vào
+  `/deploy` skill: `dict.get(key, <default rỗng>)` dùng để build list-để-lặp nên tự hỏi "default rỗng
+  này có đang che giấu 1 case lỗi/bất thường không". **Chưa deploy** — xem `/deploy` §4 trước khi lên
+  prod (đụng `apps/collectors/ilo_redfish.py`, chạy trong `worker`).
+- **2026-09-29 (cùng ngày, vòng 3, review ngoài bắt tiếp bug ở tầng GỐC `collect_raw()`)**:
+  User dán tiếp báo cáo, chỉ đúng 1 đường tương tự nhưng ở tầng CAO HƠN 2 vòng trước: "nếu
+  `/ArrayControllers/` trả HTTP 200 với `Members` rỗng/thiếu, collector trả `controllers=[]`.
+  `normalize()` khởi tạo bộ đếm bằng 0 và giữ trạng thái 'đầy đủ', nên có thể ghi
+  `missing_disk_count=0` rồi resolve cảnh báo mất đĩa dù không đọc được controller nào. Với host
+  đã giám sát RAID, snapshot không có controller nên được coi là chưa đủ bằng chứng để kết luận
+  recovery. Đây là tình huống suy ra từ code, chưa được kiểm chứng trên iLO thật." Verify bằng đọc
+  code trực tiếp (đúng §0, không đoán): xác nhận đúng — `ac_root.get("Members", [])` rỗng khi
+  `ac_root` là dict TRUTHY (vd `{"Members": []}`, khác `{}` falsy) nên KHÔNG trúng check
+  `if status != 200 or not ac_root:` đã có sẵn cho lỗi root (401/404/connection error) →
+  `controllers=[]` lọt qua, `collect_raw()` trả `{"controllers": []}` bình thường (không phải
+  `None`) → `normalize()` duyệt `raw["controllers"]` rỗng, vòng for KHÔNG chạy lần nào → mọi
+  counter/cờ giữ nguyên giá trị khởi tạo (`missing_count=0`, `enclosure_mismatch=0`,
+  `*_complete=True`) → trông giống hệt "đã verify sạch" dù thực ra KHÔNG đọc được controller nào —
+  đúng họ bug với vòng 1/2 (list/detail fetch lỗi bên trong 1 controller) nhưng ở tầng cao hơn:
+  thiếu HẲN controller, không phải thiếu sub-data bên trong 1 controller đã có. Fix 2 lớp: (1)
+  **`collect_raw()`** — `controllers` rỗng sau vòng lặp Members thì trả `None` y hệt các nhánh lỗi
+  root khác (401/404/connection error) — coi 0 controller trên host ĐÃ cấu hình `ilo_ip_address`
+  (ngầm định có RAID controller cần theo dõi) là thất bại, không phải "host không có RAID";
+  `poll_all_ilo` tự bỏ qua không lưu, không để lại `HardwareHealth` row nào; (2) **`normalize()`**
+  — phòng thủ độc lập thêm (đề phòng raw dựng tay/gọi trực tiếp không qua `collect_raw()`):
+  `controllers_list` rỗng thì tự hạ cả 3 cờ `disks_complete`/`enclosures_complete`/
+  `logical_drives_complete` về `False`, khiến 2 field đếm trả `None` thay vì 0. Sửa luôn test cũ
+  `test_no_controllers_returns_none_codes` (đổi tên thành `test_no_controllers_returns_none_for_everything`)
+  — assertion cũ `missing_disk_count == 0`/`enclosure_mismatch_count == 0` cho input rỗng đúng về
+  mặt toán học ("cộng dồn tập rỗng ra 0") nhưng SAI về ý nghĩa nghiệp vụ, encode đúng cái bug vừa
+  tìm ra; nay assert cả 4 field đều `None`. 3 test mới:
+  `test_returns_none_when_root_200_but_members_empty`,
+  `test_returns_none_when_root_200_but_no_members_key` (end-to-end qua `collect_raw()`, không phải
+  chỉ `normalize()`), cộng với việc sửa lại test cũ ở trên — tự chứng minh bằng
+  `git stash push -- apps/collectors/ilo_redfish.py` (giữ test mới) → cả 3 FAIL đúng dự đoán
+  (`assert 0 is None`, `assert {'controllers': []} is None` × 2) → `git stash pop` khôi phục, pass
+  lại. 476 test pass (474+2 mới thật sự — 1 test đổi tên/sửa assertion không tính là mới), 2 skip
+  như cũ, `manage.py check` sạch. Bài học mở rộng ghi vào `/deploy` skill: "0 phần tử sau khi
+  liệt kê" và "lỗi fetch 1 phần tử cụ thể" là 2 lớp khác nhau của cùng 1 họ bug — sửa lớp trong
+  (per-item, vòng 2) không có nghĩa lớp ngoài (per-list rỗng, vòng 3) đã được che; danh sách mà
+  nghiệp vụ NGẦM ĐỊNH luôn ≥1 phần tử thì rỗng dù HTTP 200 vẫn phải coi là thất bại. **Chưa
+  deploy** — xem `/deploy` §4 trước khi lên prod (đụng `apps/collectors/ilo_redfish.py`, chạy
+  trong `worker`).
+- **2026-09-29 (cùng ngày, mới nhất — review ngoài bắt tiếp bug ở CHÍNH bản fix vòng 1 iLO)**:
+  User dán tiếp 1 báo cáo review, soi đúng vào bản fix `disks_complete`/`enclosures_complete` vừa
+  viết ở entry ngay dưới đây (vòng 1, cùng ngày): "Bản sửa đã ngăn lỗi `/LogicalDrives/` hoặc
+  `/DataDrives/` thất bại, nhưng vẫn còn 1 trường hợp cùng loại — nếu `/StorageEnclosures/` (list)
+  trả 200 nhưng request chi tiết MỘT enclosure cụ thể thất bại, code bỏ qua enclosure đó mà vẫn
+  giữ `enclosures_complete=True`; kiểm tra tương tự cũng nên áp dụng cho chi tiết logical drive."
+  Verify bằng đọc code trực tiếp (không đoán, đúng nguyên tắc §0): xác nhận đúng — dòng
+  `_, e_detail = self._get(...); if e_detail: enclosures.append(...)` (enclosure detail,
+  `apps/collectors/ilo_redfish.py`) và dòng tương tự cho logical drive detail
+  (`_, ld_detail = self._get(...); if ld_detail: logical_drives.append(...)`) đều KHÔNG có nhánh
+  `else` hạ cờ complete khi fetch thất bại — vòng 1 chỉ mới theo dõi lỗi ở tầng **list**
+  (`/LogicalDrives/`, `/DataDrives/`, `/StorageEnclosures/`), chưa theo dõi lỗi ở tầng **detail
+  của từng member** trong 1 list vốn đã fetch đúng. Hậu quả tinh vi hơn vòng 1: nếu đúng cái
+  member fetch lỗi là cái đang Critical/mismatch, phép tính trên phần còn lại (đã fetch được) có
+  thể ra kết quả **tốt hơn thực tế** — không chỉ "thiếu dữ liệu" mà là "nhầm sang tốt" (vd LD đang
+  Critical fetch lỗi, LD khác OK → `logical_drive_worst_code` tính `max()` trên phần còn lại ra 0
+  thay vì phải là `None`). Fix: thêm cờ `logical_drives_complete` mới (song song 2 cờ đã có) theo
+  dõi cả tầng list lẫn tầng detail-từng-LD; mở rộng `enclosures_complete` theo dõi thêm tầng
+  detail-từng-enclosure (trước chỉ theo dõi tầng list). `normalize()` áp cờ mới vào
+  `logical_drive_worst_code` (trả `None` khi không đủ dữ liệu, cùng cơ chế 2 field count đã có) —
+  không cần sửa `apps/alerts/engine.py` (lý do y hệt vòng 1: field đã nullable, engine đã
+  null-filter per-field từ trước). 3 test mới (`tests/collectors/test_ilo_redfish.py`):
+  `test_logical_drives_incomplete_returns_none_worst_code` (unit `normalize()`),
+  `test_enclosure_detail_fetch_failure_marks_enclosures_incomplete` +
+  `test_logical_drive_detail_fetch_failure_marks_logical_drives_incomplete` (end-to-end qua
+  `collect_raw()`, mock HTTP 500 thật ở đúng request detail-member, KHÔNG phải request list) — tự
+  chứng minh regression thật bằng `git stash push -- apps/collectors/ilo_redfish.py` (giữ test
+  mới) → cả 3 FAIL đúng dự đoán (`assert 1 is None`, `KeyError: 'enclosures_complete'`,
+  `KeyError: 'logical_drives_complete'`) → `git stash pop` khôi phục, pass lại. 474 test pass
+  (471+3 mới), 2 skip như cũ, `manage.py check` sạch. Bài học chung (đã ghi `/deploy` skill): fix 1
+  lớp "thiếu dữ liệu" (list rỗng do lỗi) không tự động che luôn lớp sâu hơn (member rỗng do lỗi
+  fetch RIÊNG của member đó trong 1 list vốn đã đúng) — mỗi lần tự tin "đã fix xong" nên rà lại
+  TỪNG lời gọi `_get()`/network call trong hàm, hỏi "cái nào còn thiếu nhánh `else` hạ cờ complete
+  chưa" thay vì chỉ tin test cũ pass (test cũ viết trước khi biết bug vòng 2, không cover được).
+  **Chưa deploy** — xem `/deploy` §4 trước khi lên prod (đụng `apps/collectors/ilo_redfish.py`,
+  chạy trong `worker`).
+- **2026-09-29 (cùng ngày, mới nhất — review ngoài phát hiện tiếp bug ở collector iLO)**: User
+  dán tiếp 1 báo cáo review (không phải review 4 đợt hôm trước, soi đúng vào
+  `apps/collectors/ilo_redfish.py` mới viết 2026-09-28): fetch lỗi ở sub-endpoint
+  `/LogicalDrives/`/`/DataDrives/`/`/StorageEnclosures/` (khác lỗi ở endpoint GỐC
+  `ArrayControllers/` — lỗi gốc đã có `collect_raw()` trả `None`, `poll_all_ilo` bỏ qua hẳn) chỉ bị
+  log warning rồi đi tiếp với list rỗng; `normalize()` khởi tạo `missing_count=0`/
+  `enclosure_mismatch=0` rồi CHỈ CỘNG DỒN (không bao giờ trừ) → 1 poll không đầy đủ cho ra kết quả
+  **giống hệt** "đã verify sạch, đúng 0 vấn đề". Vì `poll_all_ilo` chỉ coi `raw is None` là thất
+  bại (dòng 330, `apps/collectors/tasks.py`), poll không đầy đủ vẫn được `HardwareHealth.objects
+  .create(**data)` lưu bình thường — nếu đang có alert active cho `raid_missing_disk_count`, alert
+  engine đọc "0" giả này và **tự resolve, gửi RECOVERED giả** dù RAID thật có thể vẫn đang lỗi (chỉ
+  là lần đó không lấy được dữ liệu). Verify bằng đọc code trực tiếp (không đoán) — xác nhận đúng cơ
+  chế: `_collect_controller()` không có cờ nào đánh dấu "disks/enclosures list này KHÔNG ĐẦY ĐỦ".
+  Fix: thêm cờ `disks_complete`/`enclosures_complete` theo dõi qua từng tầng gọi (`_collect_controller`
+  → `normalize`), `normalize()` trả **`None`** thay vì `0` cho `missing_disk_count`/
+  `enclosure_mismatch_count` khi cờ False. Không cần sửa gì ở `apps/alerts/engine.py` — 2 field này
+  trên `HardwareHealth` vốn đã `null=True`, và `_latest_ilo`/`_sustained_ilo` vốn đã filter
+  `{field}__isnull=False` per-field từ lúc viết (mục đích ban đầu là "chọn giá trị KHÔNG-null gần
+  nhất", không phải để né bug này) — chỉ cần `normalize()` ngưng nói dối là 0, toàn chuỗi tự rơi về
+  giá trị lần cuối thật sự đã verify thay vì suy diễn "đã hồi phục". 4 test mới (3 ở
+  `tests/collectors/test_ilo_redfish.py` verify `normalize()`/`collect_raw()` trả `None` đúng chỗ
+  khi giả lập sub-fetch lỗi HTTP 500 thật qua mock, + 1 ở `tests/alerts/test_ilo_alerts.py` verify
+  alert KHÔNG bị resolve khi `HardwareHealth` mới nhất có `missing_disk_count=None`) — cả 3 test
+  collector đã tự chứng minh bằng cách tạm bỏ fix (`git stash` riêng file `ilo_redfish.py`, giữ
+  nguyên test mới) và xác nhận FAIL đúng dự đoán (`2 is None`/`KeyError: 'disks_complete'`) trước
+  khi khôi phục. 471 test pass (467+4 mới), 2 skip như cũ. Đã ghi bẫy chung vào `/deploy` skill mục
+  "Fetch lỗi ở 1 sub-endpoint mà chỉ log-and-skip". **Chưa deploy** — xem `/deploy` §4 trước khi lên
+  prod (đụng `apps/collectors/ilo_redfish.py`, chạy trong `worker`).
+- **2026-09-29 (cùng ngày, sau đó — review lại alert iLO theo yêu cầu user)**: User hỏi "đang
+  cảnh báo iLO những gì" → đọc lại `apps/alerts/engine.py`/`models.py`/`forms.py`, phát hiện 2 bug
+  (không phải do review ngoài, tự đọc code theo yêu cầu):
+  1. **Cao — dropdown metric ở form sửa rule (`apps/alerts/forms.py` `METRIC_CHOICES`) tự chép
+     tay, lệch hẳn với `AlertRule.metric_label` (`models.py`)** — thiếu toàn bộ 4 metric `raid_*`
+     (iLO) VÀ 11 metric host-perf HyperV (`cpu_hv_percent`, `disk_read_iops`...). Vì đây là
+     `forms.Select(choices=METRIC_CHOICES)`, rule có `metric` không nằm trong choices (3 rule iLO
+     tạo bằng `seed_alert_rules.py`, không qua form) khi mở sửa qua `/alerts/rules/<id>/edit/` sẽ
+     không có option nào khớp → HTML tự chọn option ĐẦU TIÊN trong list, bấm Lưu (kể cả chỉ để
+     tắt/bật rule) âm thầm ghi đè `metric` sang giá trị sai (vd "HyperV RAID Controller Critical"
+     biến thành rule `cpu_percent`). Fix root cause thay vì vá triệu chứng: gộp 2 bản sao thành 1
+     — thêm `AlertRule.METRIC_LABELS` (dict, nguồn sự thật duy nhất) + `AlertRule.RAID_HEALTH_NAMES`
+     (`{0:"OK",1:"Warning",2:"Critical"}`, cũng từng lặp lại 2 lần trong `threshold_label`),
+     `forms.METRIC_CHOICES = list(AlertRule.METRIC_LABELS.items())` — thêm metric mới cho engine
+     chỉ cần sửa 1 chỗ.
+  2. **Trung bình — tin nhắn Telegram/email cho 4 metric `raid_*` không đọc được**:
+     `_fmt_metric()` trong `_fire_alert()` ([apps/alerts/engine.py](apps/alerts/engine.py)) không
+     có nhánh `raid_*`, rơi về mặc định `f"{v:.2f}"`; message dùng `rule.metric` (key thô) thay vì
+     `rule.metric_label`. Tin nhắn thực tế trước fix: `"Hyperv-02: raid_controller_health = 2.00
+     (ngưỡng gte 2.00)"`. Fix: thêm nhánh `raid_*` vào `_fmt_metric` (dùng chung
+     `AlertRule.RAID_HEALTH_NAMES`) + đổi message sang `rule.metric_label`. `_resolve_alert` không
+     tự build message riêng (tái dùng `alert.message` từ lúc fire) nên fix 1 chỗ là đủ cho cả
+     ALERT lẫn RECOVERED.
+  3 test mới (`tests/alerts/test_ilo_alerts.py`) — `test_controller_critical_message_is_human_readable`
+  (assert message có "RAID Controller Health (iLO)"/"Critical", KHÔNG có "raid_controller_health"/
+  "2.00") + 2 test `TestMetricChoicesIncludeIlo` (assert `forms.METRIC_CHOICES` khớp
+  `AlertRule.METRIC_LABELS` và chứa đủ 4 metric raid_*). 467 test pass (464+3 mới), 2 skip như cũ.
+  Chưa deploy — code chỉ mới sửa + test local, xem `/deploy` §4 trước khi lên prod. Đã ghi bẫy
+  chung vào `/deploy` skill mục "2 bản sao 1 danh sách `choices` lệch nhau".
 - **2026-09-29 (cùng ngày, review vòng 2)**: Bản fix vòng 1 ngay dưới đây (`_queue_late_recovery_if_resolved`)
   tự nó tái tạo đúng loại bug mà dự án đã gặp nhiều lần ("commit trạng thái TRƯỚC, side-effect
   SAU, không durable/không đồng bộ khoá") — user dán tiếp review vòng 2, 2 điểm, cả 2 verify đúng
@@ -682,7 +874,8 @@ admin credential riêng, không nhất thiết giống Hyperv-02/Hyprver03).
   đầu. Bắt được 2 bug ở bước verify trước khi code thật (ghi vào `/deploy` skill để dùng chung):
   (1) `GenericIPAddressField.exclude(field="")` sinh SQL luôn `NULL`, loại bỏ mọi row; (2) HPE
   iLO4/5 đóng TCP connection sau đúng 1 request dù keep-alive. Commit `2fddc44` (+ `78d71e5` bước 1
-  thêm field nhập liệu). ⚠️ Hyperv-01 còn 401 Unauthorized (credential iLO sai) — chưa fix.
+  thêm field nhập liệu). Hyperv-01 từng 401 Unauthorized (credential iLO sai) — đã fix cùng ngày
+  (password đúng cập nhật qua ORM, xem memory `ilo-raid-monitoring.md`).
 - **2026-09-28 (cùng ngày, sau đó)**: Fix alert `duration_min>0` không tự resolve dù metric đã hồi
   phục (11/13 alert active kẹt tới 95 ngày) — xem mục "Online/offline" ⚠️ Rule `duration_min>0` ở
   trên + memory `alert-sustained-never-resolve.md`. Commit `d258bec`. Verify runtime: 11 alert tự

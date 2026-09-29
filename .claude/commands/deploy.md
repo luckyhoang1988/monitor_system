@@ -213,6 +213,83 @@ Quy trình chuẩn (đã dùng để bắt bug 504 phiên đầu):
   đúng 1 lần bằng session mới (`session.close()` rồi để `requests` tự mở connection mới) khi gặp
   `ConnectionError`. Áp dụng cho bất kỳ tích hợp BMC/thiết bị nhúng nào khác sau này (Dell iDRAC...)
   nếu thấy đúng triệu chứng xen kẽ này — verify lại trên thiết bị đó trước khi copy nguyên fix.
+- **Fetch lỗi ở 1 sub-endpoint (không phải fetch gốc) mà chỉ log-and-skip, KHÔNG đánh dấu incomplete
+  → counter "đếm số lượng vấn đề" (đếm bằng cách cộng dồn, khởi tạo 0) âm thầm trả 0 GIẢ trông y hệt
+  "đã verify sạch".** Dính thật 2026-09-29 (review code, `apps/collectors/ilo_redfish.py`
+  `_collect_controller`/`normalize`): `collect_raw()` chỉ coi là lỗi toàn phần khi fetch endpoint
+  **gốc** (`ArrayControllers/`) fail (401/404/connection error → trả `None`, `poll_all_ilo` bỏ qua
+  hẳn, không lưu). Nhưng fetch lỗi ở **sub-endpoint** (`/LogicalDrives/`, `/DataDrives/`,
+  `/StorageEnclosures/`) chỉ log warning rồi đi tiếp với list rỗng — `normalize()` khởi tạo
+  `missing_count = 0`/`enclosure_mismatch = 0` rồi CHỈ CỘNG DỒN (không bao giờ trừ), nên 1 sub-fetch
+  lỗi giữa chừng cho ra kết quả **giống hệt** "đã verify và đúng là 0 vấn đề" — không có tín hiệu
+  nào phân biệt được 2 case. Hệ quả nguy hiểm hơn cả case đơn giản "dữ liệu thiếu": nếu trước đó có
+  alert đang active dựa trên field này (`raid_missing_disk_count`), 1 poll không đầy đủ đủ để engine
+  đọc thấy "0" và tưởng RAID đã hồi phục → tự resolve, gửi RECOVERED giả, trong khi RAID thật có thể
+  vẫn đang lỗi (chỉ là lần này không lấy được dữ liệu). Fix: track cờ hoàn chỉnh riêng
+  (`disks_complete`/`enclosures_complete`) qua từng tầng gọi, `normalize()` trả **`None`** (không
+  phải `0`) khi cờ False — field `HardwareHealth` liên quan vốn đã nullable, và `_latest_ilo`/
+  `_sustained_ilo` (`apps/alerts/engine.py`) vốn đã filter `{field}__isnull=False` per-field (viết
+  từ đầu để chọn "giá trị KHÔNG-null gần nhất", không phải để né bug này) nên chỉ cần `normalize()`
+  ngưng nói dối là "0", toàn bộ chuỗi tự đọc đúng giá trị lần cuối thật sự đã verify — không cần
+  sửa gì ở tầng alert engine. **Quy tắc chung**: bất kỳ hàm nào "đếm số lượng X bất thường" bằng
+  cách cộng dồn qua nhiều sub-fetch đều PHẢI phân biệt rõ "đã duyệt hết, đếm được 0" với "duyệt dở
+  dang vì 1 sub-fetch lỗi" — im lặng coi 2 case là một luôn thiên về hướng nguy hiểm hơn (báo cáo
+  "sạch" khi thực ra chưa biết), nhất là khi con số đó nuôi logic resolve alert.
+  ⚠️ **Vòng 2 cùng ngày (review lại đúng bản fix vòng 1 ở trên, phát hiện fix chưa đủ)**: vòng 1
+  chỉ che lỗi ở tầng **list** (`/LogicalDrives/`, `/DataDrives/`, `/StorageEnclosures/` — endpoint
+  trả *danh sách member*). Lỗi fetch **detail của TỪNG MEMBER riêng lẻ** sau khi đã có list đúng
+  (`LogicalDrives/{ld}/`, `StorageEnclosures/{n}/`) vẫn bị `if detail:` nuốt im lặng — chỉ bỏ qua
+  member đó khỏi list kết quả, KHÔNG hạ cờ complete. Nguy hiểm hơn cả vòng 1 vì tinh vi hơn: nếu
+  đúng cái member fetch lỗi là cái đang Critical/mismatch, phép tính trên PHẦN CÒN LẠI (đã fetch
+  được) có thể ra kết quả **tốt hơn thực tế** (vd LD đang Critical fetch lỗi, LD khác OK →
+  `logical_drive_worst_code` tính max() trên phần còn lại ra 0 thay vì phải None) — không chỉ là
+  "thiếu dữ liệu" mà là "nhầm sang tốt". Bài học áp dụng chung, không chỉ riêng iLO: **fix 1 lớp
+  "thiếu dữ liệu" (list rỗng do lỗi) không tự động che luôn lớp sâu hơn (member rỗng do lỗi bên
+  trong 1 danh sách vốn đã fetch đúng)** — phải rà TỪNG bước gọi mạng trong hàm, không chỉ bước gọi
+  đầu tiên/rõ ràng nhất. Quy trình bắt: đọc lại chính diff vừa fix, hỏi "còn `_get()`/network call
+  nào trong hàm này chưa có cặp `else:` hạ cờ complete không?" — không tự tin "đã fix xong" chỉ vì
+  test cũ pass, vì test cũ (viết TRƯỚC khi biết bug vòng 2) không cover được case chưa biết tới.
+  ⚠️ **Vòng 3 cùng ngày (đúng bug vẫn còn, lần này ở tầng GỐC chứ không phải tầng per-controller)**:
+  vòng 1+2 fix hết mọi chỗ "1 sub-fetch BÊN TRONG 1 controller đã có" lỗi. Nhưng nếu chính endpoint
+  liệt kê controller (`ArrayControllers/` root) trả HTTP 200 với `Members` rỗng/thiếu, `ac_root`
+  vẫn là dict TRUTHY (`{"Members": []}` không rỗng như `{}`) nên KHÔNG trúng check `not ac_root` đã
+  có sẵn cho các lỗi root khác (401/404/connection error) → `controllers=[]` lọt xuống
+  `normalize()`, vòng for KHÔNG chạy lần nào → mọi cờ complete/counter giữ nguyên giá trị khởi tạo
+  (`True`/`0`) → SAI giống hệt 2 vòng trước nhưng ở tầng cao hơn: thiếu HẲN controller, không phải
+  thiếu sub-data bên trong 1 controller đã có. Bài học: **"0 phần tử sau khi lọc/liệt kê" và "lỗi
+  fetch 1 phần tử cụ thể" là 2 lớp lỗi khác nhau của cùng 1 họ bug ("dữ liệu thiếu trông giống dữ
+  liệu sạch") — sửa xong lớp trong (per-item) không có nghĩa lớp ngoài (per-list, khi cả list rỗng)
+  đã được che.** Với danh sách mà nghiệp vụ NGẦM ĐỊNH luôn ≥1 phần tử (ở đây: host đã cấu hình
+  `ilo_ip_address` thì ngầm định có RAID controller), danh sách rỗng dù HTTP 200 vẫn phải coi là
+  thất bại, không phải "đúng là rỗng thật". Fix 2 lớp: (1) chặn tại nguồn — `collect_raw()` tự trả
+  `None` khi `controllers` rỗng sau vòng lặp Members, y hệt các nhánh lỗi root khác; (2) phòng thủ
+  độc lập ở `normalize()` — `controllers_list` rỗng thì tự hạ cả 3 cờ complete, đề phòng raw dựng
+  tay/gọi trực tiếp không qua `collect_raw()`. Quy tắc chung mở rộng: khi audit 1 hàm "đếm/tổng hợp
+  qua danh sách con", phải tự hỏi CẢ 2 câu — "1 phần tử trong danh sách lỗi fetch thì sao" (đã hỏi
+  ở vòng 2) VÀ "cả danh sách rỗng/không lấy được thì sao, danh sách đó có được phép rỗng thật theo
+  nghiệp vụ không" (câu thứ 2 dễ bị bỏ sót hơn vì "rỗng" trông giống 1 kết quả hợp lệ, không giống
+  1 lỗi).
+  ⚠️ **Vòng 4 cùng ngày (rủi ro suy luận từ đọc code, CHƯA quan sát trên iLO thật)**: các collection
+  CON (`/LogicalDrives/`, `/DataDrives/`, `/StorageEnclosures/` — khác collection GỐC
+  `/ArrayControllers/` đã fix ở vòng 3) vẫn dùng `payload.get("Members", [])` trực tiếp — pattern
+  này gộp chung 2 trường hợp KHÁC NHAU thành cùng 1 kết quả `[]`: "JSON đúng cấu trúc Redfish,
+  `Members: []` rỗng THẬT" (hợp lệ) và "JSON 200 nhưng THIẾU HẲN key `Members`, hoặc `Members`
+  không phải list" (bất thường/glitch, KHÔNG phải "0 phần tử đã xác nhận"). `StorageEnclosures`
+  còn có biến thể tệ hơn: check cũ `encl_status == 200 and encl_list is not None` coi
+  `encl_list={}` (dict rỗng, thiếu Members) là `enclosures_complete=True` (SAI), rồi
+  `elif encl_list:` (truthy check) lại bỏ qua vòng lặp vì `{}` falsy — kết quả: không log, không hạ
+  cờ, im lặng hoàn toàn. Fix: helper `IloRedfishClient._members(payload)` — trả `list["Members"]`
+  nếu là list hợp lệ, `None` nếu thiếu key/sai kiểu; áp dụng thống nhất cho cả 3 sub-collection,
+  thay hẳn pattern `x.get("Members", [])` + check `is not None`/truthy rời rạc trước đó. Case trả
+  `None` phải hạ cờ complete tương ứng (`disks_complete`/`logical_drives_complete`/
+  `enclosures_complete`), case trả `[]` thật thì vẫn coi hợp lệ (giữ nguyên hành vi cũ cho case này
+  — KHÔNG áp dụng lý luận "nghiệp vụ ngầm định ≥1 phần tử" của vòng 3 xuống tầng sub-collection,
+  vì chưa có bằng chứng 1 LD/enclosure/DataDrive thật sự luôn ≥1 — chỉ fix đúng phạm vi user chỉ ra
+  là "JSON thiếu Members", không mở rộng suy luận thêm). Quy tắc chung: `dict.get("Members", [])`
+  hay bất kỳ pattern `.get(key, <default rỗng>)` nào dùng để build 1 list-để-lặp đều nên tự hỏi
+  "default rỗng này có đang che giấu 1 case lỗi/bất thường không, hay chỉ đang xử lý đúng 1 case
+  hợp lệ" — 2 lần default che-lỗi đã tìm thấy hôm nay (vòng 3 ở root, vòng 4 ở 3 sub-collection)
+  đều đúng dạng này.
 - **`${VAR}` trong `docker-compose.yml` KHÔNG đọc qua `env_file:` của service — chỉ Compose nội
   suy từ file tên đúng `.env` cạnh compose file (hoặc `--env-file`/shell env).** `env_file:` chỉ bơm
   biến vào **container lúc chạy**, không tham gia bước nội suy `${...}` trong chính file YAML (bước
@@ -471,6 +548,34 @@ Quy trình chuẩn (đã dùng để bắt bug 504 phiên đầu):
   nhiều channel độc lập (khác tốc độ gửi, khác khả năng lỗi) — mọi quyết định "đã thông báo đủ
   chưa"/"cần thông báo tiếp không" phải tính theo TỪNG channel, không suy rộng từ 1 channel đại
   diện sang cả nhóm.**
+- **2 bản sao của CÙNG 1 danh sách `choices` (vd metric key → label) ở 2 file khác nhau sẽ lệch
+  nhau theo thời gian — khi lệch, form Django dùng `forms.Select(choices=...)` không báo lỗi gì,
+  chỉ âm thầm đổi sai dữ liệu lúc Lưu.** Dính thật 2026-09-29 (tự phát hiện khi user nhờ review
+  lại phần cảnh báo iLO, không phải review ngoài): `apps/alerts/forms.py::METRIC_CHOICES` (dùng
+  cho `AlertRuleForm`, dropdown ở `/alerts/rules/<id>/edit/`) là 1 list tự chép tay, tách biệt
+  hoàn toàn với `AlertRule.metric_label` (`apps/alerts/models.py`) — cả 2 lẽ ra phải cùng 1 tập
+  metric key. `METRIC_CHOICES` không được cập nhật khi thêm 11 metric host-perf HyperV (2026-07-07)
+  và 4 metric `raid_*` iLO (2026-09-28) — 3 rule iLO tạo bằng `seed_alert_rules.py`
+  (`AlertRule.objects.create(**dict)`, không qua `ModelForm` nên không bị chặn) có `metric` hợp lệ
+  trong DB nhưng KHÔNG nằm trong `METRIC_CHOICES`. Cơ chế lỗi: HTML `<select>` không có `<option>`
+  nào mang `selected` khi giá trị hiện tại của field không khớp option nào trong `choices` → trình
+  duyệt mặc định hiển thị VÀ SUBMIT option ĐẦU TIÊN trong list — mở sửa 1 rule như vậy qua UI (kể
+  cả chỉ để tắt/bật, không đụng ô Metric) rồi bấm Lưu sẽ âm thầm đổi `rule.metric` sang giá trị
+  sai, không có lỗi/cảnh báo nào. Đây là cùng HỌ bug với "seed script không tự dọn DB" và
+  "gỡ vendor phải lần theo mọi feature ăn theo" đã ghi ở trên — khác ở chỗ lần này bug nằm ở
+  chính cơ chế Django Form/HTML `<select>` chứ không phải ở tầng feature. Fix root cause (không vá
+  bằng cách thêm thủ công các entry thiếu — sẽ lại lệch lần sau): gộp về 1 nguồn — thêm
+  `AlertRule.METRIC_LABELS` (dict, class-level, dùng bởi `metric_label`) rồi
+  `forms.METRIC_CHOICES = list(AlertRule.METRIC_LABELS.items())`. Quy tắc chung: **bất kỳ dict/list
+  "metric/field key → label hiển thị" nào tồn tại song song ở model (cho hiển thị) VÀ ở form (cho
+  dropdown chọn) đều phải xuất phát từ 1 nguồn duy nhất — không có ngoại lệ "chỉ thêm khi cần",
+  vì đúng thời điểm quên thêm chính là lúc bug này xảy ra.** Tiện thể cũng gộp
+  `RAID_HEALTH_NAMES = {0:"OK",1:"Warning",2:"Critical"}` (từng lặp lại y hệt ở
+  `AlertRule.threshold_label` VÀ `_fmt_metric()` trong `apps/alerts/engine.py::_fire_alert`) —
+  cùng nguyên tắc, phát hiện cùng lúc: `_fmt_metric()` không có nhánh `raid_*` nên tin nhắn
+  Telegram/email cho 4 metric RAID trước fix là dạng thô `"raid_controller_health = 2.00 (ngưỡng
+  gte 2.00)"` (dùng `rule.metric` thay vì `rule.metric_label`) thay vì đọc được
+  `"RAID Controller Health (iLO) = Critical (ngưỡng ≥ Warning)"`.
 
 ## 2. Deploy
 ```

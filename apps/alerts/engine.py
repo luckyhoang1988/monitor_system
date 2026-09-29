@@ -936,6 +936,10 @@ def _fire_alert(device: Device, rule: AlertRule, value: float) -> None:
             return f"{v:.2f}"
         if metric == "avg_io_size_kb":
             return f"{v:.1f} KB"
+        if metric in ("raid_controller_health", "raid_logical_drive_health"):
+            return AlertRule.RAID_HEALTH_NAMES.get(int(v), f"code={v:.0f}")
+        if metric in ("raid_missing_disk_count", "raid_enclosure_mismatch"):
+            return f"{v:.0f}"
         return f"{v:.2f}"
 
     metric_value_str = _fmt_metric(rule.metric, float(value))
@@ -946,7 +950,11 @@ def _fire_alert(device: Device, rule: AlertRule, value: float) -> None:
         suffix = f" ({', '.join(names)})" if names else ""
         message = f"{device.name}: {metric_value_str} offline{suffix}"
     else:
-        message = (f"{device.name}: {rule.metric} = {metric_value_str} "
+        # metric_label (tên người đọc được, vd "RAID Controller Health (iLO)") thay vì rule.metric
+        # thô (vd "raid_controller_health") — trước đây dùng raw key + _fmt_metric không có nhánh
+        # raid_* nên message thực tế là "raid_controller_health = 2.00 (ngưỡng gte 2.00)", không
+        # đọc được với người trực (phát hiện khi review lại alert iLO 2026-09-29).
+        message = (f"{device.name}: {rule.metric_label} = {metric_value_str} "
                    f"(ngưỡng {rule.condition} {threshold_str})")
 
     # ⚠️ Transactional-outbox-lite (2026-09-28, theo báo cáo review — cùng root cause với

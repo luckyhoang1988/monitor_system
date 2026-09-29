@@ -22,6 +22,47 @@ class AlertRule(models.Model):
         ("ap",              "Access Point"),
     ]
 
+    # Nguồn sự thật DUY NHẤT cho tên hiển thị của mọi metric — forms.py (METRIC_CHOICES cho
+    # dropdown UI) đọc THẲNG từ dict này thay vì tự chép lại. Lý do: 2 bản sao (models.py +
+    # forms.py) từng lệch nhau (forms.py thiếu 11 metric host-perf HyperV + 4 metric iLO) khiến
+    # dropdown sửa rule không có option khớp giá trị đang lưu → HTML <select> tự chọn option ĐẦU
+    # TIÊN trong list, bấm Lưu (kể cả chỉ để tắt/bật rule) âm thầm đổi metric của rule sang giá trị
+    # sai (vd rule RAID Controller Critical bị đổi thành cpu_percent) mà không có dấu hiệu lỗi nào
+    # (phát hiện khi review lại alert iLO 2026-09-29). Thêm metric mới cho engine → thêm đúng 1 chỗ
+    # ở đây là đủ, không cần sửa forms.py.
+    METRIC_LABELS = {
+        "cpu_percent": "CPU (%)",
+        "mem_percent": "RAM (%)",
+        "if_status": "Uplink status (0=DOWN, 1=UP)",
+        "uplink_in_mbps_max": "Uplink IN traffic max (Mbps)",
+        "uplink_out_mbps_max": "Uplink OUT traffic max (Mbps)",
+        "vm_count_running": "Số VM đang chạy",
+        "vm_repl_unhealthy": "Số VM replication lỗi",
+        "device_online": "Trạng thái online (0=OFFLINE, 1=ONLINE)",
+        "wifi_client_count": "Số client WiFi (WLAN controller)",
+        "wifi_ap_offline": "Số AP offline (WLAN controller)",
+        "cpu_hv_percent": "CPU Hypervisor (%)",
+        "mem_available_mb": "RAM available (MB)",
+        "disk_read_iops": "Disk Read IOPS",
+        "disk_write_iops": "Disk Write IOPS",
+        "disk_read_latency_ms": "Disk Read Latency (ms)",
+        "disk_write_latency_ms": "Disk Write Latency (ms)",
+        "net_mbps_total": "Network Throughput (Mbps)",
+        "disk_read_throughput_mbps": "Disk Read Throughput (MB/s)",
+        "disk_write_throughput_mbps": "Disk Write Throughput (MB/s)",
+        "disk_queue_length": "Disk Queue Length",
+        "avg_io_size_kb": "Avg I/O Size (KB/IO)",
+        "raid_controller_health": "RAID Controller Health (iLO)",
+        "raid_logical_drive_health": "RAID Logical Drive Health (iLO)",
+        "raid_missing_disk_count": "Số đĩa mất (iLO)",
+        "raid_enclosure_mismatch": "Số enclosure bất thường (iLO)",
+    }
+
+    # Scale health code dùng chung controller/logical drive (verify runtime iLO4 P440ar
+    # 2026-09-28, xem apps/metrics/models.py HardwareHealth). Dùng chung cho threshold_label ở
+    # đây và _fmt_metric trong apps/alerts/engine.py — tránh lệch nếu ai chỉ sửa 1 chỗ.
+    RAID_HEALTH_NAMES = {0: "OK", 1: "Warning", 2: "Critical"}
+
     name         = models.CharField(max_length=100, unique=True, verbose_name="Tên rule")
     device_type  = models.CharField(max_length=20, default="all",
                                     choices=DEVICE_TYPE_CHOICES, verbose_name="Loại thiết bị")
@@ -43,34 +84,7 @@ class AlertRule(models.Model):
     @property
     def metric_label(self) -> str:
         """Human-friendly label for metric key (for UI)."""
-        labels = {
-            "cpu_percent": "CPU (%)",
-            "mem_percent": "RAM (%)",
-            "if_status": "Uplink status (0=DOWN, 1=UP)",
-            "uplink_in_mbps_max": "Uplink IN traffic max (Mbps)",
-            "uplink_out_mbps_max": "Uplink OUT traffic max (Mbps)",
-            "vm_count_running": "Số VM đang chạy",
-            "vm_repl_unhealthy": "Số VM replication lỗi",
-            "device_online": "Trạng thái online (0=OFFLINE, 1=ONLINE)",
-            "wifi_client_count": "Số client WiFi (WLAN controller)",
-            "wifi_ap_offline": "Số AP offline (WLAN controller)",
-            "cpu_hv_percent": "CPU Hypervisor (%)",
-            "mem_available_mb": "RAM available (MB)",
-            "disk_read_iops": "Disk Read IOPS",
-            "disk_write_iops": "Disk Write IOPS",
-            "disk_read_latency_ms": "Disk Read Latency (ms)",
-            "disk_write_latency_ms": "Disk Write Latency (ms)",
-            "net_mbps_total": "Network Throughput (Mbps)",
-            "disk_read_throughput_mbps": "Disk Read Throughput (MB/s)",
-            "disk_write_throughput_mbps": "Disk Write Throughput (MB/s)",
-            "disk_queue_length": "Disk Queue Length",
-            "avg_io_size_kb": "Avg I/O Size (KB/IO)",
-            "raid_controller_health": "RAID Controller Health (iLO)",
-            "raid_logical_drive_health": "RAID Logical Drive Health (iLO)",
-            "raid_missing_disk_count": "Số đĩa mất (iLO)",
-            "raid_enclosure_mismatch": "Số enclosure bất thường (iLO)",
-        }
-        return labels.get(self.metric, self.metric)
+        return self.METRIC_LABELS.get(self.metric, self.metric)
 
     @property
     def threshold_label(self) -> str:
@@ -105,8 +119,7 @@ class AlertRule(models.Model):
         if m == "avg_io_size_kb":
             return f"{t:.1f} KB"
         if m in ("raid_controller_health", "raid_logical_drive_health"):
-            health_names = {0: "OK", 1: "Warning", 2: "Critical"}
-            return health_names.get(int(t), f"code={t:.0f}")
+            return self.RAID_HEALTH_NAMES.get(int(t), f"code={t:.0f}")
         if m in ("raid_missing_disk_count", "raid_enclosure_mismatch"):
             return f"{t:.0f}"
         return f"{t:.2f}"

@@ -127,14 +127,62 @@ class TestNormalize:
         assert result["controller_health_code"] == 2  # an toàn: coi enum lạ là Critical
         assert "enum Health lạ" in caplog.text
 
-    def test_no_controllers_returns_none_codes(self, ilo_device):
+    def test_no_controllers_returns_none_for_everything(self, ilo_device):
+        """Regression 2026-09-29 vòng 3: trước đây `missing_disk_count`/`enclosure_mismatch_count`
+        trả 0 khi controllers=[] (đúng identity toán học "cộng dồn tập rỗng" nhưng SAI về ý
+        nghĩa -- 0 controller trên 1 host đã cấu hình iLO monitoring là "chưa đọc được gì", không
+        phải "đã verify 0 vấn đề"). Nay cả 4 field đều None (không đủ bằng chứng)."""
         client = IloRedfishClient(ilo_device)
         result = client.normalize({"controllers": []})
 
         assert result["controller_health_code"] is None
         assert result["logical_drive_worst_code"] is None
-        assert result["missing_disk_count"] == 0
-        assert result["enclosure_mismatch_count"] == 0
+        assert result["missing_disk_count"] is None
+        assert result["enclosure_mismatch_count"] is None
+
+    def test_disks_incomplete_returns_none_instead_of_false_zero(self, ilo_device):
+        """Regression 2026-09-29: LogicalDrives/DataDrives fetch lỗi từng bị nuốt im lặng ->
+        disks rỗng -> missing_disk_count=0 GIẢ (alert engine đọc 0 này tưởng "đã hồi phục" dù
+        RAID thật chưa chắc đã hồi phục). Nay phải trả None (không đủ dữ liệu để kết luận)."""
+        raw = _raw_unhealthy_controller()
+        raw["controllers"][0]["disks_complete"] = False
+        client = IloRedfishClient(ilo_device)
+
+        result = client.normalize(raw)
+
+        assert result["missing_disk_count"] is None
+        assert result["enclosure_mismatch_count"] is None  # phụ thuộc disks_complete
+        # Health code controller/logical-drive không phụ thuộc disks -> vẫn tính bình thường.
+        assert result["controller_health_code"] == 2
+        assert result["logical_drive_worst_code"] == 1
+
+    def test_enclosures_incomplete_leaves_missing_disk_count_intact(self, ilo_device):
+        """StorageEnclosures fetch lỗi riêng (disks vẫn đủ) -> chỉ enclosure_mismatch_count bị
+        None; missing_disk_count không phụ thuộc enclosures nên vẫn tính bình thường."""
+        raw = _raw_unhealthy_controller()
+        raw["controllers"][0]["enclosures_complete"] = False
+        client = IloRedfishClient(ilo_device)
+
+        result = client.normalize(raw)
+
+        assert result["missing_disk_count"] == 2
+        assert result["enclosure_mismatch_count"] is None
+
+    def test_logical_drives_incomplete_returns_none_worst_code(self, ilo_device):
+        """Regression 2026-09-29 vòng 2: cờ logical_drives_complete=False (vd 1 LD detail fetch
+        lỗi) -> logical_drive_worst_code phải None, KHÔNG được tính max() trên phần LD còn lại
+        (có thể bỏ sót đúng cái LD Critical bị lỗi fetch). Các field khác không phụ thuộc LD
+        detail nên vẫn tính bình thường."""
+        raw = _raw_unhealthy_controller()
+        raw["controllers"][0]["logical_drives_complete"] = False
+        client = IloRedfishClient(ilo_device)
+
+        result = client.normalize(raw)
+
+        assert result["logical_drive_worst_code"] is None
+        assert result["controller_health_code"] == 2
+        assert result["missing_disk_count"] == 2
+        assert result["enclosure_mismatch_count"] == 1
 
 
 class TestGetRetry:
@@ -192,6 +240,33 @@ class TestCollectRaw:
     def test_returns_none_on_401(self, ilo_device, mocker):
         response = mocker.MagicMock(status_code=401)
         response.json.return_value = {}
+        mocker.patch("requests.Session.get", return_value=response)
+
+        result = IloRedfishClient(ilo_device).collect_raw()
+
+        assert result is None
+
+    def test_returns_none_when_root_200_but_members_empty(self, ilo_device, mocker):
+        """Regression 2026-09-29 vòng 3: root ArrayControllers trả HTTP 200 (không phải 401/404/
+        lỗi kết nối) nhưng body {"Members": []} -- ac_root vẫn TRUTHY nên lọt qua check `not
+        ac_root`, controllers=[] sau vòng lặp Members rỗng. Trước đây collect_raw() trả
+        {"controllers": []} bình thường -> normalize() cộng dồn ra 0 GIẢ cho mọi counter. Nay
+        collect_raw() phải tự chặn, trả None y hệt các nhánh lỗi root khác -- poll_all_ilo bỏ qua
+        không lưu, KHÔNG để lại HardwareHealth row nào coi như "đã verify 0 vấn đề"."""
+        root = "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/"
+        response = mocker.MagicMock(status_code=200)
+        response.json.return_value = {"Members": []}
+        mocker.patch("requests.Session.get", return_value=response)
+
+        result = IloRedfishClient(ilo_device).collect_raw()
+
+        assert result is None
+
+    def test_returns_none_when_root_200_but_no_members_key(self, ilo_device, mocker):
+        """Biến thể khác của cùng bug: body 200 hoàn toàn thiếu key "Members" (không phải rỗng
+        rõ ràng) -- `.get("Members", [])` cũng ra [] giống hệt case trên, cùng 1 nhánh chặn."""
+        response = mocker.MagicMock(status_code=200)
+        response.json.return_value = {"SomeOtherField": "x"}
         mocker.patch("requests.Session.get", return_value=response)
 
         result = IloRedfishClient(ilo_device).collect_raw()
@@ -330,6 +405,281 @@ class TestCollectRaw:
         assert [d["CapacityGB"] for d in disks[:2]] == [300, 300]
         # bay_number hiển thị UI ("Bay N") phải tăng dần khớp thứ tự hiển thị, xuyên suốt cả 2 box.
         assert [d["bay_number"] for d in disks] == [1, 2, 3, 4, 5, 6]
+
+    def test_logical_drives_fetch_failure_marks_disks_incomplete(self, ilo_device, mocker):
+        """Regression 2026-09-29: LogicalDrives trả lỗi thật (HTTP 500, khác 401/404 ở ROOT —
+        root fail thì collect_raw() trả None và poll_all_ilo bỏ qua hẳn) từng bị nuốt im lặng,
+        để disks=[] rồi normalize() cộng dồn ra missing_disk_count=0 GIẢ. Nay collect_raw() phải
+        đánh dấu disks_complete=False, normalize() phải trả None thay vì 0."""
+        root = "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/"
+        ac_uri = root + "0/"
+
+        def fake_get(url, timeout=None, headers=None):
+            path = url.replace("https://10.0.198.254", "")
+            resp = mocker.MagicMock()
+            if path == root:
+                resp.status_code = 200
+                resp.json.return_value = {"Members": [{"@odata.id": ac_uri}]}
+            elif path == ac_uri:
+                resp.status_code = 200
+                resp.json.return_value = {"Status": {"Health": "Critical"}}
+            elif path == ac_uri + "LogicalDrives/":
+                resp.status_code = 500  # lỗi thật -- không phải 200 lẫn 404
+                resp.json.side_effect = ValueError("not json")
+            elif path == ac_uri + "StorageEnclosures/":
+                resp.status_code = 200
+                resp.json.return_value = {"Members": []}
+            else:
+                raise AssertionError(f"Unexpected path probed in test: {path}")
+            return resp
+
+        mocker.patch("requests.Session.get", side_effect=fake_get)
+
+        raw = IloRedfishClient(ilo_device).collect_raw()
+
+        controller = raw["controllers"][0]
+        assert controller["disks_complete"] is False
+        assert controller["disks"] == []
+
+        normalized = IloRedfishClient(ilo_device).normalize(raw)
+        # Controller health không phụ thuộc LogicalDrives -> vẫn đọc được Critical bình thường.
+        assert normalized["controller_health_code"] == 2
+        # Đây chính là bug: code cũ trả 0 (missing_count khởi tạo 0, không ai increment vì
+        # disks=[]) -- alert engine đọc 0 này tưởng "đã hồi phục". Nay phải là None.
+        assert normalized["missing_disk_count"] is None
+        assert normalized["enclosure_mismatch_count"] is None
+
+    def test_enclosure_detail_fetch_failure_marks_enclosures_incomplete(self, ilo_device, mocker):
+        """Regression 2026-09-29 vòng 2: /StorageEnclosures/ (list) trả 200 OK, nhưng GET detail
+        của 1 enclosure member cụ thể lỗi (HTTP 500) -- trước đây bị nuốt im lặng (chỉ bỏ qua
+        khỏi list `enclosures`, KHÔNG hạ enclosures_complete) khiến enclosure_mismatch_count vẫn
+        được tính trên phần còn lại (thiếu đúng enclosure có thể đang mismatch). Nay phải đánh
+        dấu enclosures_complete=False, normalize() phải trả None."""
+        root = "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/"
+        ac_uri = root + "0/"
+
+        def fake_get(url, timeout=None, headers=None):
+            path = url.replace("https://10.0.198.254", "")
+            resp = mocker.MagicMock()
+            if path == root:
+                resp.status_code = 200
+                resp.json.return_value = {"Members": [{"@odata.id": ac_uri}]}
+            elif path == ac_uri:
+                resp.status_code = 200
+                resp.json.return_value = {"Status": {"Health": "OK"}}
+            elif path == ac_uri + "LogicalDrives/":
+                resp.status_code = 200
+                resp.json.return_value = {"Members": []}
+            elif path == ac_uri + "StorageEnclosures/":
+                resp.status_code = 200
+                resp.json.return_value = {"Members": [{"@odata.id": ac_uri + "StorageEnclosures/0/"}]}
+            elif path == ac_uri + "StorageEnclosures/0/":
+                resp.status_code = 500  # detail fetch lỗi thật -- khác list root ở trên (200)
+                resp.json.side_effect = ValueError("not json")
+            else:
+                raise AssertionError(f"Unexpected path probed in test: {path}")
+            return resp
+
+        mocker.patch("requests.Session.get", side_effect=fake_get)
+
+        raw = IloRedfishClient(ilo_device).collect_raw()
+
+        controller = raw["controllers"][0]
+        assert controller["enclosures_complete"] is False
+        assert controller["enclosures"] == []
+
+        normalized = IloRedfishClient(ilo_device).normalize(raw)
+        # missing_disk_count không phụ thuộc enclosures -> vẫn tính bình thường (0, không LD nào).
+        assert normalized["missing_disk_count"] == 0
+        # Đây chính là bug: code cũ trả 0 (mismatch khởi tạo 0, enclosures=[] nên không đếm được
+        # gì) -- alert engine đọc 0 này tưởng "đã hồi phục". Nay phải là None.
+        assert normalized["enclosure_mismatch_count"] is None
+
+    def test_logical_drive_detail_fetch_failure_marks_logical_drives_incomplete(self, ilo_device, mocker):
+        """Regression 2026-09-29 vòng 2: /LogicalDrives/ (list) trả 200 OK với 2 member, nhưng
+        GET detail của 1 LD cụ thể lỗi (HTTP 500) -- trước đây bị nuốt im lặng (chỉ bỏ qua khỏi
+        list `logical_drives`), khiến logical_drive_worst_code tính max() trên LD còn lại (OK),
+        bỏ sót đúng LD lỗi fetch (có thể đang Critical) -> trả 0 thay vì None."""
+        root = "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/"
+        ac_uri = root + "0/"
+
+        def fake_get(url, timeout=None, headers=None):
+            path = url.replace("https://10.0.198.254", "")
+            resp = mocker.MagicMock()
+            if path == root:
+                resp.status_code = 200
+                resp.json.return_value = {"Members": [{"@odata.id": ac_uri}]}
+            elif path == ac_uri:
+                resp.status_code = 200
+                resp.json.return_value = {"Status": {"Health": "OK"}}
+            elif path == ac_uri + "LogicalDrives/":
+                resp.status_code = 200
+                resp.json.return_value = {"Members": [
+                    {"@odata.id": ac_uri + "LogicalDrives/1/"},
+                    {"@odata.id": ac_uri + "LogicalDrives/2/"},
+                ]}
+            elif path == ac_uri + "LogicalDrives/1/":
+                resp.status_code = 200
+                resp.json.return_value = {"Id": "1", "Status": {"Health": "OK"}}
+            elif path == ac_uri + "LogicalDrives/2/":
+                resp.status_code = 500  # detail fetch lỗi thật -- LD này có thể đang Critical
+                resp.json.side_effect = ValueError("not json")
+            elif path == ac_uri + "LogicalDrives/1/DataDrives/":
+                resp.status_code = 200
+                resp.json.return_value = {"Members": []}
+            elif path == ac_uri + "LogicalDrives/2/DataDrives/":
+                resp.status_code = 200
+                resp.json.return_value = {"Members": []}
+            elif path == ac_uri + "StorageEnclosures/":
+                resp.status_code = 200
+                resp.json.return_value = {"Members": []}
+            else:
+                raise AssertionError(f"Unexpected path probed in test: {path}")
+            return resp
+
+        mocker.patch("requests.Session.get", side_effect=fake_get)
+
+        raw = IloRedfishClient(ilo_device).collect_raw()
+
+        controller = raw["controllers"][0]
+        assert controller["logical_drives_complete"] is False
+        assert len(controller["logical_drives"]) == 1  # chỉ LD1 fetch được
+        # DataDrives của cả 2 LD vẫn fetch OK -> disks_complete KHÔNG bị ảnh hưởng bởi LD detail lỗi.
+        assert controller["disks_complete"] is True
+
+        normalized = IloRedfishClient(ilo_device).normalize(raw)
+        # Đây chính là bug: code cũ trả 0 (ld_codes=[0] từ LD1 OK, LD2 lỗi bị bỏ qua hẳn) -- alert
+        # engine đọc 0 này tưởng "đã hồi phục" dù LD2 (fetch lỗi) có thể đang Critical. Nay None.
+        assert normalized["logical_drive_worst_code"] is None
+        assert normalized["missing_disk_count"] == 0  # không phụ thuộc LD detail
+
+    def test_logical_drives_json_missing_members_key_marks_incomplete(self, ilo_device, mocker):
+        """Regression 2026-09-29 vòng 4 (rủi ro suy luận, CHƯA quan sát trên iLO thật): /LogicalDrives/
+        trả HTTP 200 nhưng JSON KHÔNG có key "Members" (vd {"Oem": {...}} bất thường, khác hẳn
+        {"Members": []} rỗng hợp lệ) -- trước đây `.get("Members", [])` gộp chung 2 case này thành
+        [] như nhau, khiến vòng lặp không chạy lần nào mà KHÔNG hạ disks_complete/
+        logical_drives_complete. Nay `_members()` phải trả None cho case JSON thiếu Members, khác
+        hẳn case Members=[] thật (xem test_healthy_controller_matches_real_hyprver03_case)."""
+        root = "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/"
+        ac_uri = root + "0/"
+
+        def fake_get(url, timeout=None, headers=None):
+            path = url.replace("https://10.0.198.254", "")
+            resp = mocker.MagicMock()
+            if path == root:
+                resp.status_code = 200
+                resp.json.return_value = {"Members": [{"@odata.id": ac_uri}]}
+            elif path == ac_uri:
+                resp.status_code = 200
+                resp.json.return_value = {"Status": {"Health": "Critical"}}
+            elif path == ac_uri + "LogicalDrives/":
+                resp.status_code = 200  # OK thật -- KHÔNG phải lỗi HTTP
+                resp.json.return_value = {"Oem": {"Hpe": {}}}  # JSON hợp lệ nhưng thiếu "Members"
+            elif path == ac_uri + "StorageEnclosures/":
+                resp.status_code = 200
+                resp.json.return_value = {"Members": []}
+            else:
+                raise AssertionError(f"Unexpected path probed in test: {path}")
+            return resp
+
+        mocker.patch("requests.Session.get", side_effect=fake_get)
+
+        raw = IloRedfishClient(ilo_device).collect_raw()
+
+        controller = raw["controllers"][0]
+        assert controller["disks_complete"] is False
+        assert controller["logical_drives_complete"] is False
+        assert controller["disks"] == []
+        assert controller["logical_drives"] == []
+
+        normalized = IloRedfishClient(ilo_device).normalize(raw)
+        assert normalized["controller_health_code"] == 2  # không phụ thuộc LogicalDrives
+        assert normalized["missing_disk_count"] is None
+        assert normalized["logical_drive_worst_code"] is None
+
+    def test_data_drives_json_missing_members_key_marks_disks_incomplete(self, ilo_device, mocker):
+        """Cùng loại bug trên nhưng ở /DataDrives/ (tầng con của 1 LD cụ thể, khác /LogicalDrives/
+        ở test trên) -- JSON 200 thiếu key Members phải hạ disks_complete, KHÔNG được coi "0 disk
+        khai báo cho LD này". CHƯA quan sát trên iLO thật."""
+        root = "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/"
+        ac_uri = root + "0/"
+
+        def fake_get(url, timeout=None, headers=None):
+            path = url.replace("https://10.0.198.254", "")
+            resp = mocker.MagicMock()
+            if path == root:
+                resp.status_code = 200
+                resp.json.return_value = {"Members": [{"@odata.id": ac_uri}]}
+            elif path == ac_uri:
+                resp.status_code = 200
+                resp.json.return_value = {"Status": {"Health": "OK"}}
+            elif path == ac_uri + "LogicalDrives/":
+                resp.status_code = 200
+                resp.json.return_value = {"Members": [{"@odata.id": ac_uri + "LogicalDrives/1/"}]}
+            elif path == ac_uri + "LogicalDrives/1/":
+                resp.status_code = 200
+                resp.json.return_value = {"Id": "1", "Status": {"Health": "OK"}}
+            elif path == ac_uri + "LogicalDrives/1/DataDrives/":
+                resp.status_code = 200  # OK thật -- KHÔNG phải lỗi HTTP
+                resp.json.return_value = {}  # JSON hợp lệ nhưng thiếu "Members"
+            elif path == ac_uri + "StorageEnclosures/":
+                resp.status_code = 200
+                resp.json.return_value = {"Members": []}
+            else:
+                raise AssertionError(f"Unexpected path probed in test: {path}")
+            return resp
+
+        mocker.patch("requests.Session.get", side_effect=fake_get)
+
+        raw = IloRedfishClient(ilo_device).collect_raw()
+
+        controller = raw["controllers"][0]
+        assert controller["disks_complete"] is False
+        # LD detail fetch OK bình thường -- chỉ DataDrives (sub-collection RIÊNG) lỗi.
+        assert controller["logical_drives_complete"] is True
+        assert controller["disks"] == []
+
+        normalized = IloRedfishClient(ilo_device).normalize(raw)
+        assert normalized["missing_disk_count"] is None
+        assert normalized["logical_drive_worst_code"] == 0  # LD detail vẫn đọc được OK bình thường
+
+    def test_storage_enclosures_json_missing_members_key_marks_incomplete(self, ilo_device, mocker):
+        """Cùng loại bug trên nhưng ở /StorageEnclosures/ -- JSON 200 thiếu key Members từng bị
+        `encl_list is not None`=True (SAI, coi enclosures_complete=True) rồi `elif encl_list:`
+        falsy bỏ qua lặng lẽ, không log/không hạ cờ. CHƯA quan sát trên iLO thật."""
+        root = "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/"
+        ac_uri = root + "0/"
+
+        def fake_get(url, timeout=None, headers=None):
+            path = url.replace("https://10.0.198.254", "")
+            resp = mocker.MagicMock()
+            if path == root:
+                resp.status_code = 200
+                resp.json.return_value = {"Members": [{"@odata.id": ac_uri}]}
+            elif path == ac_uri:
+                resp.status_code = 200
+                resp.json.return_value = {"Status": {"Health": "OK"}}
+            elif path == ac_uri + "LogicalDrives/":
+                resp.status_code = 200
+                resp.json.return_value = {"Members": []}
+            elif path == ac_uri + "StorageEnclosures/":
+                resp.status_code = 200  # OK thật -- KHÔNG phải lỗi HTTP
+                resp.json.return_value = {}  # JSON hợp lệ (dict) nhưng thiếu "Members"
+            else:
+                raise AssertionError(f"Unexpected path probed in test: {path}")
+            return resp
+
+        mocker.patch("requests.Session.get", side_effect=fake_get)
+
+        raw = IloRedfishClient(ilo_device).collect_raw()
+
+        controller = raw["controllers"][0]
+        assert controller["enclosures_complete"] is False
+        assert controller["enclosures"] == []
+
+        normalized = IloRedfishClient(ilo_device).normalize(raw)
+        assert normalized["missing_disk_count"] == 0  # LogicalDrives Members=[] hợp lệ thật
+        assert normalized["enclosure_mismatch_count"] is None
 
     def test_missing_disks_sorted_last(self, ilo_device):
         present = {"Location": "1I:3:1", "Status": {"Health": "OK"}}

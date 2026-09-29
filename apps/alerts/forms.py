@@ -1,18 +1,11 @@
 from django import forms
 from .models import AlertRule, AlertConfig, CHANNEL_CHOICES
 
-METRIC_CHOICES = [
-    ("cpu_percent",       "CPU (%)"),
-    ("mem_percent",       "RAM (%)"),
-    ("if_status",         "Uplink status (0=DOWN, 1=UP)"),
-    ("uplink_in_mbps_max",  "Uplink IN traffic max (Mbps)"),
-    ("uplink_out_mbps_max", "Uplink OUT traffic max (Mbps)"),
-    ("vm_count_running",  "Số VM đang chạy"),
-    ("vm_repl_unhealthy", "Số VM replication lỗi"),
-    ("device_online",     "Trạng thái online (0=OFFLINE, 1=ONLINE)"),
-    ("wifi_client_count", "Số client WiFi (WLAN controller)"),
-    ("wifi_ap_offline",   "Số AP offline (WLAN controller)"),
-]
+# Đọc THẲNG từ AlertRule.METRIC_LABELS (nguồn sự thật duy nhất) — KHÔNG tự liệt kê lại ở đây.
+# Trước đây list này tự chép tay và lệch với models.py (thiếu 11 metric host-perf HyperV + 4
+# metric iLO) → dropdown sửa rule cho các metric đó không có option khớp, HTML <select> tự chọn
+# option đầu tiên, bấm Lưu âm thầm đổi sai metric của rule (xem models.py AlertRule.METRIC_LABELS).
+METRIC_CHOICES = list(AlertRule.METRIC_LABELS.items())
 
 DEVICE_TYPE_CHOICES = [
     ("all",             "Tất cả"),
