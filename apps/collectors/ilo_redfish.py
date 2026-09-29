@@ -81,8 +81,27 @@ Giới hạn đã biết (ghi rõ, không thiết kế lại cho tình huống c
   thì `collect_raw()` trả `None` ngay từ đầu, không tới các nhóm mới) — 1 HyperV host có iLO nhưng
   KHÔNG có Smart Array/RAID controller sẽ không bao giờ lấy được 8 mục mới dù chúng không liên
   quan RAID. Vô hại với fleet hiện tại (cả 3 host đều P440ar).
-- `Oem.Hp` chỉ verify trên iLO4 (cả 3 host thật). iLO5 có thể dùng namespace OEM khác (`Oem.Hpe`)
-  — CHƯA có thiết bị iLO5 để verify, không viết fallback đoán mò.
+
+Mở rộng ngoài RAID — iLO5 (2026-09-29, vòng 2, cùng ngày, ngay sau khi deploy vòng 1): verify sống
+trên prod phát hiện **Hyperv-01 thực ra là ProLiant DL380 Gen10 + iLO5** (không phải Gen9/iLO4 như
+2 host kia — chưa từng biết trước đó) → 4 field Battery/AMS/Processor/Memory null hoàn toàn ngay
+sau deploy vì `Systems/1/` trên iLO5 dùng `Oem.Hpe`, không phải `Oem.Hp`. Verify runtime trực tiếp
+trên chính Hyperv-01: iLO5 gộp SẴN mọi thứ vào 1 rollup `Oem.Hpe.AggregateHealthStatus` — khác hẳn
+cấu trúc iLO4 (`_parse_system_summary_ilo4`):
+- `SmartStorageBattery.Status.Health` (dict đơn, KHÔNG phải mảng nhiều battery như iLO4) →
+  `_parse_system_summary_ilo5` bọc thành list 1 phần tử để dùng chung logic `normalize()`.
+- `AgentlessManagementService` (string, thấy `"Unavailable"` — khác hẳn `"NoAMS"` của iLO4, chỉ
+  là 2 cách diễn đạt khác nhau của cùng ý "chưa cài AMS", cả 2 đều lưu thẳng làm string hiển thị).
+- `Processors`/`Memory`/`BiosOrHardwareHealth`/`Network` — đều đọc từ CHÍNH rollup này, KHÔNG phải
+  `ProcessorSummary`/`MemorySummary` cấp root (2 field đó vẫn tồn tại trên iLO5 nhưng dùng key
+  `HealthRollup` chữ **u thường** — khác iLO4 `HealthRollUp` chữ U hoa, 1 bẫy case-sensitivity
+  thật giữa 2 firmware; tránh hẳn bằng cách không đọc từ `ProcessorSummary`/`MemorySummary` nữa).
+- `FanRedundancy` (string enum, chỉ mới thấy `"Redundant"`) — 3 field bonus mới
+  (`bios_hardware_health_code`, `network_health_code`, `fan_redundancy_ok`) chính là 3/12 mục
+  "Health Summary" ban đầu tưởng "chưa có nguồn rõ" (BIOS/Hardware Health, Network, Fan Redundancy)
+  — hoá ra CÓ nguồn, chỉ là nguồn đó chỉ tồn tại trên schema iLO5, không có trên iLO4. `Oem.Hp`
+  (iLO4) đã soát toàn bộ key, KHÔNG có rollup tương đương — 3 field này **None vĩnh viễn trên host
+  iLO4** (Hyperv-02/Hyprver03), chỉ có dữ liệu thật trên host iLO5 (Hyperv-01).
 """
 from __future__ import annotations
 
@@ -177,24 +196,69 @@ class IloRedfishClient:
 
     def _collect_system_summary(self, session: requests.Session, base: str) -> dict[str, Any] | None:
         """Battery/AMS/Processor/Memory — tất cả nằm chung 1 document `Systems/1/` (1 GET, không
-        cần fetch từng member như ArrayControllers)."""
+        cần fetch từng member như ArrayControllers). Trả về dict trung gian THỐNG NHẤT bất kể
+        iLO4/iLO5 (`battery_conditions`: list string Condition/Health — `normalize()` tự tính max,
+        không cần biết nguồn nào) — xem `_parse_system_summary_ilo4`/`_parse_system_summary_ilo5`."""
         device = self.device
         status, body = self._get(session, base, "/redfish/v1/Systems/1/")
         if status != 200 or not isinstance(body, dict):
             logger.warning("iLO %s: không lấy được Systems/1/ (HTTP %s)", device.name, status)
             return None
-        oem_hp = (body.get("Oem") or {}).get("Hp")
-        if not isinstance(oem_hp, dict):
-            logger.warning(
-                "iLO %s: Systems/1/ thiếu Oem.Hp — schema khác (iLO5 dùng Oem.Hpe? chưa verify "
-                "trên thiết bị thật, xem docstring module)", device.name,
-            )
-            return None
+        oem = body.get("Oem") or {}
+        oem_hp = oem.get("Hp")
+        if isinstance(oem_hp, dict):
+            return self._parse_system_summary_ilo4(body, oem_hp)
+        oem_hpe = oem.get("Hpe")
+        if isinstance(oem_hpe, dict):
+            return self._parse_system_summary_ilo5(device.name, oem_hpe)
+        logger.warning(
+            "iLO %s: Systems/1/ thiếu cả Oem.Hp lẫn Oem.Hpe — schema không nhận diện được",
+            device.name,
+        )
+        return None
+
+    @staticmethod
+    def _parse_system_summary_ilo4(body: dict, oem_hp: dict) -> dict[str, Any]:
+        """iLO4 (verify runtime Hyperv-02/Hyprver03, P440ar/DL380 Gen9): Battery là MẢNG (mỗi
+        phần tử `Condition`), rollup Processor/Memory nằm ở `ProcessorSummary`/`MemorySummary`
+        cấp root (KHÔNG trong `Oem`), key `HealthRollUp` (chữ U hoa — khác iLO5, xem vòng 2).
+        KHÔNG có nguồn tương đương cho BIOS/Hardware Health, Network, Fan Redundancy trên iLO4
+        (đã soát toàn bộ key `Oem.Hp`, không có rollup nào giống `AggregateHealthStatus` của
+        iLO5) — 3 field đó None vĩnh viễn trên host iLO4."""
         return {
-            "battery": oem_hp.get("Battery") or [],
+            "battery_conditions": [b.get("Condition") for b in (oem_hp.get("Battery") or [])],
             "ams_device_discovery": (oem_hp.get("DeviceDiscoveryComplete") or {}).get("AMSDeviceDiscovery") or "",
             "processor_health": ((body.get("ProcessorSummary") or {}).get("Status") or {}).get("HealthRollUp"),
             "memory_health": ((body.get("MemorySummary") or {}).get("Status") or {}).get("HealthRollUp"),
+            "bios_hardware_health": None,
+            "network_health": None,
+            "fan_redundancy_raw": None,
+        }
+
+    @staticmethod
+    def _parse_system_summary_ilo5(device_name: str, oem_hpe: dict) -> dict[str, Any] | None:
+        """iLO5 (verify runtime 2026-09-29, Hyperv-01 — hoá ra là DL380 Gen10, KHÔNG phải Gen9
+        như 2 host kia, phát hiện qua bug field None sau khi mở rộng ngoài RAID). Khác hẳn iLO4:
+        mọi thứ gộp sẵn trong 1 rollup `Oem.Hpe.AggregateHealthStatus` — Battery là DICT đơn (1
+        SmartStorageBattery.Status.Health, không phải mảng nhiều battery), Processor/Memory/
+        BiosOrHardwareHealth/Network cũng đọc từ CHÍNH rollup này (không phải `ProcessorSummary`/
+        `MemorySummary` cấp root — 2 field đó VẪN tồn tại trên iLO5 nhưng dùng key `HealthRollup`
+        chữ u THƯỜNG, khác iLO4 `HealthRollUp` — tránh bẫy case-sensitivity bằng cách không đọc
+        từ đó, đọc thẳng AggregateHealthStatus cho nhất quán). `FanRedundancy` là string enum
+        (chỉ mới thấy `"Redundant"` — xem `_parse_redundancy_status`), KHÔNG có mảng Battery nên
+        bọc thành list 1 phần tử để dùng chung logic `normalize()` với iLO4."""
+        agg = oem_hpe.get("AggregateHealthStatus")
+        if not isinstance(agg, dict):
+            logger.warning("iLO %s: Systems/1/ Oem.Hpe thiếu AggregateHealthStatus", device_name)
+            return None
+        return {
+            "battery_conditions": [((agg.get("SmartStorageBattery") or {}).get("Status") or {}).get("Health")],
+            "ams_device_discovery": agg.get("AgentlessManagementService") or "",
+            "processor_health": ((agg.get("Processors") or {}).get("Status") or {}).get("Health"),
+            "memory_health": ((agg.get("Memory") or {}).get("Status") or {}).get("Health"),
+            "bios_hardware_health": ((agg.get("BiosOrHardwareHealth") or {}).get("Status") or {}).get("Health"),
+            "network_health": ((agg.get("Network") or {}).get("Status") or {}).get("Health"),
+            "fan_redundancy_raw": agg.get("FanRedundancy"),
         }
 
     def _collect_thermal(self, session: requests.Session, base: str) -> dict[str, Any] | None:
@@ -492,20 +556,27 @@ class IloRedfishClient:
         # trong cùng data dict này (xem docstring module "Mở rộng ngoài RAID").
         battery_code = processor_code = memory_code = None
         fan_code = temperature_code = psu_code = power_redundancy_ok = None
+        bios_hardware_code = network_code = fan_redundancy_ok = None
         ams_device_discovery = ""
         try:
             system_summary = raw.get("system_summary")
             if system_summary:
                 battery_codes = [
                     c for c in (
-                        self._health_code(b.get("Condition"), device_name, f"battery {b.get('Index')}")
-                        for b in system_summary.get("battery", [])
+                        self._health_code(cond, device_name, "battery")
+                        for cond in system_summary.get("battery_conditions", [])
                     ) if c is not None
                 ]
                 battery_code = max(battery_codes) if battery_codes else None
                 ams_device_discovery = system_summary.get("ams_device_discovery", "")
                 processor_code = self._health_code(system_summary.get("processor_health"), device_name, "processor summary")
                 memory_code = self._health_code(system_summary.get("memory_health"), device_name, "memory summary")
+                # 3 field bonus — CHỈ có dữ liệu trên iLO5 (Oem.Hpe.AggregateHealthStatus); iLO4
+                # trả None cho cả 3 key này (xem _parse_system_summary_ilo4) nên tự động None ở
+                # đây, không cần if/else riêng theo phiên bản iLO.
+                bios_hardware_code = self._health_code(system_summary.get("bios_hardware_health"), device_name, "bios/hardware health")
+                network_code = self._health_code(system_summary.get("network_health"), device_name, "network health")
+                fan_redundancy_ok = self._parse_redundancy_status(system_summary.get("fan_redundancy_raw"), device_name, "fan redundancy")
 
             thermal = raw.get("thermal")
             if thermal:
@@ -542,6 +613,7 @@ class IloRedfishClient:
             )
             battery_code = processor_code = memory_code = None
             fan_code = temperature_code = psu_code = power_redundancy_ok = None
+            bios_hardware_code = network_code = fan_redundancy_ok = None
             ams_device_discovery = ""
 
         return {
@@ -557,6 +629,9 @@ class IloRedfishClient:
             "temperature_worst_code": temperature_code,
             "power_supply_worst_code": psu_code,
             "power_redundancy_ok": power_redundancy_ok,
+            "bios_hardware_health_code": bios_hardware_code,
+            "network_health_code": network_code,
+            "fan_redundancy_ok": fan_redundancy_ok,
             "raw": raw,
         }
 
@@ -626,3 +701,19 @@ class IloRedfishClient:
             )
             return 2
         return code
+
+    @staticmethod
+    def _parse_redundancy_status(value: Any, device_name: str, context: str) -> bool | None:
+        """`None` khi không có dữ liệu (vd iLO4 không expose fan redundancy — không suy đoán).
+        Verify runtime 2026-09-29 (iLO5 Hyperv-01): chỉ từng thấy giá trị `"Redundant"` — enum
+        lạ khác (chưa biết tên thật của trạng thái "mất redundancy") coi là `False` (an toàn,
+        không bỏ sót) + log warning để đối chiếu sau, cùng triết lý `_health_code`."""
+        if not value:
+            return None
+        if str(value).strip().upper() == "REDUNDANT":
+            return True
+        logger.warning(
+            "iLO %s: %s trả giá trị lạ %r (chưa từng verify, chỉ mới thấy 'Redundant') — coi là "
+            "KHÔNG redundant để không bỏ sót, cần đối chiếu lại", device_name, context, value,
+        )
+        return False

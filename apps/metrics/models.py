@@ -298,6 +298,13 @@ class HardwareHealth(models.Model):
     temperature_worst_code = models.IntegerField(null=True, blank=True, verbose_name="Temperature Health (worst)")
     power_supply_worst_code = models.IntegerField(null=True, blank=True, verbose_name="Power Supply Health (worst)")
     power_redundancy_ok = models.BooleanField(null=True, blank=True, verbose_name="Power Redundancy OK")
+    # 3 field bonus 2026-09-29 (cùng ngày, sau khi phát hiện Hyperv-01 thật ra là iLO5/DL380 Gen10
+    # — Oem.Hpe.AggregateHealthStatus cho sẵn rollup cho cả 3 mục này). CHỈ có dữ liệu trên host
+    # iLO5 — None vĩnh viễn trên host iLO4 (Hyperv-02/Hyprver03, không có nguồn tương đương trong
+    # Oem.Hp). Xem apps/collectors/ilo_redfish.py docstring mục "Mở rộng ngoài RAID — iLO5".
+    bios_hardware_health_code = models.IntegerField(null=True, blank=True, verbose_name="BIOS/Hardware Health")
+    network_health_code = models.IntegerField(null=True, blank=True, verbose_name="Network Health")
+    fan_redundancy_ok = models.BooleanField(null=True, blank=True, verbose_name="Fan Redundancy OK")
     # Detail đầy đủ controllers[]/logical_drives[]/disks[]/enclosures[] + system_summary/thermal/power
     # cho UI — không dùng để rollup/alert (chỉ các field code/boolean ở trên dùng cho alert engine).
     raw = models.JSONField(default=dict, blank=True)

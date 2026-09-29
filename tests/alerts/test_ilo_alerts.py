@@ -209,6 +209,73 @@ class TestCheckDeviceAlertsIloExtended:
         assert "Warning" in alert.message
 
 
+@pytest.mark.django_db
+class TestCheckDeviceAlertsIloBonusFields:
+    """Regression 2026-09-29 vòng 2: 3 field bonus (BIOS/Hardware Health, Network, Fan Redundancy)
+    CHỈ có dữ liệu trên host iLO5 (phát hiện qua Hyperv-01 = DL380 Gen10/iLO5) — None vĩnh viễn
+    trên host iLO4. Test ở mức engine không cần phân biệt iLO4/iLO5 (field đã normalize xong)."""
+
+    def test_fires_warning_on_bios_hardware_health_degraded(self):
+        device = HyperVDeviceFactory(ilo_ip_address="10.0.198.254")
+        rule = make_rule(
+            name="HyperV BIOS/Hardware Health Warning+", metric="ilo_bios_hardware_health",
+            condition="gte", threshold=1.0, severity="WARNING",
+        )
+        HardwareHealth.objects.create(device=device, timestamp=now(), bios_hardware_health_code=1)
+
+        check_device_alerts(device, since())
+
+        alert = Alert.objects.get(device=device, rule=rule, is_active=True)
+        assert "ilo_bios_hardware_health" not in alert.message
+        assert "BIOS/Hardware Health (iLO)" in alert.message
+        assert "Warning" in alert.message
+
+    def test_fires_warning_on_network_health_degraded(self):
+        device = HyperVDeviceFactory(ilo_ip_address="10.0.198.254")
+        rule = make_rule(
+            name="HyperV Network Health Warning+", metric="ilo_network_health",
+            condition="gte", threshold=1.0, severity="WARNING",
+        )
+        HardwareHealth.objects.create(device=device, timestamp=now(), network_health_code=2)
+
+        check_device_alerts(device, since())
+
+        alert = Alert.objects.get(device=device, rule=rule, is_active=True)
+        assert "Network Health (iLO)" in alert.message
+        assert "Critical" in alert.message
+
+    def test_fires_critical_on_fan_not_redundant(self):
+        device = HyperVDeviceFactory(ilo_ip_address="10.0.198.254")
+        rule = make_rule(
+            name="HyperV Fan Not Redundant", metric="ilo_fan_redundancy",
+            condition="eq", threshold=0.0, severity="CRITICAL",
+        )
+        HardwareHealth.objects.create(device=device, timestamp=now(), fan_redundancy_ok=False)
+
+        check_device_alerts(device, since())
+
+        alert = Alert.objects.get(device=device, rule=rule, is_active=True)
+        assert "ilo_fan_redundancy" not in alert.message
+        assert "Fan Redundancy (iLO)" in alert.message
+        assert "DEGRADED" in alert.message
+
+    def test_no_data_on_ilo4_host_means_no_fire(self):
+        """Host iLO4 (3 field bonus luôn None) không bao giờ fire rule này — không phải bug, chỉ
+        là thiếu nguồn dữ liệu (giống hệt cách raid_* không fire khi chưa cấu hình iLO)."""
+        device = HyperVDeviceFactory(ilo_ip_address="10.0.198.254")
+        rule = make_rule(
+            name="HyperV Fan Not Redundant", metric="ilo_fan_redundancy",
+            condition="eq", threshold=0.0, severity="CRITICAL",
+        )
+        HardwareHealth.objects.create(
+            device=device, timestamp=now(), fan_redundancy_ok=None, controller_health_code=0,
+        )
+
+        check_device_alerts(device, since())
+
+        assert not Alert.objects.filter(device=device, rule=rule).exists()
+
+
 class TestMetricChoicesIncludeIlo:
     """Regression: apps/alerts/forms.py::METRIC_CHOICES từng tự chép tay và thiếu 4 metric
     raid_* (+ 11 metric host-perf HyperV) — dropdown sửa rule không có option khớp giá trị đang
@@ -236,4 +303,7 @@ class TestMetricChoicesIncludeIlo:
             "ilo_temperature_health",
             "ilo_power_supply_health",
             "ilo_power_redundancy",
+            "ilo_bios_hardware_health",
+            "ilo_network_health",
+            "ilo_fan_redundancy",
         } <= keys

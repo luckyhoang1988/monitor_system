@@ -64,11 +64,13 @@ del _metric
 
 # iLO Redfish RAID/disk health (độc lập WinRM, model HardwareHealth riêng — KHÔNG có nhánh
 # cache-mode, model này không đi qua METRICS_WRITE_MODE, xem CLAUDE.md "Phạm vi" mục iLO).
-# 7 entry ilo_* (2026-09-29, mở rộng ngoài RAID: Battery/AMS/Processor/Memory/Fan/Temperature/
-# PowerSupply/Redundancy) dùng CHUNG field name trên HardwareHealth — _latest_ilo/_sustained_ilo
-# bên dưới đã generic theo field name nên không cần sửa gì thêm. power_redundancy_ok là
-# BooleanField: __isnull=False chỉ loại NULL thật (không loại False), float(True)=1.0/
-# float(False)=0.0 qua values_list hoạt động đúng không cần nhánh riêng.
+# 10 entry ilo_* (2026-09-29, mở rộng ngoài RAID: Battery/AMS/Processor/Memory/Fan/Temperature/
+# PowerSupply/Redundancy + 3 bonus vòng 2 BIOS-Hardware/Network/FanRedundancy — CHỈ có dữ liệu
+# trên host iLO5, None trên iLO4, xem apps/collectors/ilo_redfish.py) dùng CHUNG field name trên
+# HardwareHealth — _latest_ilo/_sustained_ilo bên dưới đã generic theo field name nên không cần
+# sửa gì thêm. power_redundancy_ok/fan_redundancy_ok là BooleanField: __isnull=False chỉ loại
+# NULL thật (không loại False), float(True)=1.0/float(False)=0.0 qua values_list hoạt động đúng
+# không cần nhánh riêng.
 _ILO_FIELD_MAP = {
     "raid_controller_health":    "controller_health_code",
     "raid_logical_drive_health": "logical_drive_worst_code",
@@ -81,6 +83,9 @@ _ILO_FIELD_MAP = {
     "ilo_temperature_health":    "temperature_worst_code",
     "ilo_power_supply_health":   "power_supply_worst_code",
     "ilo_power_redundancy":      "power_redundancy_ok",
+    "ilo_bios_hardware_health":  "bios_hardware_health_code",
+    "ilo_network_health":        "network_health_code",
+    "ilo_fan_redundancy":        "fan_redundancy_ok",
 }
 
 for _metric in _ILO_FIELD_MAP:
@@ -950,11 +955,12 @@ def _fire_alert(device: Device, rule: AlertRule, value: float) -> None:
             return f"{v:.1f} KB"
         if metric in ("raid_controller_health", "raid_logical_drive_health",
                       "ilo_battery_health", "ilo_processor_health", "ilo_memory_health",
-                      "ilo_fan_health", "ilo_temperature_health", "ilo_power_supply_health"):
+                      "ilo_fan_health", "ilo_temperature_health", "ilo_power_supply_health",
+                      "ilo_bios_hardware_health", "ilo_network_health"):
             return AlertRule.HEALTH_CODE_NAMES.get(int(v), f"code={v:.0f}")
         if metric in ("raid_missing_disk_count", "raid_enclosure_mismatch"):
             return f"{v:.0f}"
-        if metric == "ilo_power_redundancy":
+        if metric in ("ilo_power_redundancy", "ilo_fan_redundancy"):
             return "OK" if v == 1 else "DEGRADED"
         return f"{v:.2f}"
 

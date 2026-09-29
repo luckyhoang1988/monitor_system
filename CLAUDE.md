@@ -437,11 +437,12 @@ memory `ilo-raid-monitoring.md` mục "Trạng thái rollout iLO IP".
   `IloRedfishClient._members(payload)` (trả list hợp lệ hoặc `None`) áp dụng thống nhất cho cả 3
   chỗ, thay pattern `.get("Members", [])`/check rời rạc cũ. Xem "Thay đổi quan trọng" (vòng 4).
 
-**Mở rộng ngoài RAID — 8 mục hardware health (từ 2026-09-29)**: phát sinh khi user đối chiếu
+**Mở rộng ngoài RAID — 11 mục hardware health (từ 2026-09-29)**: phát sinh khi user đối chiếu
 "Health Summary" thật của iLO (ảnh UI) với phạm vi giám sát — hệ thống trước đó chỉ đọc đúng 1/12
-mục (Storage). Probe trực tiếp trên iLO thật tìm ra 8 mục có nguồn Redfish rõ, hầu như miễn phí
-(nằm sẵn trong `Systems/1/`, hoặc 1 request mới `Thermal/`/`Power/`) — bỏ qua BIOS/Hardware Health,
-Fan Redundancy, Network (chưa có field Redfish rõ ràng/đáng tin trên schema iLO4 cũ này).
+mục (Storage). Probe trực tiếp trên iLO thật tìm ra 8 mục có nguồn Redfish rõ trên schema iLO4
+(vòng 1) — BIOS/Hardware Health, Fan Redundancy, Network ban đầu tưởng "chưa có nguồn rõ" trên
+iLO4, nhưng **vòng 2 cùng ngày phát hiện chúng CÓ nguồn thật trên iLO5** (xem bên dưới), nâng tổng
+lên 11/12 mục (chỉ còn thiếu... không thiếu gì nữa trên iLO5; trên iLO4 vẫn thiếu đúng 3 mục đó).
 
 **Endpoint mới đã verify runtime thật (Hyperv-01/02/Hyprver03, 2026-09-29)**:
 - `Systems/1/` → `Oem.Hp.Battery[]` (`Condition`, vd `"Ok"`) = Smart Storage Battery;
@@ -493,10 +494,42 @@ UI tóm tắt — quyết định phạm vi có chủ đích).
 **Giới hạn đã biết (ghi rõ, không thiết kế lại cho tình huống chưa có thiết bị thật)**:
 - 3 nhóm mới vẫn phụ thuộc root `ArrayControllers/` đã xác thực OK trước đó (root 401/404/lỗi →
   `collect_raw()` trả `None` ngay, không tới 3 nhóm mới) — 1 HyperV host có iLO nhưng KHÔNG có
-  Smart Array/RAID controller sẽ không bao giờ lấy được 8 mục mới dù không liên quan RAID. Vô hại
-  với fleet hiện tại (cả 3 host đều P440ar).
-- `Oem.Hp` chỉ verify trên **iLO4** (cả 3 host thật). iLO5 có thể dùng namespace OEM khác
-  (`Oem.Hpe`) — CHƯA có thiết bị iLO5 để verify, không viết fallback đoán mò.
+  Smart Array/RAID controller sẽ không bao giờ lấy được các mục mới dù không liên quan RAID. Vô
+  hại với fleet hiện tại (cả 3 host đều có Smart Array).
+
+**Mở rộng ngoài RAID — iLO5 + 3 mục bonus (vòng 2, cùng ngày 2026-09-29, ngay sau khi deploy vòng
+1)**: verify sống trên prod phát hiện **Hyperv-01 thực ra là ProLiant DL380 Gen10 + iLO5** (không
+phải Gen9/iLO4 như Hyperv-02/Hyprver03 — chưa từng biết trước đó) → 4 field Battery/AMS/Processor/
+Memory null hoàn toàn ngay sau deploy vì `Systems/1/` trên iLO5 dùng namespace `Oem.Hpe`, không
+phải `Oem.Hp`. Probe trực tiếp trên chính Hyperv-01 cho thấy iLO5 gộp SẴN mọi thứ vào 1 rollup
+**`Oem.Hpe.AggregateHealthStatus`** — gần như nguyên xi 12 mục Health Summary gốc:
+```
+AgentlessManagementService, BiosOrHardwareHealth.Status.Health, FanRedundancy, Fans.Status.Health,
+Memory.Status.Health, Network.Status.Health, PowerSupplies.Status.Health/PowerSuppliesMismatch,
+PowerSupplyRedundancy, Processors.Status.Health, SmartStorageBattery.Status.Health,
+Storage.Status.Health, Temperatures.Status.Health
+```
+- `IloRedfishClient._collect_system_summary()` tự nhận diện schema: `Oem.Hp` → iLO4
+  (`_parse_system_summary_ilo4`), `Oem.Hpe` → iLO5 (`_parse_system_summary_ilo5`), thiếu cả 2 →
+  `None` + log warning (schema không nhận diện được). Cả 2 nhánh trả về dict trung gian THỐNG NHẤT
+  (`battery_conditions`: list string — iLO4 nhiều battery thật, iLO5 bọc rollup đơn thành list 1
+  phần tử để dùng chung logic `normalize()`).
+- ⚠️ **Bẫy case-sensitivity thật giữa 2 firmware**: `ProcessorSummary`/`MemorySummary.Status` dùng
+  key `HealthRollUp` (chữ U hoa) trên iLO4 nhưng `HealthRollup` (chữ u thường) trên iLO5 — tránh
+  hẳn bằng cách iLO5 đọc thẳng từ `AggregateHealthStatus.Processors`/`.Memory` thay vì
+  `ProcessorSummary`/`MemorySummary` cấp root.
+- 3 field bonus MỚI trên `HardwareHealth` (migration `0011_...`): `bios_hardware_health_code`,
+  `network_health_code` (cùng scale 0/1/2), `fan_redundancy_ok` (`BooleanField`, parse qua
+  `_parse_redundancy_status` — chỉ mới thấy `"Redundant"`→`True`, enum lạ→`False`+log, giống
+  triết lý `_health_code`). **CHỈ có dữ liệu trên host iLO5 — None vĩnh viễn trên host iLO4** (đã
+  soát toàn bộ `Oem.Hp`, không có rollup tương đương). 3 rule seed mới cùng pattern rule khác
+  (`ilo_bios_hardware_health`/`ilo_network_health` gte 1.0 WARNING, `ilo_fan_redundancy` eq 0.0
+  CRITICAL) — không bao giờ fire trên host iLO4, không phải bug.
+- Verify sống sau fix: elapsed `poll_all_ilo` 32.1s/31.5s (tăng nhẹ từ baseline ~26s do +9 request/
+  vòng cho 3 host, vẫn cách xa `soft_time_limit=60s`, không cần tăng limit). Alert fired đúng và
+  đọc được ngay vòng đầu: `"Hyprver03: Power Redundancy (iLO) = DEGRADED"`,
+  `"Hyprver03: Power Supply Health (iLO) = Critical"`, `"Hyperv-02: Smart Storage Battery Health
+  (iLO) = Critical"`.
 
 ## Celery Beat — `expire_seconds` bị reset mỗi lần `beat` restart (fix gốc 2026-07-07)
 > Phát hiện khi audit lại điều kiện poll HyperV — không phải bug riêng HyperV, ảnh hưởng
@@ -525,7 +558,21 @@ UI tóm tắt — quyết định phạm vi có chủ đích).
   `expire_seconds` cùng giá trị, nếu không entry đó lặp lại đúng bug này.
 
 ### Thay đổi quan trọng
-- **2026-09-29 (cùng ngày, mới nhất — mở rộng iLO ngoài RAID, 8 mục hardware health)**: User dán
+- **2026-09-29 (cùng ngày, mới nhất — vòng 2, iLO5 + 3 mục bonus)**: Ngay sau khi deploy vòng 1
+  (8 mục hardware health), verify sống trên prod phát hiện Hyperv-01 thực ra là ProLiant DL380
+  Gen10 + iLO5 (không phải Gen9/iLO4 như 2 host kia) — 4 field Battery/AMS/Processor/Memory null
+  hoàn toàn vì `Systems/1/` trên iLO5 dùng `Oem.Hpe` thay vì `Oem.Hp`. User chọn "fix + thêm luôn
+  3 mục bonus" khi được hỏi phạm vi (thay vì chỉ vá đúng 8 mục cũ). Probe trực tiếp tìm ra
+  `Oem.Hpe.AggregateHealthStatus` — rollup có sẵn gần như nguyên xi 12 mục Health Summary gốc,
+  cho phép thêm luôn BIOS/Hardware Health, Network, Fan Redundancy (3 mục ban đầu tưởng "chưa có
+  nguồn rõ" ở vòng 1 — hoá ra có, chỉ là nguồn đó riêng cho iLO5). Chi tiết đầy đủ (schema, bẫy
+  case-sensitivity `HealthRollUp`/`HealthRollup`, migration, rule mới): xem mục "iLO Redfish" →
+  "Mở rộng ngoài RAID — iLO5 + 3 mục bonus" ở trên. Migration `0011_hardwarehealth_bios_
+  hardware_health_code_and_more`. 3 field mới + 3 rule seed mới (CHỈ có dữ liệu/fire trên host
+  iLO5, None/không fire trên host iLO4 — không phải bug). Test mới: `TestParseRedundancyStatus`,
+  `TestParseSystemSummarySchemaDetection` (`tests/collectors/test_ilo_redfish.py`),
+  `TestCheckDeviceAlertsIloBonusFields` (`tests/alerts/test_ilo_alerts.py`).
+- **2026-09-29 (cùng ngày, vòng 1 — mở rộng iLO ngoài RAID, 8 mục hardware health)**: User dán
   ảnh chụp "Health Summary" thật của iLO (12 mục: Agentless Management Service, Smart Storage
   Battery Status, BIOS/Hardware Health, Fan Redundancy, Fans, Memory, Network, Power Status, Power
   Supplies, Processors, Storage, Temperatures), hỏi so sánh với phạm vi giám sát hiện tại. Đối

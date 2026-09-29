@@ -367,6 +367,24 @@
           Power Redundancy: {% if ok == True %}OK{% elif ok == False %}DEGRADED{% else %}—{% endif %}
         </span>
         {% endwith %}
+        <!-- 3 badge bonus (2026-09-29 vòng 2) — CHỈ có dữ liệu trên host iLO5 (Oem.Hpe.
+             AggregateHealthStatus); host iLO4 (Hyperv-02/Hyprver03) luôn hiện "—" cho cả 3, không
+             phải lỗi mà là không có nguồn tương đương trên schema đó. -->
+        {% with code=latest_hardware_health.bios_hardware_health_code %}
+        <span class="badge {% if code == 0 %}bg-success{% elif code == 1 %}bg-warning text-dark{% elif code == 2 %}bg-danger{% else %}bg-secondary{% endif %}">
+          BIOS/Hardware Health: {% if code == 0 %}OK{% elif code == 1 %}Warning{% elif code == 2 %}Critical{% else %}—{% endif %}
+        </span>
+        {% endwith %}
+        {% with code=latest_hardware_health.network_health_code %}
+        <span class="badge {% if code == 0 %}bg-success{% elif code == 1 %}bg-warning text-dark{% elif code == 2 %}bg-danger{% else %}bg-secondary{% endif %}">
+          Network: {% if code == 0 %}OK{% elif code == 1 %}Warning{% elif code == 2 %}Critical{% else %}—{% endif %}
+        </span>
+        {% endwith %}
+        {% with ok=latest_hardware_health.fan_redundancy_ok %}
+        <span class="badge {% if ok == True %}bg-success{% elif ok == False %}bg-danger{% else %}bg-secondary{% endif %}">
+          Fan Redundancy: {% if ok == True %}OK{% elif ok == False %}DEGRADED{% else %}—{% endif %}
+        </span>
+        {% endwith %}
         {% if latest_hardware_health.ams_device_discovery %}
         <span class="badge bg-secondary">AMS: {{ latest_hardware_health.ams_device_discovery }}</span>
         {% endif %}

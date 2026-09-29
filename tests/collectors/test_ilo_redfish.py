@@ -195,7 +195,7 @@ class TestNormalizeExtendedHardwareHealth:
     def test_battery_ok_and_ams_discovery_string(self, ilo_device):
         raw = _raw_healthy_controller()
         raw["system_summary"] = {
-            "battery": [{"Condition": "Ok", "Index": 1}],
+            "battery_conditions": ["Ok"],
             "ams_device_discovery": "NoAMS",
             "processor_health": "OK",
             "memory_health": "OK",
@@ -212,7 +212,7 @@ class TestNormalizeExtendedHardwareHealth:
         normalize() map đúng 'Degraded' -> code 1 (Warning), khác 0 (OK) lẫn 2 (Critical)."""
         raw = _raw_healthy_controller()
         raw["system_summary"] = {
-            "battery": [{"Condition": "Degraded", "Index": 1}],
+            "battery_conditions": ["Degraded"],
             "ams_device_discovery": "",
             "processor_health": "OK",
             "memory_health": "OK",
@@ -233,6 +233,44 @@ class TestNormalizeExtendedHardwareHealth:
         assert result["memory_health_code"] is None
         assert result["ams_device_discovery"] == ""
         assert result["controller_health_code"] == 0
+
+    def test_bios_network_fan_redundancy_none_on_ilo4(self, ilo_device):
+        """iLO4 (Oem.Hp) KHÔNG có nguồn tương đương cho 3 field bonus — phải None, KHÔNG suy đoán,
+        kể cả khi system_summary có dữ liệu battery/processor/memory hợp lệ."""
+        raw = _raw_healthy_controller()
+        raw["system_summary"] = {
+            "battery_conditions": ["Ok"],
+            "ams_device_discovery": "NoAMS",
+            "processor_health": "OK",
+            "memory_health": "OK",
+            "bios_hardware_health": None,
+            "network_health": None,
+            "fan_redundancy_raw": None,
+        }
+        result = IloRedfishClient(ilo_device).normalize(raw)
+
+        assert result["bios_hardware_health_code"] is None
+        assert result["network_health_code"] is None
+        assert result["fan_redundancy_ok"] is None
+
+    def test_bios_network_fan_redundancy_populated_on_ilo5(self, ilo_device):
+        """iLO5 (Oem.Hpe.AggregateHealthStatus) cho sẵn 3 field bonus — verify runtime 2026-09-29
+        Hyperv-01: BiosOrHardwareHealth/Network = 'OK', FanRedundancy = 'Redundant'."""
+        raw = _raw_healthy_controller()
+        raw["system_summary"] = {
+            "battery_conditions": ["OK"],
+            "ams_device_discovery": "Unavailable",
+            "processor_health": "OK",
+            "memory_health": "OK",
+            "bios_hardware_health": "OK",
+            "network_health": "OK",
+            "fan_redundancy_raw": "Redundant",
+        }
+        result = IloRedfishClient(ilo_device).normalize(raw)
+
+        assert result["bios_hardware_health_code"] == 0
+        assert result["network_health_code"] == 0
+        assert result["fan_redundancy_ok"] is True
 
     def test_fan_worst_code_ignores_absent_fans(self, ilo_device):
         """Fan Absent (không có Status.Health) phải bị BỎ QUA khi tính worst — verify runtime:
@@ -375,6 +413,134 @@ class TestNormalizeExtendedHardwareHealth:
         assert result["enclosure_mismatch_count"] == 1
         assert result["power_supply_worst_code"] is None
         assert result["power_redundancy_ok"] is None
+
+
+class TestParseRedundancyStatus:
+    """Regression 2026-09-29 vòng 2: FanRedundancy (iLO5, Oem.Hpe.AggregateHealthStatus) là
+    string enum, chỉ mới thấy 'Redundant' trên thiết bị thật (Hyperv-01)."""
+
+    def test_redundant_returns_true(self):
+        assert IloRedfishClient._parse_redundancy_status("Redundant", "dev", "ctx") is True
+
+    def test_none_or_empty_returns_none(self):
+        assert IloRedfishClient._parse_redundancy_status(None, "dev", "ctx") is None
+        assert IloRedfishClient._parse_redundancy_status("", "dev", "ctx") is None
+
+    def test_unknown_value_returns_false_and_logs_warning(self, caplog):
+        with caplog.at_level("WARNING"):
+            result = IloRedfishClient._parse_redundancy_status("NotRedundant", "dev", "fan redundancy")
+        assert result is False
+        assert "giá trị lạ" in caplog.text
+
+
+class TestParseSystemSummarySchemaDetection:
+    """Regression 2026-09-29 vòng 2: Hyperv-01 hoá ra là iLO5 (Oem.Hpe), không phải iLO4 (Oem.Hp)
+    như 2 host kia — phát hiện qua bug 4 field None sau khi mở rộng ngoài RAID. Verify
+    _collect_system_summary tự nhận diện đúng schema và _parse_system_summary_ilo5 đọc đúng
+    Oem.Hpe.AggregateHealthStatus (dữ liệu thật đã dump từ Hyperv-01)."""
+
+    def test_parse_ilo4_schema(self):
+        body = {
+            "ProcessorSummary": {"Status": {"HealthRollUp": "OK"}},
+            "MemorySummary": {"Status": {"HealthRollUp": "OK"}},
+        }
+        oem_hp = {
+            "Battery": [{"Condition": "Ok", "Index": 1}],
+            "DeviceDiscoveryComplete": {"AMSDeviceDiscovery": "NoAMS"},
+        }
+        result = IloRedfishClient._parse_system_summary_ilo4(body, oem_hp)
+
+        assert result["battery_conditions"] == ["Ok"]
+        assert result["ams_device_discovery"] == "NoAMS"
+        assert result["processor_health"] == "OK"
+        assert result["memory_health"] == "OK"
+        assert result["bios_hardware_health"] is None
+        assert result["network_health"] is None
+        assert result["fan_redundancy_raw"] is None
+
+    def test_parse_ilo5_schema_matches_real_hyperv01_dump(self):
+        """Mirror ĐÚNG dữ liệu thật dump từ Hyperv-01 (DL380 Gen10, iLO5) 2026-09-29."""
+        oem_hpe = {
+            "AggregateHealthStatus": {
+                "AgentlessManagementService": "Unavailable",
+                "BiosOrHardwareHealth": {"Status": {"Health": "OK"}},
+                "FanRedundancy": "Redundant",
+                "Fans": {"Status": {"Health": "OK"}},
+                "Memory": {"Status": {"Health": "OK"}},
+                "Network": {"Status": {"Health": "OK"}},
+                "PowerSupplies": {"PowerSuppliesMismatch": False, "Status": {"Health": "OK"}},
+                "PowerSupplyRedundancy": "Redundant",
+                "Processors": {"Status": {"Health": "OK"}},
+                "SmartStorageBattery": {"Status": {"Health": "OK"}},
+                "Storage": {"Status": {"Health": "OK"}},
+                "Temperatures": {"Status": {"Health": "OK"}},
+            }
+        }
+        result = IloRedfishClient._parse_system_summary_ilo5("Hyperv-01", oem_hpe)
+
+        assert result["battery_conditions"] == ["OK"]
+        assert result["ams_device_discovery"] == "Unavailable"
+        assert result["processor_health"] == "OK"
+        assert result["memory_health"] == "OK"
+        assert result["bios_hardware_health"] == "OK"
+        assert result["network_health"] == "OK"
+        assert result["fan_redundancy_raw"] == "Redundant"
+
+    def test_parse_ilo5_returns_none_when_aggregate_health_status_missing(self, caplog):
+        with caplog.at_level("WARNING"):
+            result = IloRedfishClient._parse_system_summary_ilo5("dev", {})
+        assert result is None
+        assert "AggregateHealthStatus" in caplog.text
+
+    def test_collect_system_summary_picks_ilo4_branch_when_oem_hp_present(self, ilo_device, mocker):
+        session = mocker.MagicMock()
+        response = mocker.MagicMock(status_code=200)
+        response.json.return_value = {
+            "Oem": {"Hp": {"Battery": [{"Condition": "Ok"}], "DeviceDiscoveryComplete": {}}},
+            "ProcessorSummary": {"Status": {"HealthRollUp": "OK"}},
+            "MemorySummary": {"Status": {"HealthRollUp": "OK"}},
+        }
+        session.get.return_value = response
+        client = IloRedfishClient(ilo_device)
+
+        result = client._collect_system_summary(session, "https://10.0.198.254")
+
+        assert result["battery_conditions"] == ["Ok"]
+        assert result["bios_hardware_health"] is None  # iLO4 -- không có nguồn
+
+    def test_collect_system_summary_picks_ilo5_branch_when_oem_hpe_present(self, ilo_device, mocker):
+        session = mocker.MagicMock()
+        response = mocker.MagicMock(status_code=200)
+        response.json.return_value = {
+            "Oem": {"Hpe": {"AggregateHealthStatus": {
+                "SmartStorageBattery": {"Status": {"Health": "OK"}},
+                "AgentlessManagementService": "Unavailable",
+                "Processors": {"Status": {"Health": "OK"}},
+                "Memory": {"Status": {"Health": "OK"}},
+                "BiosOrHardwareHealth": {"Status": {"Health": "OK"}},
+                "Network": {"Status": {"Health": "OK"}},
+                "FanRedundancy": "Redundant",
+            }}},
+        }
+        session.get.return_value = response
+        client = IloRedfishClient(ilo_device)
+
+        result = client._collect_system_summary(session, "https://10.0.198.254")
+
+        assert result["battery_conditions"] == ["OK"]
+        assert result["bios_hardware_health"] == "OK"
+        assert result["fan_redundancy_raw"] == "Redundant"
+
+    def test_collect_system_summary_none_when_both_oem_namespaces_missing(self, ilo_device, mocker):
+        session = mocker.MagicMock()
+        response = mocker.MagicMock(status_code=200)
+        response.json.return_value = {"Oem": {"SomeOtherVendor": {}}}
+        session.get.return_value = response
+        client = IloRedfishClient(ilo_device)
+
+        result = client._collect_system_summary(session, "https://10.0.198.254")
+
+        assert result is None
 
 
 class TestCollectRawExtendedHardwareHealth:

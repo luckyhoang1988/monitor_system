@@ -63,6 +63,9 @@ class AlertRule(models.Model):
         "ilo_temperature_health": "Temperature Health (iLO)",
         "ilo_power_supply_health": "Power Supply Health (iLO)",
         "ilo_power_redundancy": "Power Redundancy (iLO)",
+        "ilo_bios_hardware_health": "BIOS/Hardware Health (iLO)",
+        "ilo_network_health": "Network Health (iLO)",
+        "ilo_fan_redundancy": "Fan Redundancy (iLO)",
     }
 
     # Scale health code dùng chung cho mọi metric dạng OK/Warning/Critical (RAID controller/logical
@@ -130,11 +133,12 @@ class AlertRule(models.Model):
             return f"{t:.1f} KB"
         if m in ("raid_controller_health", "raid_logical_drive_health",
                  "ilo_battery_health", "ilo_processor_health", "ilo_memory_health",
-                 "ilo_fan_health", "ilo_temperature_health", "ilo_power_supply_health"):
+                 "ilo_fan_health", "ilo_temperature_health", "ilo_power_supply_health",
+                 "ilo_bios_hardware_health", "ilo_network_health"):
             return self.HEALTH_CODE_NAMES.get(int(t), f"code={t:.0f}")
         if m in ("raid_missing_disk_count", "raid_enclosure_mismatch"):
             return f"{t:.0f}"
-        if m == "ilo_power_redundancy":
+        if m in ("ilo_power_redundancy", "ilo_fan_redundancy"):
             return "OK" if t == 1 else "DEGRADED"
         return f"{t:.2f}"
 

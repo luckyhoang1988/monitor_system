@@ -142,6 +142,28 @@ DEFAULT_RULES = [
         "condition": "eq", "threshold": 0.0,
         "severity": "CRITICAL", "duration_min": 0,
     },
+    # 3 rule bonus vòng 2 (cùng ngày) — CHỈ có dữ liệu trên host iLO5 (Oem.Hpe.AggregateHealthStatus,
+    # phát hiện qua Hyperv-01 thật ra là DL380 Gen10/iLO5), None vĩnh viễn trên host iLO4
+    # (Hyperv-02/Hyprver03) nên rule không bao giờ fire cho 2 host đó — không phải bug, chỉ là
+    # không có nguồn dữ liệu tương đương trên iLO4.
+    {
+        "name": "HyperV BIOS/Hardware Health Warning+",
+        "device_type": "hyperv", "metric": "ilo_bios_hardware_health",
+        "condition": "gte", "threshold": 1.0,
+        "severity": "WARNING", "duration_min": 0,
+    },
+    {
+        "name": "HyperV Network Health Warning+",
+        "device_type": "hyperv", "metric": "ilo_network_health",
+        "condition": "gte", "threshold": 1.0,
+        "severity": "WARNING", "duration_min": 0,
+    },
+    {
+        "name": "HyperV Fan Not Redundant",
+        "device_type": "hyperv", "metric": "ilo_fan_redundancy",
+        "condition": "eq", "threshold": 0.0,
+        "severity": "CRITICAL", "duration_min": 0,
+    },
     # Wireless rules
     {
         "name": "AP Offline",
