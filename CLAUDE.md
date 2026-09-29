@@ -136,7 +136,7 @@ apps/
   - `last_ok_seen` (**cảnh báo**): chỉ ghi khi poll THÀNH CÔNG, **KHÔNG bao giờ bị xoá** khi poll lỗi tạm. `Device.is_online_for_alert` dựa mốc này + grace `max(collect_interval×3, DEVICE_ONLINE_MIN_GRACE_SECS=300)` (dự phòng `created_at` cho thiết bị vừa thêm).
   - **Vì sao**: trước đây xoá `last_seen` làm `is_online`=False **ngay** (grace bị bỏ qua khi `last_seen=None`) → 1 vòng poll trượt (ICMP rớt gói/SNMP chậm/walk rỗng) đủ bắn alert `device_online` **Offline giả** rồi Recovered → **spam Telegram flapping**. Nay alert offline ([_device_online](apps/alerts/engine.py), [_sustained_device_online](apps/alerts/engine.py)) dùng `is_online_for_alert` → chỉ báo khi mất tín hiệu THẬT vượt grace; dashboard vẫn Off tức thì.
 - `Device.is_online` ([apps/devices/models.py](apps/devices/models.py)): property từ `last_seen` + grace `max(collect_interval×3, DEVICE_ONLINE_MIN_GRACE_SECS=300)`. Dùng trong `_dashboard_counts()`, render index. **Cảnh báo offline KHÔNG dùng property này** (dùng `is_online_for_alert`).
-- **Chống spam khác** ([apps/alerts/engine.py](apps/alerts/engine.py)): (1) `_resolve_alert` chỉ gửi ✅ RECOVERED nếu fire đã từng có `AlertNotification` status `sent` → fire bị flapping-suppress thì resolve im lặng (không dội recovery). (2) `mem_percent==0` coi là sentinel "không đo được" (Cisco Business/SMB không expose mem) → `_latest_mem`/`_sustained_cpu_mem` bỏ qua → rule `lt/lte` mem không fire giả.
+- **Chống spam khác** ([apps/alerts/engine.py](apps/alerts/engine.py)): (1) `_resolve_alert` chỉ gửi ✅ RECOVERED nếu fire đã từng có `AlertNotification` status `sent` → fire bị flapping-suppress thì resolve im lặng (không dội recovery). ⚠️ Nếu fire vẫn `pending`/`processing` TẠI THỜI ĐIỂM resolve chạy (worker chết giữa lúc `_fire_alert` commit outbox và lúc kịp dispatch) → `_resolve_alert` không queue gì; `_finalize_fire_sent` (gọi khi fire đó CUỐI CÙNG cũng chuyển "sent", dù từ dispatch gốc hay sweep) gộp "chuyển sent" + "queue recovery trễ nếu alert đã resolve" (`_queue_late_recovery_if_resolved`) vào CHUNG 1 transaction có khoá `Device` (giống `_fire_alert`/`_resolve_alert`) — tránh cả mất recovery khi crash giữa 2 bước lẫn race đọc `is_active` với `_resolve_alert`. Quyết định recovery theo TỪNG (alert, channel), không theo alert (rule nhiều channel, channel chậm không được nhận RECOVERED trước khi từng nhận ALERT) — xem memory `notification-outbox-late-recovery-claim-token.md`. (2) `mem_percent==0` coi là sentinel "không đo được" (Cisco Business/SMB không expose mem) → `_latest_mem`/`_sustained_cpu_mem` bỏ qua → rule `lt/lte` mem không fire giả.
 - ⚠️ **Rule `duration_min>0` — resolve KHÔNG cần sustain, chỉ FIRE mới cần** (fix 2026-09-28,
   commit `d258bec`): các hàm `_sustained_*` (`_sustained_cpu_mem`/`_sustained_host_perf`/
   `_sustained_vm_metric`/`_sustained_wifi_client_count`/`_sustained_wifi_ap_offline_count`/
@@ -435,6 +435,83 @@ admin credential riêng, không nhất thiết giống Hyperv-02/Hyprver03).
   `expire_seconds` cùng giá trị, nếu không entry đó lặp lại đúng bug này.
 
 ### Thay đổi quan trọng
+- **2026-09-29 (cùng ngày, review vòng 2)**: Bản fix vòng 1 ngay dưới đây (`_queue_late_recovery_if_resolved`)
+  tự nó tái tạo đúng loại bug mà dự án đã gặp nhiều lần ("commit trạng thái TRƯỚC, side-effect
+  SAU, không durable/không đồng bộ khoá") — user dán tiếp review vòng 2, 2 điểm, cả 2 verify đúng
+  bằng cách sửa tay lùi logic (chưa có commit boundary sạch để `git stash`) rồi xác nhận test mới
+  FAIL trước khi khẳng định fix đúng:
+  1. **Cao — `_dispatch_notifications`/`retry_pending_alert_notifications` chuyển fire sang
+     "sent" ở 1 câu DB, rồi mới gọi `_queue_late_recovery_if_resolved` ở 1 câu RIÊNG sau khi câu
+     trước đã commit — worker chết giữa 2 câu vẫn mất recovery vĩnh viễn** (fire đã "sent" là
+     trạng thái cuối, không gì kích hoạt lại). Fix: hàm mới `_finalize_fire_sent(alert, channel,
+     token)` gộp CẢ 2 thao tác vào CHUNG 1 `transaction.atomic()` — crash giữa chừng thì toàn bộ
+     rollback (row vẫn "processing"), sweep sau reclaim + làm lại nguyên vẹn. Verify: test mock
+     `_queue_late_recovery_if_resolved` ném exception, assert fire rollback về "processing" — xác
+     nhận FAIL (kẹt ở "sent") khi tạm bỏ `transaction.atomic()`.
+  2. **Cao — đọc "fire đã sent" (`_resolve_alert`) và đọc "alert đã resolve" (helper late-recovery)
+     là 2 SELECT độc lập không khoá gì chung — fire chuyển sent đúng lúc nằm GIỮA lúc
+     `_resolve_alert` đọc xong danh sách "đã gửi" và lúc nó COMMIT `is_active=False` thì CẢ 2 bên
+     đều đọc phải giá trị CŨ của phía kia → không bên nào tạo recovery.** Fix theo đúng gợi ý
+     review: `_finalize_fire_sent` khoá `Device` (`select_for_update()`) giống hệt
+     `_fire_alert`/`_resolve_alert` TRƯỚC KHI đọc/ghi — 2 giao dịch cạnh tranh cùng device luôn
+     serialize trên Postgres. ⚠️ **Đính chính cùng ngày**: ban đầu tưởng nhầm dev/test dùng SQLite
+     (giả định KHÔNG kiểm chứng) nên ghi "SQLite bỏ qua select_for_update, test không chứng minh
+     được serialization thật" — verify lại bằng kết nối trực tiếp: `.env`/`development.py` dùng
+     **Postgres thật** (localhost, Postgres 18.4) cho cả dev lẫn test (`pytest.ini` trỏ
+     `config.settings.development`), KHÔNG có nhánh SQLite nào trong project này. `select_for_update`
+     do đó CÓ lấy khoá row thật kể cả khi chạy test. Giới hạn thật sự không phải "SQLite bỏ qua
+     lock" mà là "test hiện tại chạy tuần tự 1 thread, không có 2 giao dịch nào thực sự cạnh tranh
+     cùng lúc để khoá phải phát huy tác dụng" — xem memory để biết cách verify thêm bằng test đa
+     luồng thật trên Postgres nếu cần chứng minh sâu hơn.
+  3. **Điểm bổ sung — rule nhiều channel: 1 channel đã "sent" fire là đủ để `_resolve_alert` tạo
+     recovery cho MỌI channel của rule, kể cả channel khác chưa từng gửi fire (SMTP treo) → channel
+     chậm nhận RECOVERED trước khi từng nhận ALERT.** Fix: `sent_fire_channels` đổi từ
+     `set(alert_id)` sang `set((alert_id, channel))`, quyết định + dispatch theo từng cặp.
+  3 test mới (`test_crash_between_finalize_and_recovery_rolls_back_both`,
+  `test_success_path_still_finalizes_and_queues_recovery_together`,
+  `test_resolve_only_queues_recovery_for_channels_whose_fire_was_sent`) — 463 test pass (460+3
+  mới), 2 skip như cũ, không migration mới (chỉ đổi logic). Chi tiết: memory
+  `notification-outbox-late-recovery-claim-token.md` mục "Vòng 2".
+- **2026-09-29**: Review tiếp theo (người dùng dán từ ngoài, không phải security-review 4 đợt
+  ngày hôm trước) soi đúng vào outbox `AlertNotification` vừa viết — 2 điểm, cả 2 verify đúng
+  bằng cách đọc code thật rồi TỰ CHỨNG MINH bằng test fail trên code cũ trước khi sửa (đúng quy
+  trình §0 — không sửa mù theo báo cáo):
+  1. **Cao — có thể gửi FIRE trễ mà không bao giờ có RECOVERED theo sau, nếu worker chết ngay
+     sau khi `_fire_alert` commit outbox `pending` nhưng trước khi kịp dispatch, RỒI alert mới
+     resolve.** `_resolve_alert` chỉ queue recovery cho alert có fire `status="sent"` **TẠI THỜI
+     ĐIỂM resolve chạy** — quyết định chỉ đưa ra ĐÚNG 1 LẦN, không có gì kích hoạt lại. Nếu fire
+     vẫn `pending` lúc đó (chưa kịp gửi), resolve bỏ qua vĩnh viễn; sau đó
+     `retry_pending_alert_notifications` vẫn gửi fire trễ thành công → người nhận thấy "sự cố
+     mới" dù nó đã hồi phục từ trước, và KHÔNG BAO GIỜ nhận RECOVERED. Verify bằng test mô phỏng
+     đúng thứ tự "fire pending → resolve chạy trước → fire mới được gửi trễ" — fail thật trên
+     code cũ (`AlertNotification.DoesNotExist` vì không có row recovery nào được tạo), pass sau
+     fix. Fix: hàm mới `_queue_late_recovery_if_resolved(alert_id, channel)` — gọi ngay sau khi 1
+     fire notification CHUYỂN "sent" thật (ở cả `_dispatch_notifications` lẫn
+     `retry_pending_alert_notifications`), tự kiểm tra alert đã `is_active=False` chưa; nếu rồi
+     và chưa có recovery row cho channel đó → tạo `pending`. Coi "recovery còn nợ" là điều kiện
+     re-check ở CẢ 2 nơi có thể làm nó đúng (resolve chạy sau HOẶC fire gửi xong sau) — bên nào
+     xảy ra sau sẽ là bên phát hiện. An toàn không cần lock thêm vì 1 fire-notification row chỉ
+     chuyển "sent" đúng 1 lần (nhờ fix #2 ngay dưới).
+  2. **Trung bình — có thể gửi trùng thật khi channel `email` treo lâu hơn
+     `stale_processing_secs` (300s), vì trước đó KHÔNG có `EMAIL_TIMEOUT` (smtplib treo vô thời
+     hạn nếu SMTP server không phản hồi) và row `AlertNotification` không có "mã sở hữu" để phân
+     biệt chủ cũ (bị coi nhầm là kẹt) với chủ mới (vừa reclaim).** Sweep coi 1 row `processing`
+     quá `stale_processing_secs` là "kẹt" và reclaim — nhưng nếu chủ cũ thực ra vẫn đang gửi hợp
+     lệ (chỉ chậm), CẢ 2 bên đều gọi hàm gửi thật (gửi trùng không tránh được nếu SMTP đã treo
+     thật lâu), và bên finalize SAU có thể ghi đè kết quả ĐÚNG mà bên finalize TRƯỚC (chủ mới) đã
+     ghi. Fix 2 lớp: (a) **`EMAIL_TIMEOUT=20`** (`config/settings/base.py`, mới,
+     `.env.example`) — bound thời gian gửi email dưới hẳn `stale_processing_secs`, chặn gốc rễ
+     nguyên nhân treo vô thời hạn; (b) **field mới `AlertNotification.claim_token`** (CharField,
+     migration `0008`) — ghi token ngẫu nhiên MỖI LẦN claim (pending/processing→processing);
+     finalize (sent/failed) PHẢI match đúng token đó, nếu không (đã bị reclaim, token đổi) → tự
+     bỏ qua, KHÔNG ghi đè. Verify bằng test mô phỏng trực tiếp "chủ cũ cầm token cũ cố finalize
+     sau khi đã bị reclaim" — `UPDATE ... WHERE claim_token=<token cũ>` khớp 0 dòng trên code có
+     fix (fail với `TypeError` trên code cũ vì field còn chưa tồn tại — xác nhận test đúng là
+     regression test, không phải tautology).
+  2 test mới (`test_stale_owner_cannot_overwrite_reclaimed_result`,
+  `test_fire_confirmed_sent_after_resolve_still_gets_recovery`,
+  `tests/alerts/test_notification_outbox.py`) — 460 test pass (458+2 mới), 2 skip như cũ. Chi
+  tiết đầy đủ: memory `notification-outbox-late-recovery-claim-token.md`.
 - **2026-09-28 (cùng ngày, mới nhất — sau đợt 3)**: Security review đợt 4 (2 điểm), soi thẳng
   vào code `retry_pending_alert_notifications` mới viết ở đợt 3 cùng ngày — cả 2 đúng:
   1. **Medium — 2 lần gọi `retry_pending_alert_notifications` chồng nhau có thể gửi trùng**:

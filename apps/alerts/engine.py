@@ -1,5 +1,6 @@
 """Alert rule engine — đánh giá ngưỡng và tạo Alert record."""
 import logging
+import uuid
 from datetime import timedelta
 from django.conf import settings
 from django.db import transaction
@@ -1006,17 +1007,23 @@ def _resolve_alert(device: Device, rule: AlertRule) -> None:
             resolved_at=resolved_at,
         )
         # Transactional-outbox-lite — cùng transaction với claim is_active=False ở trên (xem
-        # comment đầy đủ ở _fire_alert). Chỉ tạo pending cho alert nào ĐÃ có fire notification
-        # "sent" — giữ nguyên logic chống dội RECOVERED cho alert bị flapping-suppress lúc fire.
-        notified_alert_ids = set(
+        # comment đầy đủ ở _fire_alert). Chỉ tạo pending cho (alert, channel) nào ĐÃ có fire
+        # notification "sent" — giữ nguyên logic chống dội RECOVERED cho alert bị flapping-
+        # suppress lúc fire.
+        # ⚠️ 2026-09-29 (review vòng 2): quyết định recovery PHẢI theo TỪNG (alert, channel), KHÔNG
+        # theo alert — bản trước chỉ cần 1 channel đã "sent" là tạo recovery cho MỌI channel của
+        # rule, kể cả channel khác còn chưa gửi fire (vd SMTP treo) → channel đó nhận RECOVERED
+        # TRƯỚC khi từng nhận ALERT. `sent_fire_channels` là set (alert_id, channel).
+        sent_fire_channels = set(
             AlertNotification.objects.filter(
                 alert__in=alerts_to_resolve, kind="fire", status="sent"
-            ).values_list("alert_id", flat=True)
+            ).values_list("alert_id", "channel")
         )
         pending_rows = [
             AlertNotification(alert=alert, channel=ch, kind="recovery", status="pending")
-            for alert in alerts_to_resolve if alert.pk in notified_alert_ids
+            for alert in alerts_to_resolve
             for ch in rule.channels
+            if (alert.pk, ch) in sent_fire_channels
         ]
         if pending_rows:
             AlertNotification.objects.bulk_create(pending_rows)
@@ -1025,9 +1032,79 @@ def _resolve_alert(device: Device, rule: AlertRule) -> None:
         # Gán resolved_at lên object TRƯỚC khi gửi để tin RECOVERED có ngày giờ
         # (trước đây gửi trước update → alert.resolved_at=None → hiện "N/A").
         alert.resolved_at = resolved_at
-        if alert.pk in notified_alert_ids:
-            _dispatch_notifications(alert, rule.channels, kind="recovery")
+        channels_to_notify = [ch for ch in rule.channels if (alert.pk, ch) in sent_fire_channels]
+        if channels_to_notify:
+            _dispatch_notifications(alert, channels_to_notify, kind="recovery")
     logger.info("ALERT resolved: %s — %s", device.name, rule.name)
+
+
+def _queue_late_recovery_if_resolved(alert_id: int, channel: str) -> None:
+    """Gọi ngay sau khi 1 fire notification của `channel` vừa chuyển "sent" thật — LUÔN từ bên
+    trong `_finalize_fire_sent` (transaction đã khoá Device), KHÔNG gọi trực tiếp nơi khác trừ
+    nhánh fallback "chưa từng có outbox row" trong `_dispatch_notifications` (gọi ngoài luồng
+    chuẩn, vd test) — xem 2 hàm đó.
+
+    ⚠️ 2026-09-29 (theo báo cáo review): `_resolve_alert` chỉ queue recovery cho (alert, channel)
+    có fire "sent" TẠI THỜI ĐIỂM resolve chạy — nếu fire còn "pending"/"processing" lúc đó (worker
+    chết giữa lúc _fire_alert commit outbox và lúc kịp dispatch), resolve bỏ qua VĨNH VIỄN (quyết
+    định chỉ đưa ra 1 lần, không có gì kích hoạt lại). Sau đó `retry_pending_alert_notifications`
+    vẫn gửi fire trễ đó thành công → người nhận thấy "sự cố mới" dù nó đã hồi phục từ trước, và
+    KHÔNG BAO GIỜ nhận được RECOVERED theo sau. Fix: coi "recovery còn nợ" là điều kiện được
+    re-check tại CẢ 2 nơi có thể làm nó đúng — _resolve_alert (khi resolve chạy sau) VÀ đây (khi
+    fire cuối cùng cũng gửi xong sau khi resolve đã chạy trước) — bên nào xảy ra SAU sẽ là bên
+    phát hiện + tạo pending recovery.
+
+    ⚠️ 2026-09-29 (review vòng 2 — 2 khoảng hở còn sót ở bản đầu):
+    (a) Bản đầu gọi hàm này bằng 1 lệnh DB RIÊNG, sau khi đã COMMIT "sent" ở 1 lệnh khác — worker
+        chết đúng giữa 2 lệnh làm mất VĨNH VIỄN cơ hội tạo recovery (fire đã "sent" — trạng thái
+        cuối, không còn gì kích hoạt lại được). Fix: `_finalize_fire_sent` gộp finalize "sent" +
+        gọi hàm này vào CHUNG 1 `transaction.atomic()` — crash giữa chừng thì TOÀN BỘ rollback
+        (row vẫn "processing" như cũ), sweep sau reclaim và làm lại nguyên vẹn cả 2 bước.
+    (b) Đọc `is_active=False` ở đây và đọc `sent_fire_channels` trong `_resolve_alert` là 2 lệnh
+        SELECT độc lập không cùng khoá gì — fire chuyển "sent" đúng lúc nằm GIỮA lúc _resolve_alert
+        đọc xong danh sách "đã gửi" và lúc nó COMMIT is_active=False: cả 2 bên đều đọc phải giá
+        trị "cũ" của phía kia → KHÔNG bên nào tạo recovery. Fix: `_finalize_fire_sent` khoá
+        `Device` (`select_for_update()`) giống hệt `_fire_alert`/`_resolve_alert` TRƯỚC KHI đọc
+        `is_active` ở đây — 2 giao dịch cạnh tranh cùng device luôn serialize (Postgres, KHÔNG
+        phải SQLite — SQLite bỏ qua select_for_update, xem test), không còn khoảng hở giữa đọc và
+        commit của bên kia.
+
+    An toàn không cần lock RIÊNG bên trong hàm này (lock đã có ở caller `_finalize_fire_sent`): 1
+    fire-notification row chỉ chuyển "sent" ĐÚNG 1 LẦN (claim token chặn double-send cùng row)
+    nên helper này chỉ có thể tự kích hoạt đúng 1 lần cho mỗi (alert, channel) — vẫn giữ check
+    `.exists()` để an toàn kép, tránh tạo trùng nếu `_resolve_alert` đã lỡ tạo sẵn.
+    """
+    try:
+        alert = Alert.objects.select_related("rule").get(pk=alert_id, is_active=False)
+    except Alert.DoesNotExist:
+        return  # Alert chưa resolve (hoặc đã bị xoá) — chưa có gì "nợ", nhánh resolve lo sau.
+    if AlertNotification.objects.filter(alert=alert, channel=channel, kind="recovery").exists():
+        return
+    AlertNotification.objects.create(alert=alert, channel=channel, kind="recovery", status="pending")
+    logger.info(
+        "Recovery queued trễ (fire [%s] gửi xong SAU khi alert đã resolve): %s — %s",
+        channel, alert.device.name, alert.rule.name,
+    )
+
+
+def _finalize_fire_sent(alert: Alert, channel: str, token: str) -> bool:
+    """Chuyển 1 AlertNotification(kind="fire") sang "sent" + (nếu alert đã resolve) queue
+    recovery pending cho ĐÚNG channel đó — trong CÙNG 1 transaction, khoá `Device` giống hệt
+    `_fire_alert`/`_resolve_alert`. Xem 2 bẫy (a)/(b) ở docstring `_queue_late_recovery_if_resolved`
+    — hàm này là chỗ sửa cho cả 2.
+
+    Trả về True nếu claim_token khớp (finalize thành công); False nếu đã bị reclaim (1 tiến trình
+    khác đã/đang xử lý row này — caller KHÔNG được tạo row mới thay thế, không ghi đè).
+    """
+    with transaction.atomic():
+        Device.objects.select_for_update().filter(pk=alert.device_id).first()
+        updated = AlertNotification.objects.filter(
+            alert=alert, channel=channel, kind="fire", status="processing", claim_token=token,
+        ).update(status="sent", updated_at=timezone.now())
+        if not updated:
+            return False
+        _queue_late_recovery_if_resolved(alert.pk, channel)
+    return True
 
 
 def _send_channel_message(kind: str, channel: str, alert: Alert) -> None:
@@ -1070,17 +1147,36 @@ def _dispatch_notifications(alert: Alert, channels: list[str], kind: str) -> Non
     (`.filter(status="pending").update(...)` — chỉ 1 caller nhận được số dòng >0, caller khác
     tới sau nhận 0 và tự bỏ qua). Không chỉ 2 lần gọi retry_pending_alert_notifications() chồng
     nhau mới cần claim — chính lệnh gọi GỐC này (từ _fire_alert/_resolve_alert) cũng có thể bị
-    sweep định kỳ tranh mất cùng 1 row nếu gửi CHẬM hơn grace_secs (90s mặc định của sweep):
-    channel `email` dùng Django `send_mail` KHÔNG set `EMAIL_TIMEOUT` (verify: không có key này
-    trong config/settings/*) nên 1 SMTP server treo có thể giữ request lâu hơn 90s thật —
-    telegram/webhook có `timeout=10` nên tự thoát nhanh, rủi ro thấp hơn nhưng vẫn claim cho
-    đồng nhất, không đặc cách theo channel. Không thấy row pending nào (gọi ngoài luồng chuẩn,
-    vd test gọi thẳng hàm) → vẫn gửi + tự tạo row mới, giữ hàm hoạt động độc lập.
+    sweep định kỳ tranh mất cùng 1 row nếu gửi CHẬM hơn grace_secs (90s mặc định của sweep).
+    Không thấy row pending nào (gọi ngoài luồng chuẩn, vd test gọi thẳng hàm) → vẫn gửi + tự tạo
+    row mới, giữ hàm hoạt động độc lập.
+
+    ⚠️ 2026-09-29 (theo báo cáo review tiếp theo — "gửi trùng khi SMTP treo quá
+    stale_processing_secs"): claim ở trên chỉ chặn 2 lệnh UPDATE THEO ĐÚNG NGHĨA ĐEN chạy đồng
+    thời trên CÙNG row (compare-and-swap DB). Nó KHÔNG chặn được trường hợp: lệnh gọi NÀY claim
+    xong rồi treo thật sự lâu (channel `email` dùng Django `send_mail`, trước đây KHÔNG set
+    `EMAIL_TIMEOUT` nên smtplib có thể treo vô thời hạn) > `stale_processing_secs` (300s), trong
+    lúc đó sweep coi row "kẹt" và RECLAIM (ghi `claim_token` mới) rồi tự gửi+finalize xong TRƯỚC —
+    khi lệnh gọi NÀY cuối cùng cũng gửi xong (dù thành công hay lỗi), nó không biết mình đã mất
+    quyền sở hữu row, dễ ghi đè `status` mà sweep vừa set. Fix 2 lớp: (1) `EMAIL_TIMEOUT` (settings,
+    config/settings/base.py) bound thời gian gửi email dưới `stale_processing_secs` thật sự — chặn
+    gốc rễ; (2) `claim_token` ngẫu nhiên ghi lúc claim, finalize PHẢI match đúng token đó — nếu ai
+    đó đã reclaim (token đổi), UPDATE finalize match 0 dòng → tự bỏ qua, KHÔNG tạo row mới đè
+    (khác best-effort cũ luôn tạo row mới khi update=0). Lớp (2) là phòng thủ thứ 2 cho các nguyên
+    nhân trễ khác ngoài SMTP (GC pause, network buffering...) mà (1) không bound hết được.
+
+    ⚠️ 2026-09-29 (review vòng 2): finalize riêng cho `kind=="fire"` giờ đi qua
+    `_finalize_fire_sent` — gộp "chuyển sent" + "queue recovery trễ nếu alert đã resolve" vào
+    CHUNG 1 transaction có khoá `Device`, đóng 2 khoảng hở (crash giữa 2 bước; race đọc/ghi
+    `is_active` với `_resolve_alert`) — xem docstring đầy đủ ở `_finalize_fire_sent`/
+    `_queue_late_recovery_if_resolved`. `kind=="recovery"` không cần lock/late-check (không có gì
+    phụ thuộc trạng thái sau khi recovery gửi xong) nên vẫn finalize đơn giản như cũ.
     """
     for channel in channels:
+        token = uuid.uuid4().hex
         claimed = AlertNotification.objects.filter(
             alert=alert, channel=channel, kind=kind, status="pending"
-        ).update(status="processing", updated_at=timezone.now())
+        ).update(status="processing", updated_at=timezone.now(), claim_token=token)
         if not claimed and AlertNotification.objects.filter(
             alert=alert, channel=channel, kind=kind
         ).exists():
@@ -1089,20 +1185,48 @@ def _dispatch_notifications(alert: Alert, channels: list[str], kind: str) -> Non
             continue
         try:
             _send_channel_message(kind, channel, alert)
-            updated = AlertNotification.objects.filter(
-                alert=alert, channel=channel, kind=kind, status="processing"
-            ).update(status="sent", updated_at=timezone.now())
-            if not updated:
-                AlertNotification.objects.create(alert=alert, channel=channel, kind=kind, status="sent")
         except Exception as exc:
             updated = AlertNotification.objects.filter(
-                alert=alert, channel=channel, kind=kind, status="processing"
+                alert=alert, channel=channel, kind=kind, status="processing", claim_token=token,
             ).update(status="failed", error=str(exc), updated_at=timezone.now())
-            if not updated:
+            if not updated and not claimed:
                 AlertNotification.objects.create(
                     alert=alert, channel=channel, kind=kind, status="failed", error=str(exc)
                 )
+            elif not updated:
+                logger.warning(
+                    "%s notification [%s] bị reclaim trước khi ghi lỗi xong — bỏ qua, tiến "
+                    "trình reclaim chịu trách nhiệm ghi kết quả cuối", kind, channel,
+                )
             logger.error("%s notification failed [%s]: %s", kind, channel, exc)
+            continue
+
+        if kind == "fire":
+            if claimed:
+                if not _finalize_fire_sent(alert, channel, token):
+                    logger.warning(
+                        "%s notification [%s] bị reclaim trước khi gửi xong (gửi chậm hơn "
+                        "stale_processing_secs) — bỏ qua cập nhật, tiến trình reclaim chịu "
+                        "trách nhiệm ghi kết quả cuối, không ghi đè", kind, channel,
+                    )
+            else:
+                # Chưa từng có outbox row (gọi ngoài luồng chuẩn, vd test) — không có gì để
+                # claim/khoá theo pattern chuẩn, tạo thẳng row "sent" rồi vẫn check late-recovery.
+                AlertNotification.objects.create(alert=alert, channel=channel, kind=kind, status="sent")
+                _queue_late_recovery_if_resolved(alert.pk, channel)
+        else:
+            updated = AlertNotification.objects.filter(
+                alert=alert, channel=channel, kind=kind, status="processing", claim_token=token,
+            ).update(status="sent", updated_at=timezone.now())
+            if not updated:
+                if claimed:
+                    logger.warning(
+                        "%s notification [%s] bị reclaim trước khi gửi xong (gửi chậm hơn "
+                        "stale_processing_secs) — bỏ qua cập nhật, tiến trình reclaim chịu "
+                        "trách nhiệm ghi kết quả cuối, không ghi đè", kind, channel,
+                    )
+                    continue
+                AlertNotification.objects.create(alert=alert, channel=channel, kind=kind, status="sent")
 
 
 def retry_pending_alert_notifications(grace_secs: int = 90, stale_processing_secs: int = 300) -> int:
@@ -1128,6 +1252,15 @@ def retry_pending_alert_notifications(grace_secs: int = 90, stale_processing_sec
     (gửi hoặc đánh failed). Gọi từ task Celery định kỳ (apps/alerts/tasks.py) — KHÔNG lock
     Device vì đây là xử lý bù trên chính bảng AlertNotification, không cạnh tranh trực tiếp với
     fire/resolve của cùng device tại đúng thời điểm này.
+
+    ⚠️ 2026-09-29: claim ở trên chỉ chặn 2 lệnh UPDATE claim tranh nhau — KHÔNG chặn được việc
+    hàm này reclaim 1 row mà chủ cũ (lệnh gọi gốc `_dispatch_notifications`, hoặc chính hàm này ở
+    lần gọi trước) thực ra vẫn đang gửi hợp lệ (chỉ là chậm hơn `stale_processing_secs`, vd SMTP
+    không timeout trước fix `EMAIL_TIMEOUT`) chứ chưa chết hẳn — cả 2 phía khi đó đều gọi
+    `_send_channel_message` thật (gửi trùng không tránh được nếu đã xảy ra), nhưng finalize phải
+    dùng `claim_token` để đảm bảo chỉ chủ MỚI NHẤT (người reclaim) được ghi kết quả cuối — chủ cũ
+    finalize trễ hơn sẽ thấy `claim_token` không khớp (đã bị ghi đè lúc reclaim) → tự bỏ qua,
+    không ghi đè lại kết quả đúng. Xem comment đầy đủ ở `_dispatch_notifications`.
     """
     now_ = timezone.now()
     pending_cutoff = now_ - timedelta(seconds=grace_secs)
@@ -1142,25 +1275,53 @@ def retry_pending_alert_notifications(grace_secs: int = 90, stale_processing_sec
 
     processed = 0
     for pk in candidate_ids:
+        token = uuid.uuid4().hex
         claimed = AlertNotification.objects.filter(
             Q(pk=pk) & (
                 Q(status="pending")
                 | Q(status="processing", updated_at__lt=stale_cutoff)
             )
-        ).update(status="processing", updated_at=timezone.now())
+        ).update(status="processing", updated_at=timezone.now(), claim_token=token)
         if not claimed:
             continue  # bị 1 tiến trình khác claim mất giữa lúc chọn candidate và lúc tới lượt
         n = AlertNotification.objects.select_related("alert").get(pk=pk)
         try:
             _send_channel_message(n.kind, n.channel, n.alert)
-            n.status = "sent"
-            n.save(update_fields=["status", "updated_at"])
         except Exception as exc:
-            n.status = "failed"
-            n.error = str(exc)
-            n.save(update_fields=["status", "error", "updated_at"])
-            logger.error("Retry %s notification failed [%s]: %s", n.kind, n.channel, exc)
+            updated = AlertNotification.objects.filter(
+                pk=pk, status="processing", claim_token=token
+            ).update(status="failed", error=str(exc), updated_at=timezone.now())
+            processed += 1
+            if updated:
+                logger.error("Retry %s notification failed [%s]: %s", n.kind, n.channel, exc)
+            else:
+                logger.warning(
+                    "Retry %s notification [%s] bị reclaim trong lúc gửi (chủ mới đã ghi kết "
+                    "quả) — bỏ qua ghi lỗi, không ghi đè", n.kind, n.channel,
+                )
+            continue
+
+        if n.kind == "fire":
+            # _finalize_fire_sent gộp "chuyển sent" + "queue recovery trễ nếu đã resolve" vào
+            # chung 1 transaction có khoá Device — xem docstring đầy đủ ở đó (review vòng 2).
+            finalized = _finalize_fire_sent(n.alert, n.channel, token)
+            processed += 1
+            if not finalized:
+                logger.warning(
+                    "Retry %s notification [%s] bị reclaim trước khi gửi xong — bỏ qua cập "
+                    "nhật, chủ mới chịu trách nhiệm ghi kết quả cuối", n.kind, n.channel,
+                )
+            continue
+
+        updated = AlertNotification.objects.filter(
+            pk=pk, status="processing", claim_token=token
+        ).update(status="sent", updated_at=timezone.now())
         processed += 1
+        if not updated:
+            logger.warning(
+                "Retry %s notification [%s] bị reclaim trước khi gửi xong — bỏ qua cập nhật, "
+                "chủ mới chịu trách nhiệm ghi kết quả cuối", n.kind, n.channel,
+            )
     if processed:
         logger.warning("Retried %d pending/stuck alert notification(s)", processed)
     return processed

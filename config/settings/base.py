@@ -228,6 +228,11 @@ EMAIL_HOST_USER     = SMTP_USER
 EMAIL_HOST_PASSWORD = SMTP_PASSWORD
 EMAIL_USE_TLS       = True
 DEFAULT_FROM_EMAIL  = SMTP_FROM
+# Không set → smtplib treo VÔ THỜI HẠN nếu SMTP server không phản hồi (xác nhận: trước đây
+# không có key này). Giữ dưới hẳn AlertNotification stale_processing_secs (300s, xem
+# apps/alerts/engine.py retry_pending_alert_notifications) để đảm bảo 1 lần gửi email luôn kết
+# thúc (thành công hoặc lỗi) trước khi sweep coi nó "kẹt" và reclaim — nếu không, gửi trùng thật.
+EMAIL_TIMEOUT       = env.int("EMAIL_TIMEOUT", default=20)
 
 TELEGRAM_BOT_TOKEN = env("TELEGRAM_BOT_TOKEN", default="")
 TELEGRAM_CHAT_ID   = env("TELEGRAM_CHAT_ID", default="")

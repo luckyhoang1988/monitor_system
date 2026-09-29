@@ -368,6 +368,109 @@ Quy trình chuẩn (đã dùng để bắt bug 504 phiên đầu):
   `["status","updated_at"]` — không có index này thì sweep định kỳ mỗi 120s là full-table scan
   khi lịch sử `AlertNotification` lớn dần, phát hiện Low riêng nhưng sửa cùng lúc vì đụng chung
   model).
+- **"Claim nguyên tử" (bẫy ngay trên) chặn 2 lệnh UPDATE THEO ĐÚNG NGHĨA ĐEN chạy đồng thời trên
+  CÙNG row — nhưng KHÔNG chặn được việc chủ CŨ (đã claim, chưa chết, chỉ đang chạy CHẬM hơn
+  ngưỡng "coi là kẹt") vẫn tự gửi thật RỒI ghi đè kết quả của chủ MỚI (đã reclaim + gửi + finalize
+  xong trước nó).** Dính thật 2026-09-29 (review tiếp theo, soi đúng code outbox mới viết): nếu
+  `stale_processing_secs` (300s) không thực sự là giới hạn TRÊN của "1 lần gửi hợp lệ mất bao
+  lâu" — mà là ước lượng, vì channel `email` qua Django `send_mail` chưa set `EMAIL_TIMEOUT` nên
+  smtplib có thể treo VÔ THỜI HẠN — thì 1 lần gửi chậm thật (không chết) có thể bị sweep coi nhầm
+  là kẹt, reclaim, gửi lại. Khi đó CẢ 2 bên đều gọi hàm gửi thật (gửi trùng không tránh được lúc
+  này, phải chặn TỪ GỐC bằng timeout — xem ý 2 dưới), nhưng nguy hiểm hơn: UPDATE finalize của 2
+  bên đều chỉ filter theo `status="processing"` (không có gì phân biệt "processing của TÔI" vs
+  "processing của người khác đã reclaim") → bên finalize SAU (dù là chủ cũ tới muộn) ghi đè thẳng
+  lên kết quả ĐÚNG mà chủ mới đã ghi trước đó (`sent`→`failed` hoặc ngược lại), không có gì phát
+  hiện được. Fix 2 lớp, PHẢI làm cả 2 (1 lớp không đủ): (1) **Đặt timeout hữu hạn cho MỌI kênh
+  gửi** — bound "1 lần gửi hợp lệ" thật sự ngắn hơn hẳn `stale_processing_secs`, biến ước lượng
+  thành giới hạn cứng (Django `EMAIL_TIMEOUT` setting — webhook/telegram đã có `timeout=10` từ
+  trước, chỉ email thiếu). (2) **Claim token** — field `claim_token` (random, vd `uuid4().hex`)
+  ghi lại MỖI LẦN claim (kể cả reclaim); câu UPDATE finalize phải match ĐÚNG token đã ghi lúc
+  MÌNH claim (`.filter(status="processing", claim_token=token_cua_minh).update(...)`) — chủ cũ
+  tới muộn có token đã lỗi thời (bị ghi đè lúc reclaim) nên UPDATE của nó khớp 0 dòng → tự bỏ qua,
+  KHÔNG tạo row mới thay thế (khác hẳn nhánh "không có row nào tồn tại" — phải phân biệt 2
+  trường hợp `update()==0` này bằng biến `claimed` đã có sẵn từ lúc đầu hàm, không suy đoán lại).
+  Quy tắc chung: **outbox pattern có claim atomically đúng vẫn CHƯA đủ nếu thời gian giữa "claim"
+  và "finalize" không có giới hạn trên thật sự (do side-effect bên ngoài không timeout) — phải
+  bound thời gian đó bằng timeout TRƯỚC, rồi mới thêm claim token làm phòng thủ thứ 2 cho các
+  nguyên nhân trễ khác (GC pause, network buffering...) mà timeout không bound hết được.**
+- **"Recovery chỉ queue 1 lần tại thời điểm resolve" (dựa trên trạng thái fire NGAY LÚC ĐÓ) bỏ
+  sót trường hợp fire vẫn `pending` lúc resolve chạy rồi mới được gửi trễ sau đó — quyết định
+  "có nợ recovery hay không" chỉ được đánh giá ĐÚNG 1 LẦN, không có gì kích hoạt lại nếu điều
+  kiện đổi sau đó.** Dính thật 2026-09-29: `_resolve_alert` filter fire `status="sent"` để quyết
+  định channel nào cần recovery — đúng cho ca thường (fire gửi xong TRƯỚC khi resolve chạy), sai
+  cho ca hiếm nhưng có thật (worker chết giữa lúc `_fire_alert` commit `pending` và lúc kịp
+  dispatch, alert hồi phục rồi resolve chạy TRƯỚC khi fire kịp gửi) — fire đó sau này vẫn được
+  `retry_pending_alert_notifications` gửi thành công (trễ), nhưng KHÔNG BAO GIỜ có recovery theo
+  sau vì thời điểm duy nhất từng xét "cần recovery không" đã qua rồi. Verify bằng test dựng đúng
+  thứ tự sự kiện (tạo fire pending → gọi thẳng `_resolve_alert` → mới cho sweep gửi fire trễ) —
+  fail thật trên code cũ (`AlertNotification.DoesNotExist`, không route nào tạo recovery). Fix:
+  coi "có nợ recovery không" là điều kiện phải re-check ở CẢ 2 nơi có thể làm nó đúng — nơi cũ
+  (`_resolve_alert`, khi resolve chạy SAU khi fire đã sent) VÀ nơi mới
+  (`_queue_late_recovery_if_resolved`, gọi ngay khi 1 fire row CHUYỂN "sent" thật, dù từ dispatch
+  gốc hay sweep — khi resolve đã chạy TRƯỚC) — bên nào xảy ra sau cùng sẽ là bên phát hiện. Quy
+  tắc chung: **bất kỳ quyết định "X có cần làm Y không" dựa trên 2 sự kiện độc lập có thể xảy ra
+  theo THỨ TỰ BẤT KỲ (ở đây: "fire đã gửi" và "đã resolve") mà chỉ được đánh giá tại 1 trong 2 nơi
+  — phải re-check ở CẢ nơi còn lại, nếu không nhánh "sự kiện kia xảy ra trước" sẽ luôn bị bỏ sót.**
+- **Fix cho 1 bug outbox bằng cách "gọi thêm 1 hàm phụ SAU KHI câu UPDATE chính đã commit" tự nó
+  tái tạo ĐÚNG root cause đang sửa, chỉ ở 1 cặp thao tác khác.** Dính thật 2026-09-29 (review vòng
+  2, cùng ngày, soi đúng bản fix "recovery chỉ queue 1 lần tại thời điểm resolve" ở bẫy ngay
+  trên): bản fix đó gọi `_queue_late_recovery_if_resolved(...)` bằng 1 CÂU DB RIÊNG, ngay sau khi
+  `.update(status="sent")` đã tự COMMIT (Django autocommit ngoài `transaction.atomic()`) — worker
+  chết ĐÚNG giữa 2 câu này thì fire đã "sent" (trạng thái CUỐI, không gì kích hoạt lại) nhưng
+  recovery chưa kịp tạo → mất vĩnh viễn, y hệt bug đang sửa nhưng chuyển sang 1 cặp thao tác khác.
+  Verify: mock hàm phụ ném exception, assert câu UPDATE trước đó cũng phải rollback — fail thật
+  (status vẫn "sent" dù bước sau lỗi) khi 2 thao tác KHÔNG cùng 1 `transaction.atomic()`. Fix: gộp
+  cả 2 (`.update(status="sent")` + gọi hàm phụ) vào CHUNG 1 transaction (`_finalize_fire_sent`) —
+  crash giữa chừng thì TOÀN BỘ rollback, sweep sau reclaim (row vẫn "processing") và làm lại
+  nguyên vẹn cả 2 bước. Quy tắc chung: **bất cứ khi nào 1 thao tác ghi trạng thái xong rồi "tiện
+  thể" gọi thêm 1 hàm phụ để quyết định/ghi thêm state khác (dù hàm phụ đó nhỏ, tưởng như best-
+  effort) — nếu hàm phụ đó có thể thất bại/bị ngắt giữa chừng (crash, exception, timeout), 2 thao
+  tác PHẢI chung 1 transaction, nếu không sẽ luôn có 1 khoảng hở "đã ghi A nhưng chưa ghi B" không
+  gì retry được vì A đã là trạng thái cuối.**
+- **Khoá "cùng ĐỐI TƯỢNG" (Device) ở 1 đường ghi (vd `_resolve_alert`) mà đường ghi CẠNH TRANH
+  khác (đọc/ghi state phụ thuộc CÙNG object đó) lại không khoá gì — 2 SELECT độc lập đọc phải giá
+  trị "cũ" của nhau, không bên nào phát hiện được thay đổi của bên kia.** Dính thật 2026-09-29
+  (review vòng 2): `_resolve_alert` đọc "fire nào đã sent" và
+  `_queue_late_recovery_if_resolved` đọc "alert đã `is_active=False` chưa" là 2 câu SELECT không
+  khoá gì chung — nếu fire chuyển "sent" đúng lúc nằm GIỮA lúc `_resolve_alert` đọc xong danh sách
+  "đã gửi" và lúc nó COMMIT `is_active=False`, cả 2 bên đều đọc phải giá trị CŨ của phía kia → cả
+  2 đều bỏ qua, không bên nào tạo recovery. Fix theo đúng gợi ý review: bên ghi mới
+  (`_finalize_fire_sent`) khoá `Device` (`select_for_update()`) giống hệt `_fire_alert`/
+  `_resolve_alert` TRƯỚC KHI đọc/ghi — 2 giao dịch cạnh tranh cùng device luôn serialize trên
+  Postgres, bên nào commit trước thì bên sau LUÔN đọc thấy state MỚI (không còn đọc phải giá trị
+  cũ). ⚠️ **Đính chính cùng ngày — đã ghi nhầm "SQLite bỏ qua select_for_update" ở lần viết đầu
+  của bẫy này mà KHÔNG kiểm chứng dev/test project này thực sự chạy trên engine nào** (vi phạm
+  chính nguyên tắc §0 "không suy luận linh tinh"). Verify lại bằng kết nối trực tiếp:
+  `config/settings/development.py` hard-code `ENGINE: postgresql` (không có nhánh sqlite), `.env`
+  có `DB_HOST=localhost` trỏ 1 Postgres 18.4 thật đang chạy trên máy dev, `pytest.ini` trỏ
+  `config.settings.development` → **toàn bộ test suite của project này luôn chạy trên Postgres
+  thật, kể cả trước khi review vòng 2 này** — KHÔNG có SQLite ở đâu trong project. `select_for_update`
+  do đó CÓ lấy khoá row Postgres thật ngay cả khi chạy test. Giới hạn thật sự (vẫn đúng, chỉ khác
+  lý do): test hiện tại chạy TUẦN TỰ 1 thread — không có 2 giao dịch nào thực sự cạnh tranh CÙNG
+  LÚC để khoá phải phát huy tác dụng chặn nhau, nên vẫn KHÔNG chứng minh được serialization thật
+  dưới tải đồng thời (muốn chứng minh cần viết test đa luồng/đa tiến trình thật, dùng
+  `pytest.mark.django_db(transaction=True)` để cho phép nhiều connection thật) — ghi rõ giới hạn
+  này trong test/docstring, không overclaim đã "test được race". Quy tắc chung áp dụng ngay cho
+  chính lỗi này: **trước khi viết bất kỳ kết luận "X không chứng minh được vì backend Y" vào skill/
+  docstring, phải TỰ KIỂM TRA project này thực sự dùng backend gì (đọc settings + thử kết nối),
+  không suy luận từ hiểu biết chung ("dự án Django/pytest hay dùng SQLite cho test") — đúng y hệt
+  bẫy "không đoán mò OID/enum" đã áp dụng cho phần cứng mạng, giờ áp dụng luôn cho hạ tầng test.**
+  Quy tắc chung (phần gốc của bẫy, vẫn đúng): **khi 2+
+  đường ghi độc lập cùng đọc/ghi 1 field (vd `Alert.is_active`) để quyết định 1 hành động không
+  thể làm lại (gửi notification), TẤT CẢ các đường đó phải khoá CHUNG 1 đối tượng — khoá ở 1 đường
+  mà đường còn lại không khoá thì khoá đó vô nghĩa, chỉ tự chặn được chính nó với chính nó.**
+- **Quyết định "gửi thông báo cho rule nhiều channel" theo cấp ALERT (any channel đã gửi → gửi
+  cho MỌI channel) thay vì theo cấp (alert, channel) — channel chậm có thể nhận thông báo giai
+  đoạn SAU (recovery) trước khi từng nhận thông báo giai đoạn TRƯỚC (fire) của cùng channel đó.**
+  Dính thật 2026-09-29 (review vòng 2): `_resolve_alert` chỉ cần 1 channel có fire "sent" là tạo
+  recovery cho MỌI channel trong `rule.channels`, kể cả channel khác còn "pending" (SMTP treo,
+  hàng đợi chậm) — recipient trên channel đó nhận "✅ RECOVERED" (do outbox recovery mới hơn được
+  sweep ưu tiên nhờ `Meta.ordering=["-sent_at"]`) TRƯỚC KHI từng nhận "🔴 ALERT" gốc, gây hiểu
+  lầm nghiêm trọng hơn cả việc chậm trễ đơn thuần. Fix: đổi tập hợp quyết định từ `set(alert_id)`
+  sang `set((alert_id, channel))`, filter + dispatch theo từng cặp. Quy tắc chung: **rule/alert có
+  nhiều channel độc lập (khác tốc độ gửi, khác khả năng lỗi) — mọi quyết định "đã thông báo đủ
+  chưa"/"cần thông báo tiếp không" phải tính theo TỪNG channel, không suy rộng từ 1 channel đại
+  diện sang cả nhóm.**
 
 ## 2. Deploy
 ```

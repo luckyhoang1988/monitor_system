@@ -179,6 +179,12 @@ class AlertNotification(models.Model):
     # "processing" bị bỏ rơi (worker chết giữa chừng, không kịp chuyển sent/failed) — quá lâu
     # không đổi status coi như kẹt, cho retry lại.
     updated_at = models.DateTimeField(auto_now=True)
+    # Token ngẫu nhiên ghi lại MỖI LẦN claim (pending/processing→processing). Khi finalize
+    # (sent/failed) phải match ĐÚNG token này mới được ghi — chặn 1 tiến trình bị coi "kẹt" và
+    # bị reclaim (xem stale_processing_secs) nhưng thực ra vẫn đang gửi hợp lệ (SMTP treo lâu)
+    # ghi đè kết quả của tiến trình đã reclaim sau nó. Xem apps/alerts/engine.py
+    # _dispatch_notifications/retry_pending_alert_notifications.
+    claim_token = models.CharField(max_length=36, blank=True, default="")
 
     class Meta:
         verbose_name = "Alert Notification"
