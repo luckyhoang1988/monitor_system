@@ -461,8 +461,14 @@ admin credential riêng, không nhất thiết giống Hyperv-02/Hyprver03).
      `config.settings.development`), KHÔNG có nhánh SQLite nào trong project này. `select_for_update`
      do đó CÓ lấy khoá row thật kể cả khi chạy test. Giới hạn thật sự không phải "SQLite bỏ qua
      lock" mà là "test hiện tại chạy tuần tự 1 thread, không có 2 giao dịch nào thực sự cạnh tranh
-     cùng lúc để khoá phải phát huy tác dụng" — xem memory để biết cách verify thêm bằng test đa
-     luồng thật trên Postgres nếu cần chứng minh sâu hơn.
+     cùng lúc để khoá phải phát huy tác dụng". ✅ **Verify thêm cùng ngày (sau đó)**: thêm
+     `TestSelectForUpdateRealPostgresLock` (`tests/alerts/test_notification_outbox.py`) — 2 thread
+     thật + `django_db(transaction=True)` (2 connection Postgres thật), thread A giữ khoá `Device`
+     trong `_finalize_fire_sent`, thread B gọi `_resolve_alert` cùng device đo thời gian chờ. Tự
+     chứng minh test có ý nghĩa: tạm xoá `select_for_update()` khỏi `_resolve_alert` → test FAIL
+     đúng dự đoán (`_resolve_alert` chạy xong 0.052s, không bị chặn); khôi phục lại → pass (≥0.4s).
+     Kết luận: khoá THẬT trên Postgres, không còn là suy luận. 464 test pass, không đổi code sản
+     xuất (chỉ thêm test).
   3. **Điểm bổ sung — rule nhiều channel: 1 channel đã "sent" fire là đủ để `_resolve_alert` tạo
      recovery cho MỌI channel của rule, kể cả channel khác chưa từng gửi fire (SMTP treo) → channel
      chậm nhận RECOVERED trước khi từng nhận ALERT.** Fix: `sent_fire_channels` đổi từ

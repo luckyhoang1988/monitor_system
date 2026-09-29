@@ -6,8 +6,11 @@ Regression cho phát hiện: "_resolve_alert đánh dấu resolve+commit trướ
 sau — worker chết giữa 2 bước làm mất RECOVERED vĩnh viễn, không có cơ chế retry." Cùng root
 cause cũng áp dụng cho _fire_alert (không được báo cáo nhưng sửa đối xứng).
 """
+import threading
+import time
 import pytest
 from datetime import datetime, timezone, timedelta
+from django.db import connection
 from django.utils import timezone as dj_tz
 from apps.alerts.engine import check_device_alerts, retry_pending_alert_notifications
 from apps.alerts.models import AlertRule, Alert, AlertNotification
@@ -428,3 +431,111 @@ class TestResolvePerChannelRecoveryDecision:
         assert not AlertNotification.objects.filter(
             alert=alert, channel="email", kind="recovery"
         ).exists()
+
+
+@pytest.mark.django_db(transaction=True)
+class TestSelectForUpdateRealPostgresLock:
+    """Verify select_for_update() KHOÁ THẬT trên Postgres — mọi test khác trong file này chạy
+    trong 1 transaction/1 connection (Django test wrapping mặc định), nên select_for_update()
+    không có giao dịch thứ 2 THẬT nào để tranh chấp — không chứng minh được việc khoá row có
+    tác dụng thật hay không (đã đính chính trong CLAUDE.md/memory 2026-09-29: dev/test dùng
+    Postgres thật, không phải SQLite, nhưng giới hạn thật là "test chạy tuần tự 1 thread"). Test
+    này dùng `transaction=True` (2 connection Postgres thật, có commit thật) + 2 thread thật để
+    verify trực tiếp: _finalize_fire_sent giữ khoá Device trong lúc _resolve_alert của CÙNG
+    device cố lấy khoá đó — nếu Postgres khoá thật, _resolve_alert PHẢI bị chặn tới khi
+    _finalize_fire_sent nhả khoá (không chạy song song)."""
+
+    def test_resolve_alert_blocks_on_device_lock_held_by_finalize_fire_sent(self, mocker):
+        from apps.alerts import engine
+
+        device = CiscoSNMPDeviceFactory(last_seen=dj_tz.now())
+        rule = make_rule(channels=["email"])
+        alert = Alert.objects.create(
+            device=device, rule=rule, severity="WARNING", message="High CPU",
+            metric_value=95.0, is_active=True,
+        )
+        token = "tok-lock-test"
+        AlertNotification.objects.create(
+            alert=alert, channel="email", kind="fire", status="processing", claim_token=token,
+        )
+        mock_recovery = mocker.patch("apps.alerts.channels.email_channel.send_email_recovery")
+
+        thread_a_holds_lock = threading.Event()
+        release_thread_a = threading.Event()
+        errors = []
+        timings = {}
+
+        real_queue_late_recovery = engine._queue_late_recovery_if_resolved
+
+        def blocking_queue_late_recovery(alert_id, channel):
+            # Gọi TỪ BÊN TRONG transaction.atomic() của _finalize_fire_sent, tức Device đang bị
+            # khoá tại đây — báo cho thread B biết đã có thể thử lấy khoá, rồi giữ transaction mở
+            # (không commit) tới khi main thread cho phép, để có đủ thời gian quan sát thread B
+            # có thực sự bị chặn hay không.
+            thread_a_holds_lock.set()
+            if not release_thread_a.wait(timeout=5):
+                errors.append("release_thread_a timeout — thread B không tới kịp")
+            return real_queue_late_recovery(alert_id, channel)
+
+        mocker.patch(
+            "apps.alerts.engine._queue_late_recovery_if_resolved",
+            side_effect=blocking_queue_late_recovery,
+        )
+
+        def run_thread_a():
+            try:
+                engine._finalize_fire_sent(alert, "email", token)
+            except Exception as exc:  # pragma: no cover - lộ lỗi ra ngoài thread cho assert dưới
+                errors.append(exc)
+            finally:
+                connection.close()
+
+        def run_thread_b():
+            try:
+                if not thread_a_holds_lock.wait(timeout=5):
+                    errors.append("thread A không vào transaction kịp")
+                    return
+                start = time.monotonic()
+                engine._resolve_alert(device, rule)
+                timings["b_elapsed"] = time.monotonic() - start
+            except Exception as exc:  # pragma: no cover
+                errors.append(exc)
+            finally:
+                connection.close()
+
+        t_a = threading.Thread(target=run_thread_a)
+        t_b = threading.Thread(target=run_thread_b)
+        t_a.start()
+        t_b.start()
+        # Cho thread B đủ thời gian THỰC SỰ đi vào select_for_update() và bị chặn (không phải
+        # chỉ chưa kịp chạy tới đó) trước khi nhả khoá — nếu không, phép đo thời gian chờ vô nghĩa.
+        time.sleep(0.5)
+        release_thread_a.set()
+        t_a.join(timeout=5)
+        t_b.join(timeout=5)
+
+        assert not errors, f"Lỗi trong thread: {errors}"
+        assert "b_elapsed" in timings, "thread B không hoàn tất"
+        # Nếu select_for_update() KHÔNG khoá thật (vd code quên khoá, hoặc chạy nhầm trên backend
+        # bỏ qua lock), thread B sẽ chạy gần như ngay lập tức (~0s) thay vì phải đợi thread A nhả
+        # khoá — ngưỡng 0.4s (< 0.5s đã sleep) đủ biên để không flaky nhưng vẫn bắt rõ trường hợp
+        # "không khoá thật".
+        assert timings["b_elapsed"] >= 0.4, (
+            f"_resolve_alert chỉ mất {timings['b_elapsed']:.3f}s để chạy xong — có vẻ KHÔNG bị "
+            "chặn bởi khoá Device của _finalize_fire_sent (select_for_update không khoá thật?)"
+        )
+
+        # Đúng hành vi race đã fix (round 2): _finalize_fire_sent chạy TRƯỚC (giữ khoá) nên
+        # _queue_late_recovery_if_resolved đọc is_active=True (thread B chưa commit) → chưa tạo
+        # recovery ở đây; _resolve_alert chạy SAU (khi đã lấy được khoá), thấy fire đã "sent"
+        # (thread A đã commit) → chính _resolve_alert tạo + gửi recovery. Kết quả cuối: ĐÚNG 1
+        # recovery row đã "sent" — không mất, không trùng — dù chạy trên 2 thread/2 connection
+        # Postgres thật cạnh tranh cùng 1 row Device.
+        alert.refresh_from_db()
+        assert alert.is_active is False
+        fire_notif = AlertNotification.objects.get(alert=alert, channel="email", kind="fire")
+        assert fire_notif.status == "sent"
+        recovery_qs = AlertNotification.objects.filter(alert=alert, channel="email", kind="recovery")
+        assert recovery_qs.count() == 1
+        assert recovery_qs.first().status == "sent"
+        mock_recovery.assert_called_once()
