@@ -558,6 +558,7 @@ Storage.Status.Health, Temperatures.Status.Health
   `expire_seconds` cùng giá trị, nếu không entry đó lặp lại đúng bug này.
 
 ### Thay đổi quan trọng
+- **2026-10-01 (iLO: poll một phần không được báo OK)**: `apps/dashboard/hardware.py::latest_hardware` là nguồn DUY NHẤT cho dashboard, card cảnh báo, trang chi tiết và `/health/` (đừng query `HardwareHealth` mới nhất trực tiếp). Field None ở snapshot mới nhất: từng đọc được trong 24h → mang giá trị cũ (`carried`, kèm thời điểm, badge "Thiếu dữ liệu"); từng đọc được nhưng quá 24h → `expired`, tổng trạng thái "Chưa xác định" (warning), KHÔNG báo OK; chưa từng đọc được (BIOS/Network iLO4) → bỏ qua. Tối đa 2 query/lần (lịch sử + bằng chứng cũ).
 - **2026-10-01 (khối cảnh báo iLO trên dashboard)**: host HyperV có iLO Warning/Critical/Mất kết nối giờ hiện thêm card đỏ "Cảnh báo phần cứng (iLO)" ngay dưới card "Thiết bị đang Offline" (cùng partial `_offline_notice.html`, `ilo_notice_rows` tính trong `_dashboard_counts`, tự cập nhật qua `alerts_summary`). KHÔNG tính vào `offline_count` vì host vẫn online qua WinRM.
 - **2026-10-01 (dashboard iLO + lỗi kết nối + retention, commit `a6c8848` + `4b0cdeb`, đã deploy +
   verify sống)**: Feature iLO trước đó chỉ hiện ở card cuối trang chi tiết HyperV. Nay: (1) cột "iLO"
@@ -572,8 +573,7 @@ Storage.Status.Health, Temperatures.Status.Health
   Warning/Critical thật thì giữ nguyên mức + gắn "Lỗi poll"; (5) `cleanup_old_metrics` xoá
   `HardwareHealth` cũ hơn `METRICS_RETENTION_DAYS` (cùng cờ `METRICS_AUTO_CLEANUP`, mặc định TẮT →
   prod phải bật cờ này thì mới có tác dụng; hiện 2505 dòng). `VolumeStats` cũng đã được thêm vào cleanup
-  (prod cache-mode: 0 dòng). ✅ Prod đã BẬT `METRICS_AUTO_CLEANUP=True` (2026-10-01, theo yêu cầu chủ hệ thống; trước đó False):
-  cleanup xoá SystemHealth/VMStats/HardwareHealth/... cũ hơn 90 ngày (oldest lúc bật: 2026-06-30, 93 ngày). Bài học: lần review đầu tôi kết luận "chưa hiển thị" từ snapshot đã cũ — working tree có
+  (prod cache-mode: 0 dòng). ⚠️ Cờ `METRICS_AUTO_CLEANUP` điều khiển **2 cơ chế**: (a) `cleanup_old_metrics` xoá raw cũ hơn 90 ngày; (b) `rollup_hourly_metrics` (phút :05 mỗi giờ) → `cleanup_rolled_up_raw_data` xoá `SystemHealth`/`InterfaceStats` raw **cũ hơn 48 giờ** nếu giờ đó đã có hourly rollup (`RAW_RETENTION_HOURS=48`, aggregation.py). Prod từng bật cờ 2026-10-01 nhưng chỉ nói (a); đo trước lần chạy (b): ~28.2k SH + ~635k IF raw sẽ bị xoá → đã TẮT lại `METRICS_AUTO_CLEANUP=False` lúc 04:03 UTC, chưa xoá dòng nào (28405/635592 giữ nguyên). Muốn bật lại phải chốt chính sách (tách 2 cơ chế nếu cần giữ raw lâu hơn 48h). Bài học: lần review đầu tôi kết luận "chưa hiển thị" từ snapshot đã cũ — working tree có
   thay đổi chưa commit; luôn `git status` lại trước khi kết luận.
 - **2026-09-29 (cùng ngày, mới nhất — review ngoài vòng 7: try/except CHUNG ở TRONG nội bộ nhóm
   Power, giữa PSU health và Power Redundancy — cùng họ bug với vòng 6 nhưng lồng sâu hơn 1 lớp)**:

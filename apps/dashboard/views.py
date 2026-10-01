@@ -7,7 +7,7 @@ from django.utils import timezone
 from apps.devices.models import Device
 from apps.alerts.models import Alert
 from apps.metrics import cache as metrics_cache
-from .hardware import attach_hardware_summaries, hardware_summary
+from .hardware import attach_hardware_summaries, hardware_summary, latest_hardware
 
 
 def health_check(request):
@@ -355,17 +355,14 @@ def switch_detail(request, pk):
 
 @login_required
 def hyperv_detail(request, pk):
-    from apps.metrics.models import VMStats, VolumeStats, HardwareHealth
+    from apps.metrics.models import VMStats, VolumeStats
 
     device = get_object_or_404(Device, pk=pk, device_type="hyperv")
     latest_health = _detail_health(device)
     # iLO RAID/disk health — luôn đọc DB trực tiếp (HardwareHealth không đi qua
     # METRICS_WRITE_MODE/cache-mode, ghi thẳng Postgres mỗi poll_all_ilo). None nếu chưa
     # cấu hình ilo_ip_address hoặc chưa có vòng poll nào thành công.
-    latest_hardware_health = (
-        HardwareHealth.objects.filter(device=device).order_by("-timestamp", "-pk").first()
-        if device.ilo_ip_address else None
-    )
+    latest_hardware_health = latest_hardware([device]).get(device.pk)
 
     if metrics_cache.is_cache_mode():
         # Cache-mode: danh sách VM từ snapshot Redis (dựng VMStats chưa lưu cho template).
@@ -449,10 +446,8 @@ def hyperv_detail(request, pk):
 def hyperv_health(request, pk):
     """Live hardware and active alerts, polled independently of WinRM/SSE."""
     from django.template.loader import render_to_string
-    from apps.metrics.models import HardwareHealth
     device = get_object_or_404(Device, pk=pk, device_type="hyperv")
-    health = (HardwareHealth.objects.filter(device=device).order_by("-timestamp", "-pk").first()
-              if device.ilo_ip_address else None)
+    health = latest_hardware([device]).get(device.pk)
     context = {
         "device": device,
         "latest_hardware_health": health,

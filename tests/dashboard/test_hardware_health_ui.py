@@ -42,7 +42,7 @@ def test_dashboard_latest_hardware_when_host_online(logged_in_client, django_ass
     HardwareHealth.objects.create(device=host, timestamp=ts - timedelta(seconds=300), battery_health_code=0)
     HardwareHealth.objects.create(device=host, timestamp=ts, battery_health_code=2)
     other = HyperVDeviceFactory(ilo_ip_address="10.1.1.2")
-    with django_assert_num_queries(1):
+    with django_assert_num_queries(2):  # lịch sử + bằng chứng cũ cho field còn None; không N+1
         snapshots = latest_hardware([host, other])
     assert snapshots[host.pk].battery_health_code == 2
     html = logged_in_client.get(reverse("dashboard:index")).content.decode()
@@ -167,3 +167,83 @@ def test_ilo_problem_shown_in_notice_block_not_counted_offline(logged_in_client)
     assert good.name not in html
     assert data["offline_count"] == 0
     assert "Cảnh báo phần cứng (iLO)" in logged_in_client.get(reverse("dashboard:index")).content.decode()
+
+
+@pytest.mark.django_db
+def test_partial_poll_does_not_mask_earlier_critical(django_assert_num_queries):
+    host = HyperVDeviceFactory(ilo_ip_address="10.1.1.1")
+    now = timezone.now()
+    HardwareHealth.objects.create(device=host, timestamp=now - timedelta(seconds=300),
+                                  controller_health_code=0, power_supply_worst_code=2)
+    # Poll một phần: RAID đọc được, nhóm Power không đọc được (None).
+    HardwareHealth.objects.create(device=host, timestamp=now, controller_health_code=0)
+    with django_assert_num_queries(2):
+        snapshots = latest_hardware([host])
+    summary = hardware_summary(host, snapshots[host.pk])
+    assert summary["label"] == "Critical"
+    assert "Power Supplies: Critical" in summary["problems"][0]
+    assert summary["carried"]  # có mục lấy từ snapshot cũ, kèm thời điểm
+
+
+@pytest.mark.django_db
+def test_partial_poll_recovered_group_reads_again_is_ok():
+    host = HyperVDeviceFactory(ilo_ip_address="10.1.1.1")
+    now = timezone.now()
+    HardwareHealth.objects.create(device=host, timestamp=now - timedelta(seconds=300),
+                                  controller_health_code=0, power_supply_worst_code=2)
+    HardwareHealth.objects.create(device=host, timestamp=now, controller_health_code=0,
+                                  power_supply_worst_code=0)
+    summary = hardware_summary(host, latest_hardware([host])[host.pk])
+    assert summary["label"] == "OK" and not summary["carried"]
+
+
+@pytest.mark.django_db
+def test_never_available_field_not_flagged_as_carried():
+    # iLO4: bios/network luôn None — không phải "thiếu dữ liệu".
+    host = HyperVDeviceFactory(ilo_ip_address="10.1.1.1")
+    now = timezone.now()
+    for delta in (300, 0):
+        HardwareHealth.objects.create(device=host, timestamp=now - timedelta(seconds=delta),
+                                      controller_health_code=0)
+    summary = hardware_summary(host, latest_hardware([host])[host.pk])
+    assert summary["label"] == "OK" and not summary["carried"]
+
+
+@pytest.mark.django_db
+def test_notice_card_shows_stale_and_timestamp(logged_in_client, settings):
+    settings.POLL_ILO_INTERVAL_SECS = 300
+    host = HyperVDeviceFactory(ilo_ip_address="10.1.1.1", last_seen=timezone.now())
+    HardwareHealth.objects.create(device=host, timestamp=timezone.now() - timedelta(seconds=900),
+                                  battery_health_code=2)
+    html = logged_in_client.get(reverse("dashboard:alerts_summary")).json()["offline_notice_html"]
+    assert "Cảnh báo phần cứng (iLO)" in html
+    assert "Dữ liệu cũ" in html
+    assert "Cập nhật" in html
+
+
+@pytest.mark.django_db
+def test_critical_older_than_window_becomes_undetermined_not_ok():
+    host = HyperVDeviceFactory(ilo_ip_address="10.1.1.1")
+    now = timezone.now()
+    HardwareHealth.objects.create(device=host, timestamp=now - timedelta(hours=25),
+                                  controller_health_code=0, power_supply_worst_code=2)
+    HardwareHealth.objects.create(device=host, timestamp=now, controller_health_code=0)
+    summary = hardware_summary(host, latest_hardware([host])[host.pk])
+    assert summary["label"] == "Chưa xác định" and summary["color"] == "warning"
+    assert "Power Supplies" in summary["expired"]
+
+
+@pytest.mark.django_db
+def test_detail_page_and_health_endpoint_match_dashboard(logged_in_client):
+    host = HyperVDeviceFactory(ilo_ip_address="10.1.1.1", last_seen=timezone.now())
+    now = timezone.now()
+    HardwareHealth.objects.create(device=host, timestamp=now - timedelta(seconds=300),
+                                  controller_health_code=0, power_supply_worst_code=2)
+    HardwareHealth.objects.create(device=host, timestamp=now, controller_health_code=0, raw={})
+    dash = logged_in_client.get(reverse("dashboard:index")).content.decode()
+    assert "iLO: Critical" in dash
+    detail = logged_in_client.get(reverse("dashboard:hyperv_detail", args=[host.pk])).content.decode()
+    assert "iLO: Critical" in detail and "iLO: OK" not in detail
+    assert "đang dùng dữ liệu lúc" in detail
+    live = logged_in_client.get(reverse("dashboard:hyperv_health", args=[host.pk])).json()["html"]
+    assert "iLO: Critical" in live and "iLO: OK" not in live

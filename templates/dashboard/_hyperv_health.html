@@ -12,6 +12,12 @@
       <span class="text-muted small">Cập nhật: {{ latest_hardware_health.timestamp|date:"d/m/Y H:i:s" }}</span>
     {% endif %}
   </div>
+  {% if hardware_summary.carried or hardware_summary.expired %}
+  <div class="card-body border-bottom py-2 small text-muted">
+    {% for name, ts in hardware_summary.carried.items %}<div><i class="bi bi-clock-history me-1"></i>{{ name }}: lần poll mới nhất không đọc được, đang dùng dữ liệu lúc {{ ts|date:"H:i:s d/m/Y" }}</div>{% endfor %}
+    {% for name, ts in hardware_summary.expired.items %}<div><i class="bi bi-question-circle me-1"></i>{{ name }}: không đọc được, lần cuối đọc được lúc {{ ts|date:"H:i:s d/m/Y" }} (quá cũ — chưa xác định)</div>{% endfor %}
+  </div>
+  {% endif %}
   <div class="card-body">
     {% if not latest_hardware_health %}
       <div class="text-center text-muted py-4">

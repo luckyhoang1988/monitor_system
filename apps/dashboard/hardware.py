@@ -1,7 +1,9 @@
 """Latest iLO snapshots and their presentation, independent of host connectivity."""
 
+from datetime import timedelta
+
 from django.conf import settings
-from django.db.models import OuterRef, Subquery
+from django.db.models import Max, OuterRef, Q, Subquery
 from django.utils import timezone
 
 from apps.metrics.models import HardwareHealth
@@ -20,20 +22,71 @@ HEALTH_FIELDS = {
 }
 
 
+REDUNDANCY_FIELDS = (("power_redundancy_ok", "Power Redundancy"), ("fan_redundancy_ok", "Fan Redundancy"))
+COUNT_FIELDS = (("missing_disk_count", "Missing disks"), ("enclosure_mismatch_count", "Enclosure mismatch"))
+FIELD_LABELS = {**HEALTH_FIELDS, **dict(REDUNDANCY_FIELDS), **dict(COUNT_FIELDS)}
+# Poll một phần lưu field None cho nhóm không đọc được; trong cửa sổ này mục đó dùng lại giá trị
+# đọc được gần nhất (giống alert engine chọn "latest non-null") thay vì coi là đã hồi phục.
+CARRY_WINDOW = timedelta(hours=24)
+
+
 def latest_hardware(devices):
-    """Fetch one snapshot per configured host in a single query."""
+    """Snapshot mới nhất mỗi host, đã gộp giá trị đọc được gần nhất cho field bị thiếu.
+
+    Nguồn DUY NHẤT cho dashboard lẫn trang chi tiết (đừng đọc HardwareHealth mới nhất trực tiếp).
+    Field None ở snapshot mới nhất (poll một phần) được xử lý theo bằng chứng trong lịch sử:
+    - từng đọc được trong CARRY_WINDOW → mang giá trị cũ (không lưu DB), `snapshot.carried[field]`
+      = thời điểm của giá trị đó;
+    - từng đọc được nhưng đã quá CARRY_WINDOW → KHÔNG xác nhận khoẻ: `snapshot.expired[field]`
+      = thời điểm đọc được lần cuối, hardware_summary báo "Chưa xác định";
+    - chưa từng đọc được (vd BIOS/Network trên iLO4) → bỏ qua, không phải thiếu dữ liệu.
+    Truy vấn: 1 query lịch sử + 1 query bằng chứng cũ (chỉ khi còn field None chưa giải quyết).
+    """
     ids = [d.pk for d in devices if d.ilo_ip_address]
     if not ids:
         return {}
-    latest = HardwareHealth.objects.filter(device_id=OuterRef("device_id")).order_by("-timestamp", "-pk")
-    return {h.device_id: h for h in HardwareHealth.objects.filter(
-        device_id__in=ids, pk=Subquery(latest.values("pk")[:1])
-    ).defer("raw")}
+    newest = HardwareHealth.objects.filter(device_id=OuterRef("device_id")).order_by("-timestamp", "-pk")
+    since = timezone.now() - CARRY_WINDOW
+    rows = (HardwareHealth.objects
+            .filter(device_id__in=ids)
+            .filter(Q(timestamp__gte=since) | Q(pk=Subquery(newest.values("pk")[:1])))
+            .defer("raw")
+            .order_by("device_id", "-timestamp", "-pk"))
+    history: dict[int, list] = {}
+    for row in rows:
+        history.setdefault(row.device_id, []).append(row)
+    snapshots, unresolved = {}, {}
+    for device_id, snaps in history.items():
+        head = snaps[0]
+        head.carried, head.expired = {}, {}
+        for field in FIELD_LABELS:
+            if getattr(head, field) is not None:
+                continue
+            for older in snaps[1:]:
+                if getattr(older, field) is not None:
+                    setattr(head, field, getattr(older, field))
+                    head.carried[field] = older.timestamp
+                    break
+            else:
+                unresolved.setdefault(device_id, []).append(field)
+        snapshots[device_id] = head
+    if unresolved:
+        fields = sorted({f for fs in unresolved.values() for f in fs})
+        last_known = (HardwareHealth.objects.filter(device_id__in=list(unresolved))
+                      .values("device_id")
+                      .annotate(**{f"last_{f}": Max("timestamp", filter=Q(**{f"{f}__isnull": False}))
+                                   for f in fields}))
+        for rec in last_known:
+            for field in unresolved[rec["device_id"]]:
+                if rec[f"last_{field}"] is not None:
+                    snapshots[rec["device_id"]].expired[field] = rec[f"last_{field}"]
+    return snapshots
 
 
 def hardware_summary(device, health):
     label, color, problems = "Chưa cấu hình", "secondary", []
     stale = False
+    carried, expired = {}, {}
     if device.ilo_ip_address:
         label = "Chưa có dữ liệu"
         if health:
@@ -43,13 +96,11 @@ def hardware_summary(device, health):
                 if code in (1, 2):
                     problems.append(f"{name}: {'Critical' if code == 2 else 'Warning'}")
             degraded = False
-            for field, name in (("power_redundancy_ok", "Power Redundancy"),
-                                ("fan_redundancy_ok", "Fan Redundancy")):
+            for field, name in REDUNDANCY_FIELDS:
                 if getattr(health, field) is False:
                     degraded = True
                     problems.append(f"{name}: DEGRADED")
-            for field, name in (("missing_disk_count", "Missing disks"),
-                                ("enclosure_mismatch_count", "Enclosure mismatch")):
+            for field, name in COUNT_FIELDS:
                 if (getattr(health, field) or 0) > 0:
                     degraded = True
                     problems.append(f"{name}: {getattr(health, field)}")
@@ -62,6 +113,11 @@ def hardware_summary(device, health):
                 label, color = "OK", "success"
             else:
                 label = "Không rõ"
+            carried = {FIELD_LABELS[f]: ts for f, ts in getattr(health, "carried", {}).items()}
+            expired = {FIELD_LABELS[f]: ts for f, ts in getattr(health, "expired", {}).items()}
+            if expired and color in ("success", "secondary"):
+                # Từng đọc được nhưng quá cửa sổ giữ → không có bằng chứng khoẻ, KHÔNG báo OK.
+                label, color = "Chưa xác định", "warning"
             stale = (timezone.now() - health.timestamp).total_seconds() > 2 * settings.POLL_ILO_INTERVAL_SECS
             if stale and color == "success":
                 color = "secondary"
@@ -71,7 +127,7 @@ def hardware_summary(device, health):
     if error and color in ("success", "secondary"):
         label, color = "Mất kết nối", "warning"
     return {"label": label, "color": color, "problems": problems, "stale": stale,
-            "error": error, "timestamp": health.timestamp if health else None}
+            "carried": carried, "expired": expired, "error": error, "timestamp": health.timestamp if health else None}
 
 
 def attach_hardware_summaries(devices):

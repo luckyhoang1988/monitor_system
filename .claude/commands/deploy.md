@@ -35,6 +35,8 @@ Quy trình chuẩn (đã dùng để bắt bug 504 phiên đầu):
 3. Xác định thay đổi chạm tầng nào → ảnh hưởng container nào (xem §3).
 
 ## 1. Bẫy code đã dính (kiểm tra trước khi viết)
+- **Bật 1 cờ env trên prod: đọc MỌI nơi dùng cờ đó (`grep -rn TÊN_CỜ`) trước, không chỉ nơi mình đang nghĩ tới.** `METRICS_AUTO_CLEANUP` gate cả `cleanup_old_metrics` (90 ngày) lẫn `rollup_hourly_metrics`→`cleanup_rolled_up_raw_data` (raw >48h); bật cờ mà chỉ mô tả cơ chế đầu → suýt xoá ~635k InterfaceStats raw ngoài dự kiến. Đo số dòng sẽ bị xoá + báo user đủ cả 2 tác động rồi mới bật.
+- **Dashboard tổng hợp trạng thái từ snapshot có field nullable**: field None = "không đọc được", KHÔNG phải "khoẻ". Không để 1 metric OK làm tổng thành OK khi nhóm từng lỗi không đọc được — dùng giá trị đọc được gần nhất (kèm thời điểm) như alert engine (`apps/dashboard/hardware.py` `latest_hardware` carry-forward 24h). Field luôn None (iLO4: BIOS/Network) không bị coi là thiếu.
 - **DB "latest per group" trên bảng time-series** (VMStats/InterfaceStats/Wifi*): KHÔNG dùng
   `pk__in=Subquery(OuterRef(...))` → Postgres bỏ index, quét lặp → 504 (đã xảy ra: 242s).
   Dùng Postgres `DISTINCT ON`:

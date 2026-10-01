@@ -30,6 +30,16 @@
         {% if item.summary.error %}
           <span class="text-muted">· Lỗi poll: {{ item.summary.error }}</span>
         {% endif %}
+        {% if item.summary.stale %}<span class="badge text-bg-secondary ms-1">Dữ liệu cũ</span>{% endif %}
+        {% for name, ts in item.summary.carried.items %}
+          <span class="text-muted">· {{ name }}: dùng dữ liệu lúc {{ ts|date:'H:i:s d/m' }}</span>
+        {% endfor %}
+        {% for name, ts in item.summary.expired.items %}
+          <span class="text-muted">· {{ name }}: không đọc được, lần cuối lúc {{ ts|date:'H:i:s d/m' }}</span>
+        {% endfor %}
+        {% if item.summary.timestamp %}
+          <span class="text-muted">· Cập nhật {{ item.summary.timestamp|date:'H:i:s d/m/Y' }}</span>
+        {% endif %}
       </div>
     {% endfor %}
   </div>
