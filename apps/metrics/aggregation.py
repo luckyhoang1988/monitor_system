@@ -12,7 +12,7 @@ from collections import defaultdict
 from datetime import timedelta
 
 from django.conf import settings
-from django.db.models import Avg, Max, Min, Count, Sum
+from django.db.models import Avg, Count, DateTimeField, Exists, F, Func, Max, Min, OuterRef, Sum, Value
 from django.db.models.functions import TruncHour, TruncDate
 from django.utils import timezone
 
@@ -419,18 +419,40 @@ def rollup_interface_stats_daily() -> int:
     return len(objs)
 
 
-def _delete_raw_for_rolled_hours(model, rolled_pairs: set, cutoff, id_field: str) -> int:
-    """Xóa raw rows cũ hơn cutoff CHỈ khi (entity_id, hour) đã có hourly rollup."""
-    if not rolled_pairs:
-        return 0
-    from django.db.models import Q
+def _delete_raw_for_rolled_hours(model, hourly_model, cutoff, id_field: str) -> int:
+    """Xóa raw rows cũ hơn cutoff CHỈ khi (entity_id, giờ chứa timestamp) đã có hourly rollup.
 
-    q = Q()
-    for entity_id, hour in rolled_pairs:
-        hour_end = hour + timedelta(hours=1)
-        q |= Q(**{id_field: entity_id, "timestamp__gte": hour, "timestamp__lt": hour_end})
-    del_count, _ = model.objects.filter(timestamp__lt=cutoff).filter(q).delete()
+    1 câu `DELETE ... WHERE EXISTS (đối chiếu hourly theo entity + giờ)`, kích thước SQL cố định.
+    Bản cũ nạp TOÀN BỘ cặp (entity, hour) đã rollup rồi ghép 1 nhánh OR cho mỗi cặp — số cặp bằng
+    cả lịch sử hourly (prod 2026-10-01: 1.033.679 cặp InterfaceStats cũ hơn 48h → SQL hàng trăm MB,
+    ~3 triệu tham số, chạy lại từ đầu mỗi giờ); đo 7.000 cặp đã ra SQL ~939 KB / 21.001 tham số.
+    So khớp bằng ĐẲNG THỨC `hour = đầu giờ của timestamp` (không phải khoảng giờ) để Postgres hash-join
+    được theo (entity, hour): so theo khoảng chỉ hash được theo entity rồi lọc từng dòng hourly của
+    entity đó (đo local 201k raw / 6,7k hourly: 11 s với khoảng — xem test_cleanup_* và EXPLAIN prod).
+    KHÔNG dùng `TruncHour` làm điều kiện: Django sinh `hour = DATE_TRUNC('hour', ts AT TIME ZONE tz)`
+    tức so timestamptz với timestamp-không-múi-giờ theo giờ địa phương → lệch 7 giờ, không khớp dòng
+    nào (test bắt được 2026-10-01). `_local_hour_floor` đổi ngược về timestamptz nên so được trong SQL.
+    """
+    rolled = hourly_model.objects.filter(**{id_field: OuterRef(id_field), "hour": OuterRef("rolled_hour")})
+    del_count, _ = (
+        model.objects.filter(timestamp__lt=cutoff)
+        .annotate(rolled_hour=_local_hour_floor("timestamp"))
+        .filter(Exists(rolled))
+        .delete()
+    )
     return del_count
+
+
+def _local_hour_floor(field: str) -> Func:
+    """Đầu giờ (theo múi giờ hiện hành) của cột `field`, kiểu timestamptz.
+
+    Cùng giá trị mà `TruncHour` đã ghi vào cột `hour` ở bảng hourly (rollup cắt giờ theo múi giờ hiện
+    hành), nhưng so sánh trực tiếp được trong SQL: timezone(tz, DATE_TRUNC('hour', timezone(tz, ts))).
+    """
+    tz = Value(timezone.get_current_timezone_name())
+    local = Func(tz, F(field), function="timezone", output_field=DateTimeField())
+    truncated = Func(Value("hour"), local, function="date_trunc", output_field=DateTimeField())
+    return Func(tz, truncated, function="timezone", output_field=DateTimeField())
 
 
 def cleanup_rolled_up_raw_data() -> tuple[int, int]:
@@ -443,23 +465,8 @@ def cleanup_rolled_up_raw_data() -> tuple[int, int]:
 
     cutoff = timezone.now() - timedelta(hours=RAW_RETENTION_HOURS)
 
-    rolled_hours_health = set(
-        SystemHealthHourly.objects
-        .filter(hour__lt=cutoff)
-        .values_list("device_id", "hour")
-    )
-    deleted_sh = _delete_raw_for_rolled_hours(
-        SystemHealth, rolled_hours_health, cutoff, "device_id",
-    )
-
-    rolled_hours_iface = set(
-        InterfaceStatsHourly.objects
-        .filter(hour__lt=cutoff)
-        .values_list("interface_id", "hour")
-    )
-    deleted_if = _delete_raw_for_rolled_hours(
-        InterfaceStats, rolled_hours_iface, cutoff, "interface_id",
-    )
+    deleted_sh = _delete_raw_for_rolled_hours(SystemHealth, SystemHealthHourly, cutoff, "device_id")
+    deleted_if = _delete_raw_for_rolled_hours(InterfaceStats, InterfaceStatsHourly, cutoff, "interface_id")
 
     logger.info(
         "Cleanup rolled-up raw data: deleted %d SystemHealth, %d InterfaceStats (cũ hơn %dh)",

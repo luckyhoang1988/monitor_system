@@ -3,7 +3,7 @@
 from datetime import timedelta
 
 from django.conf import settings
-from django.db.models import Max, OuterRef, Q, Subquery
+from django.db.models import Max, Q
 from django.utils import timezone
 
 from apps.metrics.models import HardwareHealth
@@ -40,21 +40,33 @@ def latest_hardware(devices):
     - từng đọc được nhưng đã quá CARRY_WINDOW → KHÔNG xác nhận khoẻ: `snapshot.expired[field]`
       = thời điểm đọc được lần cuối, hardware_summary báo "Chưa xác định";
     - chưa từng đọc được (vd BIOS/Network trên iLO4) → bỏ qua, không phải thiếu dữ liệu.
-    Truy vấn: 1 query lịch sử + 1 query bằng chứng cũ (chỉ khi còn field None chưa giải quyết).
+    Truy vấn: 1 query cửa sổ CARRY_WINDOW (+ 1 query rẻ cho mỗi host không có snapshot nào trong
+    cửa sổ) + 1 query bằng chứng cũ (chỉ khi còn field None chưa giải quyết).
     """
-    ids = [d.pk for d in devices if d.ilo_ip_address]
+    ids = list(dict.fromkeys(d.pk for d in devices if d.ilo_ip_address))
     if not ids:
         return {}
-    newest = HardwareHealth.objects.filter(device_id=OuterRef("device_id")).order_by("-timestamp", "-pk")
     since = timezone.now() - CARRY_WINDOW
+    # Chỉ lọc theo cửa sổ thời gian (dùng index device_id+timestamp). Bản cũ gộp thêm
+    # `OR pk = (subquery snapshot mới nhất của host)` vào cùng WHERE → Postgres chạy lại subquery
+    # cho MỌI dòng nằm NGOÀI cửa sổ (đo 2026-10-01: 25.920 dòng → 484 ms, 103.680 dòng → 2,1 s,
+    # tăng tuyến tính theo lịch sử, trong khi query cửa sổ riêng ~17 ms không đổi).
     rows = (HardwareHealth.objects
-            .filter(device_id__in=ids)
-            .filter(Q(timestamp__gte=since) | Q(pk=Subquery(newest.values("pk")[:1])))
+            .filter(device_id__in=ids, timestamp__gte=since)
             .defer("raw")
             .order_by("device_id", "-timestamp", "-pk"))
     history: dict[int, list] = {}
     for row in rows:
         history.setdefault(row.device_id, []).append(row)
+    # Host có snapshot trong cửa sổ thì snapshot mới nhất của nó chắc chắn nằm trong cửa sổ. Host
+    # không có (iLO ngừng poll > CARRY_WINDOW, hoặc chưa từng có dữ liệu) → lấy riêng snapshot mới
+    # nhất, mỗi host 1 query đọc ngược index (device_id, timestamp DESC) rồi dừng ở dòng đầu.
+    for device_id in ids:
+        if device_id not in history:
+            latest = (HardwareHealth.objects.filter(device_id=device_id).defer("raw")
+                      .order_by("-timestamp", "-pk").first())
+            if latest is not None:
+                history[device_id] = [latest]
     snapshots, unresolved = {}, {}
     for device_id, snaps in history.items():
         head = snaps[0]

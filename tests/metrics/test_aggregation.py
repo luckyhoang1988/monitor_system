@@ -260,6 +260,89 @@ class TestCleanupRolledUpRaw:
         assert SystemHealth.objects.filter(device=other).count() == 0
         assert SystemHealth.objects.filter(device=device).count() == 1
 
+    def test_only_rolled_hour_is_deleted_and_hour_edges_are_inclusive_exclusive(self, device):
+        """Chỉ giờ đã có hourly bị xoá; đầu giờ (00:00:00) và cuối giờ (59:59.999999) đều thuộc giờ đó,
+        còn đúng đầu giờ kế tiếp (chưa rollup) thì phải giữ lại."""
+        base = (timezone.now() - timedelta(hours=RAW_RETENTION_HOURS + 5)).replace(
+            minute=0, second=0, microsecond=0)
+        for offset in (timedelta(0), timedelta(minutes=30), timedelta(minutes=59, seconds=59, microseconds=999999)):
+            SystemHealth.objects.create(device=device, timestamp=base + offset, cpu_percent=1, mem_percent=1)
+        nxt = SystemHealth.objects.create(
+            device=device, timestamp=base + timedelta(hours=1), cpu_percent=1, mem_percent=1)
+        SystemHealthHourly.objects.create(
+            device=device, hour=base, cpu_avg=1, cpu_max=1, mem_avg=1, mem_max=1, sample_count=3)
+
+        del_sh, _ = cleanup_rolled_up_raw_data()
+
+        assert del_sh == 3
+        assert list(SystemHealth.objects.filter(device=device)) == [nxt]
+
+    def test_hour_bucket_follows_current_timezone_with_half_hour_offset(self, device, settings):
+        """Rollup cắt giờ theo múi giờ hiện hành. Múi giờ lệch nửa giờ (UTC+5:30): đầu giờ địa phương KHÔNG
+        trùng đầu giờ UTC, cleanup vẫn phải khớp đúng bucket đó (không xoá nhầm giờ kế bên)."""
+        settings.TIME_ZONE = "Asia/Kolkata"
+        base = timezone.localtime(timezone.now() - timedelta(hours=RAW_RETENTION_HOURS + 5)).replace(
+            minute=0, second=0, microsecond=0)
+        assert base.minute == 0 and base.utcoffset() == timedelta(hours=5, minutes=30)
+        inside = [base + timedelta(minutes=10), base + timedelta(minutes=59, seconds=59)]
+        for ts in inside:
+            SystemHealth.objects.create(device=device, timestamp=ts, cpu_percent=1, mem_percent=1)
+        kept = SystemHealth.objects.create(
+            device=device, timestamp=base + timedelta(hours=1), cpu_percent=1, mem_percent=1)
+        SystemHealthHourly.objects.create(
+            device=device, hour=base, cpu_avg=1, cpu_max=1, mem_avg=1, mem_max=1, sample_count=2)
+
+        del_sh, _ = cleanup_rolled_up_raw_data()
+
+        assert del_sh == 2
+        assert list(SystemHealth.objects.filter(device=device)) == [kept]
+
+    def test_interface_raw_deleted_only_for_the_rolled_interface(self, device):
+        """Cùng giờ nhưng chỉ interface đã có hourly bị xoá raw; interface khác (chưa rollup) được giữ."""
+        rolled = Interface.objects.create(device=device, if_index=1, name="Gi0/1")
+        unrolled = Interface.objects.create(device=device, if_index=2, name="Gi0/2")
+        ts = (timezone.now() - timedelta(hours=RAW_RETENTION_HOURS + 5)).replace(minute=10, second=0, microsecond=0)
+        for iface in (rolled, unrolled):
+            InterfaceStats.objects.create(interface=iface, timestamp=ts, status="up", in_mbps=1, out_mbps=1)
+        InterfaceStatsHourly.objects.create(interface=rolled, hour=ts.replace(minute=0), sample_count=1)
+
+        _, del_if = cleanup_rolled_up_raw_data()
+
+        assert del_if == 1
+        assert not InterfaceStats.objects.filter(interface=rolled).exists()
+        assert InterfaceStats.objects.filter(interface=unrolled).count() == 1
+
+    def test_sql_does_not_grow_with_number_of_rolled_hours(self, device):
+        """Bản cũ ghép 1 nhánh OR cho mỗi cặp (thiết bị, giờ) đã rollup → SQL/tham số tăng theo lịch sử
+        hourly (prod: ~1 triệu cặp). Nay phải là 2 câu DELETE kích thước cố định dù có bao nhiêu giờ."""
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        def run_cleanup():
+            with CaptureQueriesContext(connection) as ctx:
+                cleanup_rolled_up_raw_data()
+            deletes = [q["sql"] for q in ctx.captured_queries if q["sql"].startswith("DELETE")]
+            return len(ctx.captured_queries), deletes
+
+        top = (timezone.now() - timedelta(hours=RAW_RETENTION_HOURS + 5)).replace(minute=0, second=0, microsecond=0)
+        SystemHealthHourly.objects.bulk_create([
+            SystemHealthHourly(device=device, hour=top - timedelta(hours=i),
+                               cpu_avg=1, cpu_max=1, mem_avg=1, mem_max=1, sample_count=1)
+            for i in range(3)
+        ])
+        few_queries, few = run_cleanup()
+        SystemHealthHourly.objects.bulk_create([
+            SystemHealthHourly(device=device, hour=top - timedelta(hours=i),
+                               cpu_avg=1, cpu_max=1, mem_avg=1, mem_max=1, sample_count=1)
+            for i in range(3, 400)
+        ])
+        many_queries, many = run_cleanup()
+
+        assert len(few) == len(many) == 2
+        assert [len(s) for s in few] == [len(s) for s in many]
+        assert few_queries == many_queries
+        assert all("EXISTS" in s for s in many)
+
 
 @pytest.mark.django_db
 class TestAPISourceSelection:

@@ -42,7 +42,8 @@ def test_dashboard_latest_hardware_when_host_online(logged_in_client, django_ass
     HardwareHealth.objects.create(device=host, timestamp=ts - timedelta(seconds=300), battery_health_code=0)
     HardwareHealth.objects.create(device=host, timestamp=ts, battery_health_code=2)
     other = HyperVDeviceFactory(ilo_ip_address="10.1.1.2")
-    with django_assert_num_queries(2):  # lịch sử + bằng chứng cũ cho field còn None; không N+1
+    # cửa sổ 24h + 1 query rẻ cho host không có snapshot nào (`other`) + bằng chứng cũ cho field còn None
+    with django_assert_num_queries(3):
         snapshots = latest_hardware([host, other])
     assert snapshots[host.pk].battery_health_code == 2
     html = logged_in_client.get(reverse("dashboard:index")).content.decode()
@@ -231,6 +232,51 @@ def test_critical_older_than_window_becomes_undetermined_not_ok():
     summary = hardware_summary(host, latest_hardware([host])[host.pk])
     assert summary["label"] == "Chưa xác định" and summary["color"] == "warning"
     assert "Power Supplies" in summary["expired"]
+
+
+@pytest.mark.django_db
+def test_latest_hardware_window_query_has_no_correlated_subquery():
+    """Bản cũ: `timestamp >= since OR pk = (subquery snapshot mới nhất)` → Postgres chạy lại subquery cho
+    MỌI dòng ngoài cửa sổ (đo 2026-10-01: 103.680 dòng → 2,1 s). Query lịch sử chỉ được lọc theo thời gian."""
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+
+    host = HyperVDeviceFactory(ilo_ip_address="10.1.1.1")
+    now = timezone.now()
+    HardwareHealth.objects.bulk_create([
+        HardwareHealth(device=host, timestamp=now - timedelta(hours=30, minutes=5 * i), controller_health_code=0)
+        for i in range(50)
+    ] + [HardwareHealth(device=host, timestamp=now, controller_health_code=0)])
+    with CaptureQueriesContext(connection) as ctx:
+        latest_hardware([host])
+    window_sql = ctx.captured_queries[0]["sql"]
+    assert window_sql.count("SELECT") == 1 and " OR " not in window_sql
+
+
+@pytest.mark.django_db
+def test_latest_hardware_query_count_independent_of_old_history(django_assert_num_queries):
+    host = HyperVDeviceFactory(ilo_ip_address="10.1.1.1")
+    now = timezone.now()
+    HardwareHealth.objects.bulk_create([
+        HardwareHealth(device=host, timestamp=now - timedelta(days=3, minutes=5 * i), controller_health_code=0)
+        for i in range(300)
+    ] + [HardwareHealth(device=host, timestamp=now, controller_health_code=0, battery_health_code=0)])
+    with django_assert_num_queries(2):  # cửa sổ 24h + bằng chứng cũ (còn field None); không phụ thuộc 300 dòng cũ
+        snapshots = latest_hardware([host])
+    assert snapshots[host.pk].timestamp == now
+
+
+@pytest.mark.django_db
+def test_latest_hardware_host_silent_longer_than_window_still_returns_latest(django_assert_num_queries):
+    """iLO ngừng poll > 24h: không có dòng nào trong cửa sổ nhưng vẫn phải trả snapshot mới nhất (không mất host)."""
+    host = HyperVDeviceFactory(ilo_ip_address="10.1.1.1")
+    now = timezone.now()
+    older = HardwareHealth.objects.create(device=host, timestamp=now - timedelta(hours=50), battery_health_code=0)
+    newest = HardwareHealth.objects.create(device=host, timestamp=now - timedelta(hours=30), battery_health_code=2)
+    with django_assert_num_queries(3):  # cửa sổ (rỗng) + snapshot mới nhất + bằng chứng cũ
+        snapshots = latest_hardware([host])
+    assert snapshots[host.pk].pk == newest.pk != older.pk
+    assert hardware_summary(host, snapshots[host.pk])["label"] == "Critical"
 
 
 @pytest.mark.django_db
