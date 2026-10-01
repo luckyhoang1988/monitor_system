@@ -585,6 +585,59 @@ liệu cũ, không biết 401 hay timeout. Mọi poll độc lập cần lưu l�
 và UI không được hiện "OK" từ dữ liệu cũ khi poll gần nhất đã lỗi. Khi review "feature chưa hiển thị":
 `git status` + `git diff` TRƯỚC, working tree có thể đã chứa bản làm dở.
 
+### Bẫy SQL: tăng tuyến tính theo lịch sử (review ngoài, đo thật 2026-10-01)
+Bảng time-series không có retention (`METRICS_AUTO_CLEANUP=False`) chỉ lớn lên → query "chạy nhanh
+trên prod hôm nay" (2,5k dòng) có thể chậm dần. Luôn đo ở quy mô 10-40x bằng dữ liệu giả trong test DB
+(`bulk_create` + `ANALYZE` + `EXPLAIN (ANALYZE)`) trước khi tin "ổn".
+- **`filter(Q(timestamp__gte=since) | Q(pk=Subquery(...)))` = correlated subquery chạy cho MỌI dòng
+  ngoài cửa sổ** (`latest_hardware` cũ: 25.920 dòng → 484 ms, 103.680 → 2,1 s; query cửa sổ riêng 17 ms
+  không đổi). Tách: 1 query theo cửa sổ thời gian (index `device,timestamp`) + với host không có dòng
+  nào trong cửa sổ mới `order_by("-timestamp","-pk").first()` riêng. `DISTINCT ON ... -pk` thì Postgres
+  không đi index (đo 104k dòng: 151 ms) — đừng thay `.first()` bằng nó khi chỉ vài host.
+- **`Q |= Q(...)` một nhánh cho mỗi cặp (entity, giờ) đã rollup** (`_delete_raw_for_rolled_hours` cũ):
+  số cặp = TOÀN BỘ lịch sử hourly (prod: 1.033.679 cặp InterfaceStats cũ hơn 48h → SQL hàng trăm MB,
+  ~3 triệu tham số; đo 6.720 cặp: SQL 1,2 MB, 78,6 s). Dùng `Exists(...)` đối chiếu bảng hourly, SQL
+  cố định. Lần chạy đầu khi bật `METRICS_AUTO_CLEANUP` là ca xấu nhất — đo TRƯỚC khi bật cờ.
+- **Join EXISTS: so ĐẲNG THỨC (hash/index được) chứ không so khoảng.** `h.hour <= s.ts AND h.hour >
+  s.ts - 1h` chỉ hash theo entity rồi lọc từng dòng hourly (11,3 s / 201k dòng); `h.hour = đầu giờ(s.ts)`
+  → Nested Loop + Memoize + Index Scan `(interface_id, hour)` (1,56 s). Xem plan prod bằng `EXPLAIN`
+  (KHÔNG `ANALYZE`, không chạy DELETE).
+- ⚠️ **`TruncHour`/`TruncDate` trong `filter()`/`annotate()` rồi so với cột timestamptz = lệch múi giờ,
+  khớp 0 dòng, KHÔNG báo lỗi.** Django sinh `DATE_TRUNC('hour', ts AT TIME ZONE 'Asia/Ho_Chi_Minh')` →
+  kiểu `timestamp` (không múi giờ), Python mới đổi lại aware khi đọc kết quả; trong WHERE nó bị so với
+  timestamptz theo session UTC (lệch 7 giờ). Test cleanup cũ bắt được (`assert 0 == 1`). Dùng
+  `timezone(tz, date_trunc('hour', timezone(tz, col)))` (`aggregation._local_hour_floor`), có test múi
+  giờ lệch nửa giờ (`Asia/Kolkata`).
+- Mọi test "đếm số query" (`django_assert_num_queries`) khi đổi cấu trúc query phải cập nhật CÓ CHỦ ĐÍCH
+  kèm comment lý do, không nới số cho qua.
+
+### Bẫy: iLO TLS — bật `ILO_CERT_VALIDATE=True` KHÔNG đủ (đo 3 iLO prod, 2026-10-01)
+Collector gọi iLO bằng Basic Auth với `verify=False` mặc định. Cả 3 iLO dùng chứng chỉ HPE mặc định
+(issuer "Default Issuer (Do not trust)", SAN chỉ có tên iLO, KHÔNG có IP; `https://<ip>` luôn lệch
+hostname) → `verify=True` ra `SSLCertVerificationError` ở cả 3 host, poll iLO sẽ hỏng hoàn toàn.
+Hai hướng xác thực thật: (a) ghim fingerprint SHA-256 từng iLO (không đổi gì trên iLO) — **đã chọn và code
+xong (2026-10-01)**, hoặc (b) cài chứng chỉ do CA nội bộ ký (có SAN đúng) lên từng iLO + CA bundle vào
+container (chưa làm).
+- (a) gồm `Device.ilo_cert_sha256` + `_PinnedAdapter` (`apps/collectors/ilo_redfish.py`) + lệnh
+  `pin_ilo_certs`. Sau deploy phải ghim thủ công từng host (chưa ghim = vẫn `verify=False`):
+  `docker compose exec -T worker python manage.py pin_ilo_certs` (chạy thử, chỉ in) → đối chiếu fingerprint
+  với nguồn ĐỘC LẬP (trình duyệt trên máy quản trị khác: mở `https://<ip iLO>` → xem chứng chỉ → SHA-256
+  thumbprint; chưa kiểm chứng giao diện iLO tự hiển thị fingerprint) → thêm `--apply`. Giới hạn còn lại
+  đã biết: host CHƯA ghim vẫn `verify=False` (rủi ro y như cũ cho tới khi ghim), và ghim lần đầu là TOFU. Cert iLO đổi hợp lệ (cấp lại cert, thay board) → poll báo "KHÔNG khớp
+  fingerprint đã ghim" → ghim lại bằng `--device <id> --apply --replace`.
+- urllib3 `assert_fingerprint` kiểm lúc bắt tay TLS, trước khi gửi request: cert lạ KHÔNG nhận được Basic
+  Auth (test dùng máy chủ HTTPS local thật, `tests/collectors/test_ilo_cert_pin.py`). `requests.exceptions.
+  SSLError` là con của `ConnectionError` → `_get` retry 1 lần rồi trả None; muốn phân biệt "mismatch pin" với
+  "mất mạng" phải dựa cờ `_PinnedAdapter.fingerprint_mismatch` (không đổi chữ ký `_get`).
+- Pin nhập sai định dạng phải FAIL CLOSED (dừng + báo lỗi), không lặng lẽ rơi về "không xác thực".
+- ⚠️ **Cấu hình TLS đặt trên `HTTPAdapter` phải phủ CẢ đường proxy.** requests dựng `ProxyManager` riêng qua
+  `proxy_manager_for()` (KHÔNG qua `init_poolmanager`), và mặc định đọc `HTTPS_PROXY` từ môi trường
+  (`trust_env`). Chỉ truyền `assert_fingerprint` ở `init_poolmanager` thì sai pin qua proxy vẫn HTTP 200 và
+  server nhận Basic Auth (review ngoài 2026-10-01, tái hiện bằng proxy CONNECT local). Nay: override cả
+  `proxy_manager_for` + session đã ghim đặt `trust_env=False`. Test phải chạy THẬT qua proxy (đếm số
+  CONNECT để chắc request có đi qua proxy), không chỉ kiểm tra cấu hình. Mọi kiểm tra bảo mật kiểu này nên
+  thử cả đường trực tiếp lẫn đường proxy/biến môi trường.
+
 ## 2. Deploy
 ```
 ./deploy.sh            # push origin master + pull/build/restart trên monitorsrv
