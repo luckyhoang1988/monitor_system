@@ -571,8 +571,8 @@ Storage.Status.Health, Temperatures.Status.Health
   Warning/Critical thật thì giữ nguyên mức + gắn "Lỗi poll"; (5) `cleanup_old_metrics` xoá
   `HardwareHealth` cũ hơn `METRICS_RETENTION_DAYS` (cùng cờ `METRICS_AUTO_CLEANUP`, mặc định TẮT →
   prod phải bật cờ này thì mới có tác dụng; hiện 2505 dòng). `VolumeStats` cũng đã được thêm vào cleanup
-  (prod cache-mode: 0 dòng). ⚠️ Prod `METRICS_AUTO_CLEANUP=False` (kiểm 2026-10-01): bật cờ sẽ xoá luôn
-  SystemHealth/VMStats cũ hơn 90 ngày (oldest hiện 2026-06-30, 93 ngày) — quyết định của chủ hệ thống. Bài học: lần review đầu tôi kết luận "chưa hiển thị" từ snapshot đã cũ — working tree có
+  (prod cache-mode: 0 dòng). ✅ Prod đã BẬT `METRICS_AUTO_CLEANUP=True` (2026-10-01, theo yêu cầu chủ hệ thống; trước đó False):
+  cleanup xoá SystemHealth/VMStats/HardwareHealth/... cũ hơn 90 ngày (oldest lúc bật: 2026-06-30, 93 ngày). Bài học: lần review đầu tôi kết luận "chưa hiển thị" từ snapshot đã cũ — working tree có
   thay đổi chưa commit; luôn `git status` lại trước khi kết luận.
 - **2026-09-29 (cùng ngày, mới nhất — review ngoài vòng 7: try/except CHUNG ở TRONG nội bộ nhóm
   Power, giữa PSU health và Power Redundancy — cùng họ bug với vòng 6 nhưng lồng sâu hơn 1 lớp)**:
