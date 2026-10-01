@@ -35,5 +35,8 @@ def test_cleanup_removes_old_hardware_health(settings):
     device = CiscoSNMPDeviceFactory()
     HardwareHealth.objects.create(device=device, timestamp=timezone.now() - timedelta(days=200))
     HardwareHealth.objects.create(device=device, timestamp=timezone.now())
+    from apps.metrics.models import VolumeStats
+    VolumeStats.objects.create(device=device, timestamp=timezone.now() - timedelta(days=200), volume_name="c:")
     cleanup_old_metrics()
     assert HardwareHealth.objects.count() == 1
+    assert VolumeStats.objects.count() == 0

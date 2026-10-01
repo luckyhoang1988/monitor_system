@@ -19,7 +19,7 @@ def cleanup_old_metrics() -> None:
         WifiApStats, WifiClientStats,
         SystemHealthHourly, SystemHealthDaily,
         InterfaceStatsHourly, InterfaceStatsDaily,
-        HardwareHealth,
+        HardwareHealth, VolumeStats,
     )
     retention = getattr(settings, "METRICS_RETENTION_DAYS", 90)
     cutoff    = timezone.now() - timedelta(days=retention)
@@ -31,6 +31,8 @@ def cleanup_old_metrics() -> None:
     deleted_cl, _  = WifiClientStats.objects.filter(timestamp__lt=cutoff).delete()
     # HardwareHealth (iLO) ghi 1 dòng + JSON raw mỗi poll, không có rollup → chỉ còn cách xoá theo tuổi.
     deleted_hw, _  = HardwareHealth.objects.filter(timestamp__lt=cutoff).delete()
+    # VolumeStats: DB-mode ghi mỗi poll, không rollup (cache-mode chỉ ghi khi alert fire).
+    deleted_vs, _  = VolumeStats.objects.filter(timestamp__lt=cutoff).delete()
 
     # Xóa aggregated data cũ hơn 2x retention (hourly/daily giữ lâu hơn raw)
     agg_cutoff = timezone.now() - timedelta(days=retention * 2)
@@ -41,9 +43,9 @@ def cleanup_old_metrics() -> None:
 
     logger.info(
         "Cleanup: xóa %d InterfaceStats, %d SystemHealth, %d VMStats, %d WifiApStats, "
-        "%d WifiClientStats, %d HardwareHealth (raw, cũ hơn %d ngày) | "
+        "%d WifiClientStats, %d HardwareHealth, %d VolumeStats (raw, cũ hơn %d ngày) | "
         "Aggregated: %d SH_hourly, %d SH_daily, %d IF_hourly, %d IF_daily (cũ hơn %d ngày)",
-        deleted_if, deleted_sh, deleted_vm, deleted_ap, deleted_cl, deleted_hw, retention,
+        deleted_if, deleted_sh, deleted_vm, deleted_ap, deleted_cl, deleted_hw, deleted_vs, retention,
         deleted_sh_h, deleted_sh_d, deleted_if_h, deleted_if_d, retention * 2,
     )
 
