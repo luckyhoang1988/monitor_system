@@ -564,6 +564,28 @@ class TestNormalizeExtendedHardwareHealth:
 
         assert result["power_redundancy_ok"] is False
 
+    def test_power_redundancy_ilo5_fragment_without_leading_slash(self, ilo_device):
+        """Raw thật iLO5 (Hyperv-01, 2026-10-01): RedundancySet dùng ".../Power/#PowerSupplies/N"
+        (không có "/" đầu fragment, có "/" cuối trước "#") — trước đây bị coi là không resolve
+        được nên power_redundancy_ok = None mãi."""
+        raw = _raw_healthy_controller()
+        raw["power"] = {
+            "power_supplies": [
+                {"Status": {"Health": "OK", "State": "Enabled"}},
+                {"Status": {"Health": "Critical", "State": "Enabled"}},
+            ],
+            "redundancy": [{
+                "MinNumNeeded": 2,
+                "RedundancySet": [
+                    {"@odata.id": "/redfish/v1/Chassis/1/Power/#PowerSupplies/0"},
+                    {"@odata.id": "/redfish/v1/Chassis/1/Power/#PowerSupplies/1"},
+                ],
+            }],
+        }
+        assert IloRedfishClient(ilo_device).normalize(raw)["power_redundancy_ok"] is False
+        raw["power"]["power_supplies"][1]["Status"]["Health"] = "OK"
+        assert IloRedfishClient(ilo_device).normalize(raw)["power_redundancy_ok"] is True
+
     def test_power_redundancy_none_when_ref_points_to_different_chassis(self, ilo_device):
         """Bug review ngoài 2026-09-29 (vòng 5): `_PSU_REF_RE` (vòng 4) chỉ khớp phần SAU dấu #,
         chưa xác thực phần TRƯỚC dấu # có đúng là document Chassis/1/Power đang đọc hay không.

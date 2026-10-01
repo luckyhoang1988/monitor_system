@@ -131,7 +131,11 @@ _POWER_RESOURCE_PATH = "/redfish/v1/Chassis/1/Power"
 # JSON Pointer fragment (RFC 6901) đúng định dạng đã verify thật cho tham chiếu PowerSupplies
 # trong Redundancy[].RedundancySet — bắt buộc TOÀN BỘ fragment phải là "/PowerSupplies/<N>",
 # không chỉ lấy số cuối cùng (xem bug 2026-09-29 vòng 4, docstring _compute_power_redundancy).
-_PSU_REF_RE = re.compile(r"^/PowerSupplies/(\d+)$")
+# Cho phép dấu "/" đứng đầu TÙY CHỌN: iLO4 trả "Power#/PowerSupplies/0" (JSON Pointer), còn iLO5 trả
+# "Power/#PowerSupplies/0" (fragment không có "/" đầu) — verify raw thật Hyperv-01 (DL380 Gen10)
+# 2026-10-01: @odata.id của chính từng PSU là ".../Power/#PowerSupplies/N" với MemberId N = chỉ số mảng.
+# Bản regex bắt buộc "/" đầu từng làm power_redundancy_ok = None vĩnh viễn trên iLO5 (từ 2026-09-29).
+_PSU_REF_RE = re.compile(r"^/?PowerSupplies/(\d+)$")
 
 
 class IloRedfishClient:
