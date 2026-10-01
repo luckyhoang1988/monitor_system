@@ -152,3 +152,18 @@ def test_poll_error_keeps_real_critical():
     health = HardwareHealth(device=host, timestamp=timezone.now(), battery_health_code=2)
     summary = hardware_summary(host, health)
     assert summary["label"] == "Critical" and summary["error"] == "timeout"
+
+
+@pytest.mark.django_db
+def test_ilo_problem_shown_in_notice_block_not_counted_offline(logged_in_client):
+    bad = HyperVDeviceFactory(ilo_ip_address="10.1.1.1", last_seen=timezone.now())
+    good = HyperVDeviceFactory(ilo_ip_address="10.1.1.2", last_seen=timezone.now())
+    HardwareHealth.objects.create(device=bad, timestamp=timezone.now(), battery_health_code=2)
+    HardwareHealth.objects.create(device=good, timestamp=timezone.now(), controller_health_code=0)
+    data = logged_in_client.get(reverse("dashboard:alerts_summary")).json()
+    html = data["offline_notice_html"]
+    assert "Cảnh báo phần cứng (iLO)" in html
+    assert bad.name in html and "Battery: Critical" in html
+    assert good.name not in html
+    assert data["offline_count"] == 0
+    assert "Cảnh báo phần cứng (iLO)" in logged_in_client.get(reverse("dashboard:index")).content.decode()

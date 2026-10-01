@@ -13,3 +13,25 @@
   </div>
 </div>
 {% endif %}
+{% if ilo_notice_rows %}
+<div class="card border-danger-subtle dashboard-ilo-alert {% if offline_notice_rows %}mt-2{% endif %} mb-0">
+  <div class="card-header bg-danger-subtle text-danger fw-semibold py-1 px-3">
+    <i class="bi bi-hdd-rack-fill me-2"></i>Cảnh báo phần cứng (iLO)
+  </div>
+  <div class="card-body py-1 px-3">
+    {% for item in ilo_notice_rows %}
+      <div class="small py-0 border-bottom">
+        <span class="fw-semibold">{{ item.name }}</span>
+        <span class="text-muted">— HyperV Host — {{ item.ip_address }}</span>
+        <span class="badge text-bg-{{ item.summary.color }} ms-1">{{ item.summary.label }}</span>
+        {% if item.summary.problems %}
+          <span class="text-danger">{{ item.summary.problems|join:", " }}</span>
+        {% endif %}
+        {% if item.summary.error %}
+          <span class="text-muted">· Lỗi poll: {{ item.summary.error }}</span>
+        {% endif %}
+      </div>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}

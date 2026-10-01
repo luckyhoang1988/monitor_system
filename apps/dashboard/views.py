@@ -128,6 +128,15 @@ def _dashboard_counts(all_devices):
     ]
     offline_notice_rows = offline_device_rows + offline_ap_rows
 
+    # Host HyperV có sự cố phần cứng iLO (Warning/Critical/Mất kết nối) — khối cảnh báo riêng,
+    # KHÔNG tính vào offline_count vì host vẫn online qua WinRM.
+    attach_hardware_summaries(by_type["hyperv"])
+    ilo_notice_rows = [
+        {"name": d.name, "ip_address": d.ilo_ip_address, "summary": d.ilo_summary}
+        for d in by_type["hyperv"]
+        if d.ilo_summary["color"] in ("danger", "warning")
+    ]
+
     active_alerts = list(Alert.objects.filter(is_active=True)
                          .select_related("device", "rule")
                          .order_by("-triggered_at")[:20])
@@ -136,6 +145,7 @@ def _dashboard_counts(all_devices):
         "device_type_stats": device_type_stats,
         "offline_count": len(offline_device_rows) + len(offline_ap_rows),
         "offline_notice_rows": offline_notice_rows,
+        "ilo_notice_rows": ilo_notice_rows,
         "active_alerts": active_alerts,
         "alert_count": len(active_alerts),
     }
@@ -152,8 +162,7 @@ def index(request):
     routers   = by_type["router"]
     firewalls = by_type["firewall"]
     nas_list  = by_type["nas"]
-    hyperv    = by_type["hyperv"]
-    attach_hardware_summaries(hyperv)
+    hyperv    = by_type["hyperv"]  # ilo_summary đã gắn trong _dashboard_counts
     wlan_controllers = by_type["wlan_controller"]
 
     offline_devices = [d for d in all_devices if not d.is_online]
@@ -182,6 +191,7 @@ def index(request):
         "online_count":   online_count,
         "offline_count":  counts["offline_count"],
         "offline_notice_rows": counts["offline_notice_rows"],
+        "ilo_notice_rows": counts["ilo_notice_rows"],
         "alert_count":    counts["alert_count"],
         # Mốc dữ liệu mới nhất lúc render (epoch) — baseline để JS tự đồng bộ reload.
         "poll_fresh":     latest_seen.timestamp() if latest_seen else 0,
@@ -208,11 +218,11 @@ def alerts_summary(request):
     )
     offline_notice_html = render_to_string(
         "dashboard/_offline_notice.html",
-        {"offline_notice_rows": counts["offline_notice_rows"]},
+        {"offline_notice_rows": counts["offline_notice_rows"],
+         "ilo_notice_rows": counts["ilo_notice_rows"]},
         request=request,
     )
     hosts = counts["by_type"]["hyperv"]
-    attach_hardware_summaries(hosts)
     hardware_html = {
         str(host.pk): render_to_string("dashboard/_ilo_badge.html", {"summary": host.ilo_summary})
         for host in hosts

@@ -558,6 +558,7 @@ Storage.Status.Health, Temperatures.Status.Health
   `expire_seconds` cùng giá trị, nếu không entry đó lặp lại đúng bug này.
 
 ### Thay đổi quan trọng
+- **2026-10-01 (khối cảnh báo iLO trên dashboard)**: host HyperV có iLO Warning/Critical/Mất kết nối giờ hiện thêm card đỏ "Cảnh báo phần cứng (iLO)" ngay dưới card "Thiết bị đang Offline" (cùng partial `_offline_notice.html`, `ilo_notice_rows` tính trong `_dashboard_counts`, tự cập nhật qua `alerts_summary`). KHÔNG tính vào `offline_count` vì host vẫn online qua WinRM.
 - **2026-10-01 (dashboard iLO + lỗi kết nối + retention, commit `a6c8848` + `4b0cdeb`, đã deploy +
   verify sống)**: Feature iLO trước đó chỉ hiện ở card cuối trang chi tiết HyperV. Nay: (1) cột "iLO"
   mỗi hàng HyperV trên dashboard chính ([apps/dashboard/hardware.py](apps/dashboard/hardware.py)
