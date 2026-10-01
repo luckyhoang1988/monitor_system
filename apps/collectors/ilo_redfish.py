@@ -139,6 +139,9 @@ class IloRedfishClient:
 
     def __init__(self, device: "Device") -> None:
         self.device = device
+        # Lý do ngắn của lần collect_raw() trả None (lỗi gốc) — poll_all_ilo lưu lên Device để UI
+        # hiện "iLO lỗi: 401" thay vì "Chưa có dữ liệu" mãi mãi.
+        self.last_error: str | None = None
 
     def collect_raw(self) -> dict[str, Any] | None:
         device = self.device
@@ -156,18 +159,22 @@ class IloRedfishClient:
         status, ac_root = self._get(session, base, _REDFISH_ROOT)
         if status == 401:
             logger.warning("iLO %s (%s): 401 Unauthorized — kiểm tra lại username/password", device.name, device.ilo_ip_address)
+            self.last_error = "401 Unauthorized (sai username/password)"
             return None
         if status == 404:
             logger.warning(
                 "iLO %s (%s): 404 tại endpoint gốc SmartStorage — nghi ngờ không phải HPE iLO "
                 "hoặc firmware không có Redfish SmartStorage extension", device.name, device.ilo_ip_address,
             )
+            self.last_error = "404 tại SmartStorage (không phải HPE iLO / thiếu Redfish extension)"
             return None
         if status is None:
             logger.warning("iLO %s (%s): lỗi kết nối (timeout/network)", device.name, device.ilo_ip_address)
+            self.last_error = "Không kết nối được (timeout/network)"
             return None
         if status != 200 or not ac_root:
             logger.warning("iLO %s (%s): HTTP %s không mong đợi tại ArrayControllers root", device.name, device.ilo_ip_address, status)
+            self.last_error = f"HTTP {status} không mong đợi tại ArrayControllers"
             return None
 
         controllers = []
@@ -194,6 +201,7 @@ class IloRedfishClient:
                 "đọc được controller nào, coi như thất bại (không đủ bằng chứng để lưu/kết luận)",
                 device.name, device.ilo_ip_address,
             )
+            self.last_error = "ArrayControllers trả 200 nhưng không có controller nào"
             return None
 
         return {

@@ -291,6 +291,18 @@ POLL_ILO_BATCH_SOFT_LIMIT = 60
 POLL_ILO_BATCH_HARD_LIMIT = 70
 
 
+def _set_ilo_error(pk: int, message: str) -> None:
+    """Ghi/xoá lỗi poll iLO gần nhất lên Device (update() — không đụng field khác/last_seen)."""
+    from apps.devices.models import Device
+    try:
+        Device.objects.filter(pk=pk).update(
+            ilo_last_error=message[:200],
+            ilo_last_error_at=timezone.now() if message else None,
+        )
+    except Exception:
+        logger.warning("Không ghi được ilo_last_error cho device id=%s", pk, exc_info=True)
+
+
 @shared_task(
     soft_time_limit=POLL_ILO_BATCH_SOFT_LIMIT,
     time_limit=POLL_ILO_BATCH_HARD_LIMIT,
@@ -329,12 +341,16 @@ def poll_all_ilo() -> None:
                 raw = client.collect_raw()
                 if raw is None:
                     failed += 1
+                    _set_ilo_error(pk, client.last_error or "Poll iLO thất bại")
                     continue
                 data = client.normalize(raw)
                 HardwareHealth.objects.create(device=device, timestamp=timezone.now(), **data)
                 success += 1
+                if device.ilo_last_error or device.ilo_last_error_at:
+                    _set_ilo_error(pk, "")
             except Exception as exc:
                 failed += 1
+                _set_ilo_error(pk, f"Lỗi xử lý: {type(exc).__name__}")
                 logger.warning("iLO poll lỗi device id=%s: %s", pk, exc, exc_info=True)
     except SoftTimeLimitExceeded:
         elapsed = (timezone.now() - t0).total_seconds()

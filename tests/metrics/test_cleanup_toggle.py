@@ -26,3 +26,14 @@ class TestAutoCleanupToggle:
         self._old_health(device)
         cleanup_old_metrics()
         assert SystemHealth.objects.count() == 0  # xóa khi bật
+
+
+@pytest.mark.django_db
+def test_cleanup_removes_old_hardware_health(settings):
+    from apps.metrics.models import HardwareHealth
+    settings.METRICS_AUTO_CLEANUP = True
+    device = CiscoSNMPDeviceFactory()
+    HardwareHealth.objects.create(device=device, timestamp=timezone.now() - timedelta(days=200))
+    HardwareHealth.objects.create(device=device, timestamp=timezone.now())
+    cleanup_old_metrics()
+    assert HardwareHealth.objects.count() == 1

@@ -65,8 +65,13 @@ def hardware_summary(device, health):
             stale = (timezone.now() - health.timestamp).total_seconds() > 2 * settings.POLL_ILO_INTERVAL_SECS
             if stale and color == "success":
                 color = "secondary"
+    # Poll iLO gần nhất thất bại (401/timeout/...) — dữ liệu cũ KHÔNG còn đáng tin để báo "OK".
+    # Có sự cố thật (warning/danger) trong dữ liệu cũ thì giữ nguyên mức đó, chỉ gắn thêm lỗi.
+    error = device.ilo_last_error if device.ilo_ip_address else ""
+    if error and color in ("success", "secondary"):
+        label, color = "Mất kết nối", "warning"
     return {"label": label, "color": color, "problems": problems, "stale": stale,
-            "timestamp": health.timestamp if health else None}
+            "error": error, "timestamp": health.timestamp if health else None}
 
 
 def attach_hardware_summaries(devices):

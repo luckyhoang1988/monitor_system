@@ -127,3 +127,28 @@ def test_health_endpoint_host_type(logged_in_client):
     host.device_type = "switch"
     host.save(update_fields=["device_type"])
     assert logged_in_client.get(url).status_code == 404
+
+
+@pytest.mark.django_db
+def test_poll_error_without_data_shows_disconnected(logged_in_client):
+    host = HyperVDeviceFactory(ilo_ip_address="10.1.1.1", ilo_last_error="401 Unauthorized")
+    summary = hardware_summary(host, None)
+    assert summary["label"] == "Mất kết nối" and summary["color"] == "warning"
+    html = logged_in_client.get(reverse("dashboard:index")).content.decode()
+    assert "iLO: Mất kết nối" in html
+    assert "401 Unauthorized" in html
+
+
+@pytest.mark.django_db
+def test_poll_error_with_ok_data_not_reported_ok():
+    host = HyperVDeviceFactory(ilo_ip_address="10.1.1.1", ilo_last_error="timeout")
+    health = HardwareHealth(device=host, timestamp=timezone.now(), controller_health_code=0)
+    assert hardware_summary(host, health)["label"] == "Mất kết nối"
+
+
+@pytest.mark.django_db
+def test_poll_error_keeps_real_critical():
+    host = HyperVDeviceFactory(ilo_ip_address="10.1.1.1", ilo_last_error="timeout")
+    health = HardwareHealth(device=host, timestamp=timezone.now(), battery_health_code=2)
+    summary = hardware_summary(host, health)
+    assert summary["label"] == "Critical" and summary["error"] == "timeout"
