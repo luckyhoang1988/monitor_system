@@ -577,6 +577,12 @@ Quy trình chuẩn (đã dùng để bắt bug 504 phiên đầu):
   gte 2.00)"` (dùng `rule.metric` thay vì `rule.metric_label`) thay vì đọc được
   `"RAID Controller Health (iLO) = Critical (ngưỡng ≥ Warning)"`.
 
+### Bẫy: poll lỗi mà không để lại dấu vết trên UI (iLO, 2026-10-01)
+Task poll độc lập (`poll_all_ilo`) bỏ qua host lỗi mà không ghi gì → UI chỉ thấy "Chưa có dữ liệu"/dữ
+liệu cũ, không biết 401 hay timeout. Mọi poll độc lập cần lưu lý do lỗi gần nhất (`Device.ilo_last_error`)
+và UI không được hiện "OK" từ dữ liệu cũ khi poll gần nhất đã lỗi. Khi review "feature chưa hiển thị":
+`git status` + `git diff` TRƯỚC, working tree có thể đã chứa bản làm dở.
+
 ## 2. Deploy
 ```
 ./deploy.sh            # push origin master + pull/build/restart trên monitorsrv

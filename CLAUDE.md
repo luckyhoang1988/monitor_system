@@ -558,6 +558,21 @@ Storage.Status.Health, Temperatures.Status.Health
   `expire_seconds` cùng giá trị, nếu không entry đó lặp lại đúng bug này.
 
 ### Thay đổi quan trọng
+- **2026-10-01 (dashboard iLO + lỗi kết nối + retention, commit `a6c8848` + `4b0cdeb`, đã deploy +
+  verify sống)**: Feature iLO trước đó chỉ hiện ở card cuối trang chi tiết HyperV. Nay: (1) cột "iLO"
+  mỗi hàng HyperV trên dashboard chính ([apps/dashboard/hardware.py](apps/dashboard/hardware.py)
+  `attach_hardware_summaries`, 1 query, cập nhật qua `alerts_summary` → `hardware_html`); (2)
+  `Alert.metric_value_label` (dùng chung `AlertRule.threshold_label`) thay số thô `2.0`/`0.0` bằng
+  Critical/DEGRADED ở panel Active Alerts + trang `/alerts/`; (3) trang chi tiết: card iLO lên trên +
+  khối alert theo host + tự làm mới 25s qua `/dashboard/api/hyperv/<id>/health/` (`_hyperv_health.html`),
+  KHÔNG qua SSE vì `poll_all_ilo` không publish; (4) **lỗi poll iLO không còn vô hình**:
+  `IloRedfishClient.last_error` → `poll_all_ilo` ghi `Device.ilo_last_error/_at` (migration
+  `devices/0022`), xoá khi thành công; badge "Mất kết nối" khi dữ liệu cũ không còn đáng tin, còn
+  Warning/Critical thật thì giữ nguyên mức + gắn "Lỗi poll"; (5) `cleanup_old_metrics` xoá
+  `HardwareHealth` cũ hơn `METRICS_RETENTION_DAYS` (cùng cờ `METRICS_AUTO_CLEANUP`, mặc định TẮT →
+  prod phải bật cờ này thì mới có tác dụng; hiện 2505 dòng). ⚠️ `VolumeStats` cũng chưa có retention
+  (chưa xử lý). Bài học: lần review đầu tôi kết luận "chưa hiển thị" từ snapshot đã cũ — working tree có
+  thay đổi chưa commit; luôn `git status` lại trước khi kết luận.
 - **2026-09-29 (cùng ngày, mới nhất — review ngoài vòng 7: try/except CHUNG ở TRONG nội bộ nhóm
   Power, giữa PSU health và Power Redundancy — cùng họ bug với vòng 6 nhưng lồng sâu hơn 1 lớp)**:
   User dán tiếp báo cáo, soi vào chính nhóm Power vừa được tách riêng ở vòng 6 —
