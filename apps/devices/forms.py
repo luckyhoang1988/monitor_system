@@ -8,6 +8,12 @@ class DeviceForm(forms.ModelForm):
         widget=forms.TextInput(attrs={"placeholder": "GE0/0/1, GE0/0/2"}),
         label="Uplink/Trunk ports"
     )
+    # Khai báo riêng (không dùng field sinh từ model, max_length=64): cho dán dạng "AA:BB:..." (95 ký tự),
+    # clean_ilo_cert_sha256 chuẩn hoá về 64 hex thường trước khi lưu.
+    ilo_cert_sha256 = forms.CharField(
+        required=False, max_length=128, label="iLO cert SHA-256",
+        widget=forms.TextInput(attrs={"placeholder": "64 ký tự hex (có thể có dấu ':')", "autocomplete": "off"}),
+    )
 
     class Meta:
         model = Device
@@ -17,7 +23,7 @@ class DeviceForm(forms.ModelForm):
             "snmpv3_username", "snmpv3_auth_protocol", "snmpv3_auth_password",
             "snmpv3_priv_protocol", "snmpv3_priv_password",
             "ssh_username", "ssh_password",
-            "ilo_ip_address", "ilo_username", "ilo_password",
+            "ilo_ip_address", "ilo_username", "ilo_password", "ilo_cert_sha256",
             "collect_interval", "uplink_ports", "location", "notes",
             "enabled", "backup_enabled"
         ]
@@ -31,6 +37,16 @@ class DeviceForm(forms.ModelForm):
             "uplink_ports":    forms.TextInput(attrs={"placeholder": "GE0/0/1, GE0/0/2"}),
             "notes":           forms.Textarea(attrs={"rows": 3}),
         }
+
+    def clean_ilo_cert_sha256(self):
+        value = (self.cleaned_data.get("ilo_cert_sha256") or "").strip()
+        if not value:
+            return ""
+        from apps.collectors.ilo_redfish import normalize_cert_sha256
+        normalized = normalize_cert_sha256(value)
+        if normalized is None:
+            raise forms.ValidationError("Cần đúng 64 ký tự hex (có thể ngăn cách bằng dấu ':').")
+        return normalized
 
     def clean_uplink_ports(self):
         value = self.cleaned_data.get("uplink_ports")

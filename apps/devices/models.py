@@ -57,6 +57,10 @@ class Device(models.Model):
     ilo_ip_address   = models.GenericIPAddressField(null=True, blank=True, verbose_name="IP iLO")
     ilo_username     = models.CharField(max_length=100, blank=True, verbose_name="iLO Username")
     ilo_password     = EncryptedCharField(blank=True, verbose_name="iLO Password")
+    # SHA-256 (64 hex thường) của chứng chỉ iLO đã ghim. iLO dùng cert mặc định HPE (SAN không có IP) nên
+    # không verify theo CA/hostname được; có giá trị này thì collector chỉ nói chuyện với đúng cert đó
+    # (không gửi credentials cho cert lạ), để trống = KHÔNG xác thực cert. Lấy bằng `manage.py pin_ilo_certs`.
+    ilo_cert_sha256  = models.CharField(max_length=64, blank=True, default="", verbose_name="iLO cert SHA-256")
     # Kết quả poll iLO gần nhất THẤT BẠI (poll_all_ilo ghi/xoá) — hiển thị badge, không dùng cho online/offline.
     ilo_last_error    = models.CharField(max_length=200, blank=True, default="")
     ilo_last_error_at = models.DateTimeField(null=True, blank=True)

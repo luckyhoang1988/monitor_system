@@ -107,11 +107,14 @@ from __future__ import annotations
 
 import logging
 import re
+import socket
+import ssl
 from typing import TYPE_CHECKING, Any
 
 import requests
 import urllib3
 from django.conf import settings
+from requests.adapters import HTTPAdapter
 
 if TYPE_CHECKING:
     from apps.devices.models import Device
@@ -138,6 +141,55 @@ _POWER_RESOURCE_PATH = "/redfish/v1/Chassis/1/Power"
 _PSU_REF_RE = re.compile(r"^/?PowerSupplies/(\d+)$")
 
 
+def normalize_cert_sha256(value: str | None) -> str | None:
+    """Fingerprint SHA-256 chuẩn hoá (64 hex thường, bỏ ':', '-', khoảng trắng) hoặc None nếu sai định dạng."""
+    cleaned = re.sub(r"[\s:\-]", "", value or "").lower()
+    return cleaned if re.fullmatch(r"[0-9a-f]{64}", cleaned) else None
+
+
+def fetch_cert_der(ip: str, port: int = 443, timeout: float = 8) -> bytes:
+    """Chứng chỉ (DER) mà iLO đang trình ra. KHÔNG xác thực gì — chỉ để ghim lần đầu (TOFU)."""
+    context = ssl.create_default_context()
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    with socket.create_connection((ip, port), timeout=timeout) as raw:
+        with context.wrap_socket(raw, server_hostname=ip) as tls:
+            return tls.getpeercert(binary_form=True)
+
+
+class _PinnedAdapter(HTTPAdapter):
+    """Chỉ chấp nhận chứng chỉ có đúng SHA-256 đã ghim (urllib3 `assert_fingerprint`).
+
+    iLO dùng chứng chỉ mặc định HPE (issuer "Default Issuer (Do not trust)", SAN chỉ có tên iLO, không có
+    IP) nên không verify theo CA/hostname được — verify=True fail cả 3 iLO prod (đo 2026-10-01). Ghim
+    fingerprint chặn giả mạo iLO mà không phải đổi gì trên iLO. Kiểm tra diễn ra ở bước bắt tay TLS, TRƯỚC
+    khi gửi request nên cert lạ không bao giờ nhận được Basic Auth. Mismatch -> `fingerprint_mismatch`.
+    """
+
+    def __init__(self, fingerprint: str) -> None:
+        self._fingerprint = fingerprint
+        self.fingerprint_mismatch = False
+        super().__init__()
+
+    def init_poolmanager(self, *args: Any, **kwargs: Any) -> None:
+        kwargs["assert_fingerprint"] = self._fingerprint
+        super().init_poolmanager(*args, **kwargs)
+
+    def proxy_manager_for(self, proxy: str, **proxy_kwargs: Any) -> Any:
+        # Qua proxy requests dùng ProxyManager riêng, KHÔNG đi qua init_poolmanager: thiếu dòng này thì
+        # sai pin vẫn HTTP 200 và server nhận Basic Auth (review ngoài 2026-10-01, tái hiện bằng proxy
+        # CONNECT local). Đích của đường hầm CONNECT vẫn bị kiểm fingerprint như kết nối trực tiếp.
+        proxy_kwargs["assert_fingerprint"] = self._fingerprint
+        return super().proxy_manager_for(proxy, **proxy_kwargs)
+
+    def send(self, request: Any, **kwargs: Any) -> Any:
+        try:
+            return super().send(request, **kwargs)
+        except requests.exceptions.SSLError:
+            self.fingerprint_mismatch = True
+            raise
+
+
 class IloRedfishClient:
     """Đọc RAID controller/logical drive/disk/enclosure health qua iLO Redfish (đọc-only)."""
 
@@ -154,13 +206,38 @@ class IloRedfishClient:
 
         base = f"https://{device.ilo_ip_address}"
         session = requests.Session()
-        session.verify = getattr(settings, "ILO_CERT_VALIDATE", False)
-        if not session.verify:
-            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        pin_raw = (getattr(device, "ilo_cert_sha256", "") or "").strip()
+        pinned: _PinnedAdapter | None = None
+        if pin_raw:
+            pin = normalize_cert_sha256(pin_raw)
+            if pin is None:
+                # Đã nhập pin nhưng sai định dạng: KHÔNG lặng lẽ rơi về "không xác thực" (người vận hành
+                # tưởng đã được bảo vệ) — dừng, báo lỗi rõ, không gửi credentials.
+                logger.warning("iLO %s (%s): ilo_cert_sha256 sai định dạng — bỏ qua poll", device.name, device.ilo_ip_address)
+                self.last_error = "ilo_cert_sha256 sai định dạng (cần 64 ký tự hex) — chưa gửi credentials"
+                return None
+            pinned = _PinnedAdapter(pin)
+            session.mount("https://", pinned)
+            # Đã ghim thì pin là điều kiện DUY NHẤT (chain/hostname không kiểm được với cert mặc định HPE).
+            session.verify = False
+            # iLO nằm trong mạng quản trị, truy cập trực tiếp: không đọc HTTPS_PROXY/NO_PROXY/.netrc/
+            # REQUESTS_CA_BUNDLE từ môi trường. (Adapter còn tự ép pin cả khi ai đó đặt session.proxies.)
+            session.trust_env = False
+        else:
+            session.verify = getattr(settings, "ILO_CERT_VALIDATE", False)
+            if not session.verify:
+                urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         session.auth = (device.ilo_username, device.ilo_password)
         session.headers.update({"Accept": "application/json"})
 
         status, ac_root = self._get(session, base, _REDFISH_ROOT)
+        if pinned is not None and pinned.fingerprint_mismatch and status is None:
+            logger.warning(
+                "iLO %s (%s): chứng chỉ KHÔNG khớp fingerprint đã ghim — cert bị thay hoặc bị giả mạo, "
+                "không gửi credentials", device.name, device.ilo_ip_address,
+            )
+            self.last_error = "Chứng chỉ iLO KHÔNG khớp fingerprint đã ghim (cert bị đổi/giả mạo?) — chưa gửi credentials"
+            return None
         if status == 401:
             logger.warning("iLO %s (%s): 401 Unauthorized — kiểm tra lại username/password", device.name, device.ilo_ip_address)
             self.last_error = "401 Unauthorized (sai username/password)"

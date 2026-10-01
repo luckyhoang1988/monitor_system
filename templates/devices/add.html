@@ -133,6 +133,12 @@
                 {{ form.ilo_password }}
               </div>
               <div class="col-12">
+                <label class="form-label small fw-semibold">{{ form.ilo_cert_sha256.label }}</label>
+                {{ form.ilo_cert_sha256 }}
+                {% if form.ilo_cert_sha256.errors %}<div class="text-danger small">{{ form.ilo_cert_sha256.errors|join:" " }}</div>{% endif %}
+                <div class="form-text small text-muted">Khuyến nghị: ghim chứng chỉ iLO để chống giả mạo (lấy bằng <code>manage.py pin_ilo_certs</code>). Để trống = KHÔNG xác thực chứng chỉ.</div>
+              </div>
+              <div class="col-12">
                 <div class="form-text small text-muted">Để trống nếu host chưa có/chưa biết IP iLO — sẽ bỏ qua khi poll.</div>
               </div>
             </div>
