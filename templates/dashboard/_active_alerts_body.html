@@ -19,7 +19,7 @@
       </td>
       <td class="fw-medium">{{ alert.device.name }}</td>
       <td class="text-muted">{{ alert.rule.name }}</td>
-      <td class="font-monospace">{{ alert.metric_value|floatformat:1 }}</td>
+      <td class="font-monospace">{{ alert.metric_value_label }}</td>
       <td class="text-muted small">{{ alert.triggered_at|date:"d/m H:i" }}</td>
     </tr>
     {% endfor %}

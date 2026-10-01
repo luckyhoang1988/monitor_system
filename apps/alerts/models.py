@@ -162,6 +162,12 @@ class Alert(models.Model):
     def __str__(self) -> str:
         return f"{self.severity}: {self.device.name} — {self.rule.name}"
 
+    @property
+    def metric_value_label(self) -> str:
+        """Use the same metric semantics as rule thresholds in the web UI."""
+        rule = AlertRule(metric=self.rule.metric, threshold=self.metric_value)
+        return rule.threshold_label
+
 
 class AlertConfig(models.Model):
     """Singleton (pk=1): cấu hình kênh thông báo chỉnh qua UI."""

@@ -7,6 +7,7 @@ from django.utils import timezone
 from apps.devices.models import Device
 from apps.alerts.models import Alert
 from apps.metrics import cache as metrics_cache
+from .hardware import attach_hardware_summaries, hardware_summary
 
 
 def health_check(request):
@@ -152,6 +153,7 @@ def index(request):
     firewalls = by_type["firewall"]
     nas_list  = by_type["nas"]
     hyperv    = by_type["hyperv"]
+    attach_hardware_summaries(hyperv)
     wlan_controllers = by_type["wlan_controller"]
 
     offline_devices = [d for d in all_devices if not d.is_online]
@@ -209,7 +211,14 @@ def alerts_summary(request):
         {"offline_notice_rows": counts["offline_notice_rows"]},
         request=request,
     )
+    hosts = counts["by_type"]["hyperv"]
+    attach_hardware_summaries(hosts)
+    hardware_html = {
+        str(host.pk): render_to_string("dashboard/_ilo_badge.html", {"summary": host.ilo_summary})
+        for host in hosts
+    }
     return JsonResponse({
+        "hardware_html": hardware_html,
         "alert_count":   counts["alert_count"],
         "offline_count": counts["offline_count"],
         "stats": [
@@ -344,7 +353,7 @@ def hyperv_detail(request, pk):
     # METRICS_WRITE_MODE/cache-mode, ghi thẳng Postgres mỗi poll_all_ilo). None nếu chưa
     # cấu hình ilo_ip_address hoặc chưa có vòng poll nào thành công.
     latest_hardware_health = (
-        HardwareHealth.objects.filter(device=device).order_by("-timestamp").first()
+        HardwareHealth.objects.filter(device=device).order_by("-timestamp", "-pk").first()
         if device.ilo_ip_address else None
     )
 
@@ -420,7 +429,27 @@ def hyperv_detail(request, pk):
         "running_count":          running_count,
         "unhealthy_vms":          unhealthy_vms,
         "latest_hardware_health": latest_hardware_health,
+        "hardware_summary": hardware_summary(device, latest_hardware_health),
+        "active_alerts": Alert.objects.filter(device=device, is_active=True).select_related("device", "rule"),
     })
+
+
+@never_cache
+@login_required
+def hyperv_health(request, pk):
+    """Live hardware and active alerts, polled independently of WinRM/SSE."""
+    from django.template.loader import render_to_string
+    from apps.metrics.models import HardwareHealth
+    device = get_object_or_404(Device, pk=pk, device_type="hyperv")
+    health = (HardwareHealth.objects.filter(device=device).order_by("-timestamp", "-pk").first()
+              if device.ilo_ip_address else None)
+    context = {
+        "device": device,
+        "latest_hardware_health": health,
+        "hardware_summary": hardware_summary(device, health),
+        "active_alerts": Alert.objects.filter(device=device, is_active=True).select_related("device", "rule"),
+    }
+    return JsonResponse({"html": render_to_string("dashboard/_hyperv_health.html", context, request=request)})
 
 
 def _switch_like_detail(request, pk: int, device_type: str, template: str):

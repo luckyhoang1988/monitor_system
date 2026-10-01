@@ -52,7 +52,7 @@
             {% endif %}
           </td>
           <td class="text-muted">{{ a.rule.name }}</td>
-          <td class="text-end font-monospace">{{ a.metric_value|floatformat:2 }}</td>
+          <td class="text-end font-monospace">{{ a.metric_value_label }}</td>
           <td class="text-muted small">{{ a.triggered_at|date:"d/m/Y H:i" }}</td>
           <td class="text-muted small">
             {% if a.acknowledged_by %}
@@ -111,7 +111,7 @@
           </td>
           <td class="text-muted">{{ a.device.name }}</td>
           <td class="text-muted">{{ a.rule.name }}</td>
-          <td class="text-end font-monospace text-muted">{{ a.metric_value|floatformat:2 }}</td>
+          <td class="text-end font-monospace text-muted">{{ a.metric_value_label }}</td>
           <td class="text-muted small">{{ a.triggered_at|date:"d/m/Y H:i" }}</td>
           <td class="text-muted small">{{ a.resolved_at|date:"d/m/Y H:i"|default:"—" }}</td>
         </tr>

@@ -1,0 +1,1 @@
+<span class="badge bg-{{ summary.color }} {% if summary.color == 'warning' %}text-dark{% endif %}" title="{% for problem in summary.problems %}{{ problem }}; {% endfor %}{% if summary.timestamp %}Cập nhật: {{ summary.timestamp|date:'d/m/Y H:i:s' }}{% endif %}">iLO: {{ summary.label }}{% if summary.stale %} · Dữ liệu cũ{% endif %}</span>

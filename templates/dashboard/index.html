@@ -508,6 +508,7 @@
                 <th class="ps-2">Tên</th>
                 <th>IP</th>
                 <th>TT</th>
+                <th>iLO</th>
                 <th></th>
               </tr>
             </thead>
@@ -523,6 +524,7 @@
                     <span class="badge badge-offline status-dot rounded-pill px-2">Off</span>
                   {% endif %}
                 </td>
+                <td class="js-ilo-cell">{% include "dashboard/_ilo_badge.html" with summary=hv.ilo_summary %}</td>
                 <td>
                   <a href="{% url 'dashboard:hyperv_detail' hv.pk %}" class="btn btn-sm btn-outline-secondary row-action p-0">
                     <i class="bi bi-graph-up"></i>
@@ -703,6 +705,10 @@
     fetch(URL, { cache: "no-store" })
       .then(function (r) { return r.json(); })
       .then(function (d) {
+        Object.entries(d.hardware_html || {}).forEach(function ([id, html]) {
+          var cell = document.querySelector('.js-device-row[data-device-id="' + id + '"] .js-ilo-cell');
+          if (cell) cell.innerHTML = html;
+        });
         // Panel Active Alerts (render từ cùng partial server-side)
         var scroll = document.getElementById("alertScroll");
         if (scroll && typeof d.alerts_html === "string") scroll.innerHTML = d.alerts_html;

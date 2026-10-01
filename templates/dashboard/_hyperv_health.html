@@ -1,0 +1,183 @@
+<div class="card mb-4">
+  <div class="card-header bg-white fw-semibold">Alert đang active của {{ device.name }}</div>
+  <div class="table-responsive">{% include "dashboard/_active_alerts_body.html" %}</div>
+</div>
+<!-- ===== Hardware Health (iLO) ===== -->
+{% if device.ilo_ip_address %}
+<div class="card mb-4">
+  <div class="card-header bg-white py-2 d-flex flex-wrap gap-2 align-items-center justify-content-between">
+    <span class="fw-semibold"><i class="bi bi-hdd-rack me-2 text-danger"></i>Hardware Health (iLO)</span>
+    {% include "dashboard/_ilo_badge.html" with summary=hardware_summary %}
+    {% if latest_hardware_health %}
+      <span class="text-muted small">Cập nhật: {{ latest_hardware_health.timestamp|date:"d/m/Y H:i:s" }}</span>
+    {% endif %}
+  </div>
+  <div class="card-body">
+    {% if not latest_hardware_health %}
+      <div class="text-center text-muted py-4">
+        <i class="bi bi-hdd-rack fs-2 d-block mb-2"></i>Chưa có dữ liệu iLO. Chờ vòng poll_all_ilo kế tiếp (mặc định mỗi 300s).
+      </div>
+    {% else %}
+      <!-- System Health Summary (2026-09-29) — Battery/Processor/Memory/Fan/Temperature/PowerSupply/
+           Redundancy đọc TRỰC TIẾP từ field code trên latest_hardware_health (0/1/2), KHÔNG qua raw
+           JSON như card Controller/LD/Disk/Enclosure bên dưới — các mục này chỉ cần badge tóm tắt
+           "worst", không cần hiển thị chi tiết từng item con (44 sensor nhiệt độ quá nhiều cho UI). -->
+      <div class="d-flex flex-wrap gap-2 mb-4 pb-4 border-bottom">
+        <span class="badge {% if latest_hardware_health.controller_health_code == 2 %}bg-danger{% elif latest_hardware_health.controller_health_code == 1 %}bg-warning text-dark{% else %}bg-secondary{% endif %}">RAID Controller: {% if latest_hardware_health.controller_health_code == 0 %}OK{% elif latest_hardware_health.controller_health_code == 1 %}Warning{% elif latest_hardware_health.controller_health_code == 2 %}Critical{% else %}—{% endif %}</span>
+        <span class="badge {% if latest_hardware_health.logical_drive_worst_code == 2 %}bg-danger{% elif latest_hardware_health.logical_drive_worst_code == 1 %}bg-warning text-dark{% else %}bg-secondary{% endif %}">Logical Drives: {% if latest_hardware_health.logical_drive_worst_code == 0 %}OK{% elif latest_hardware_health.logical_drive_worst_code == 1 %}Warning{% elif latest_hardware_health.logical_drive_worst_code == 2 %}Critical{% else %}—{% endif %}</span>
+        <span class="badge {% if latest_hardware_health.missing_disk_count > 0 %}bg-danger{% else %}bg-secondary{% endif %}">Missing disks: {{ latest_hardware_health.missing_disk_count|default_if_none:"—" }}</span>
+        <span class="badge {% if latest_hardware_health.enclosure_mismatch_count > 0 %}bg-danger{% else %}bg-secondary{% endif %}">Enclosure mismatch: {{ latest_hardware_health.enclosure_mismatch_count|default_if_none:"—" }}</span>
+
+        {% with code=latest_hardware_health.battery_health_code %}
+        <span class="badge {% if code == 0 %}bg-success{% elif code == 1 %}bg-warning text-dark{% elif code == 2 %}bg-danger{% else %}bg-secondary{% endif %}">
+          Battery: {% if code == 0 %}OK{% elif code == 1 %}Warning{% elif code == 2 %}Critical{% else %}—{% endif %}
+        </span>
+        {% endwith %}
+        {% with code=latest_hardware_health.processor_health_code %}
+        <span class="badge {% if code == 0 %}bg-success{% elif code == 1 %}bg-warning text-dark{% elif code == 2 %}bg-danger{% else %}bg-secondary{% endif %}">
+          Processors: {% if code == 0 %}OK{% elif code == 1 %}Warning{% elif code == 2 %}Critical{% else %}—{% endif %}
+        </span>
+        {% endwith %}
+        {% with code=latest_hardware_health.memory_health_code %}
+        <span class="badge {% if code == 0 %}bg-success{% elif code == 1 %}bg-warning text-dark{% elif code == 2 %}bg-danger{% else %}bg-secondary{% endif %}">
+          Memory: {% if code == 0 %}OK{% elif code == 1 %}Warning{% elif code == 2 %}Critical{% else %}—{% endif %}
+        </span>
+        {% endwith %}
+        {% with code=latest_hardware_health.fan_worst_code %}
+        <span class="badge {% if code == 0 %}bg-success{% elif code == 1 %}bg-warning text-dark{% elif code == 2 %}bg-danger{% else %}bg-secondary{% endif %}">
+          Fans: {% if code == 0 %}OK{% elif code == 1 %}Warning{% elif code == 2 %}Critical{% else %}—{% endif %}
+        </span>
+        {% endwith %}
+        {% with code=latest_hardware_health.temperature_worst_code %}
+        <span class="badge {% if code == 0 %}bg-success{% elif code == 1 %}bg-warning text-dark{% elif code == 2 %}bg-danger{% else %}bg-secondary{% endif %}">
+          Temperatures: {% if code == 0 %}OK{% elif code == 1 %}Warning{% elif code == 2 %}Critical{% else %}—{% endif %}
+        </span>
+        {% endwith %}
+        {% with code=latest_hardware_health.power_supply_worst_code %}
+        <span class="badge {% if code == 0 %}bg-success{% elif code == 1 %}bg-warning text-dark{% elif code == 2 %}bg-danger{% else %}bg-secondary{% endif %}">
+          Power Supplies: {% if code == 0 %}OK{% elif code == 1 %}Warning{% elif code == 2 %}Critical{% else %}—{% endif %}
+        </span>
+        {% endwith %}
+        {% with ok=latest_hardware_health.power_redundancy_ok %}
+        <span class="badge {% if ok == True %}bg-success{% elif ok == False %}bg-danger{% else %}bg-secondary{% endif %}">
+          Power Redundancy: {% if ok == True %}OK{% elif ok == False %}DEGRADED{% else %}—{% endif %}
+        </span>
+        {% endwith %}
+        <!-- 3 badge bonus (2026-09-29 vòng 2) — CHỈ có dữ liệu trên host iLO5 (Oem.Hpe.
+             AggregateHealthStatus); host iLO4 (Hyperv-02/Hyprver03) luôn hiện "—" cho cả 3, không
+             phải lỗi mà là không có nguồn tương đương trên schema đó. -->
+        {% with code=latest_hardware_health.bios_hardware_health_code %}
+        <span class="badge {% if code == 0 %}bg-success{% elif code == 1 %}bg-warning text-dark{% elif code == 2 %}bg-danger{% else %}bg-secondary{% endif %}">
+          BIOS/Hardware Health: {% if code == 0 %}OK{% elif code == 1 %}Warning{% elif code == 2 %}Critical{% else %}—{% endif %}
+        </span>
+        {% endwith %}
+        {% with code=latest_hardware_health.network_health_code %}
+        <span class="badge {% if code == 0 %}bg-success{% elif code == 1 %}bg-warning text-dark{% elif code == 2 %}bg-danger{% else %}bg-secondary{% endif %}">
+          Network: {% if code == 0 %}OK{% elif code == 1 %}Warning{% elif code == 2 %}Critical{% else %}—{% endif %}
+        </span>
+        {% endwith %}
+        {% with ok=latest_hardware_health.fan_redundancy_ok %}
+        <span class="badge {% if ok == True %}bg-success{% elif ok == False %}bg-danger{% else %}bg-secondary{% endif %}">
+          Fan Redundancy: {% if ok == True %}OK{% elif ok == False %}DEGRADED{% else %}—{% endif %}
+        </span>
+        {% endwith %}
+        {% if latest_hardware_health.ams_device_discovery %}
+        <span class="badge bg-secondary">AMS: {{ latest_hardware_health.ams_device_discovery }}</span>
+        {% endif %}
+      </div>
+
+      {% for c in latest_hardware_health.raw.controllers %}
+      <div class="mb-4 {% if not forloop.last %}border-bottom pb-4{% endif %}">
+        <div class="d-flex align-items-center flex-wrap gap-2 mb-2">
+          <span class="fw-semibold">{{ c.detail.Model|default:"Array Controller" }}</span>
+          <span class="text-muted small font-monospace">SN {{ c.detail.SerialNumber|default:"—" }} · FW {{ c.detail.FirmwareVersion.Current.VersionString|default:"—" }}</span>
+          {% with health=c.detail.Status.Health %}
+          <span class="badge {% if health == 'OK' %}bg-success{% elif health == 'Warning' %}bg-warning text-dark{% else %}bg-danger{% endif %}">Controller: {{ health|default:"?" }}</span>
+          {% endwith %}
+        </div>
+
+        <div class="table-responsive mb-3">
+          <table class="table table-sm table-hover mb-0">
+            <thead class="table-light">
+              <tr><th class="ps-3">Logical Drive</th><th>RAID</th><th class="text-end">Capacity</th><th class="pe-3">Health</th></tr>
+            </thead>
+            <tbody>
+              {% for ld in c.logical_drives %}
+              <tr>
+                <td class="ps-3">LD{{ ld.LogicalDriveNumber }} <span class="text-muted small font-monospace">{{ ld.LogicalDriveName }}</span></td>
+                <td>RAID {{ ld.Raid }}</td>
+                <td class="text-end font-monospace">{{ ld.CapacityMiB|default_if_none:"—" }} MiB</td>
+                <td class="pe-3">
+                  {% with health=ld.Status.Health %}
+                  <span class="badge {% if health == 'OK' %}bg-success{% elif health == 'Warning' %}bg-warning text-dark{% else %}bg-danger{% endif %}">{{ health|default:"?" }}</span>
+                  {% endwith %}
+                </td>
+              </tr>
+              {% empty %}
+              <tr><td colspan="4" class="ps-3 text-muted small py-2">Không có logical drive.</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+
+        <div class="table-responsive mb-3">
+          <table class="table table-sm table-hover mb-0">
+            <thead class="table-light">
+              <tr><th class="ps-3">Disk</th><th>Model</th><th>Location</th><th class="text-end">Capacity</th><th class="pe-3">Health</th></tr>
+            </thead>
+            <tbody>
+              {% for d in c.disks %}
+              <tr>
+                <td class="ps-3 font-monospace">{% if d.bay_number %}Bay {{ d.bay_number }}{% else %}Disk {{ d.Id|default:"?" }}{% endif %}</td>
+                {% if d.is_missing %}
+                <td colspan="3" class="text-danger">Không detect được (mất đĩa)</td>
+                <td class="pe-3"><span class="badge bg-danger">MISSING</span></td>
+                {% else %}
+                <td>{{ d.Model|default:"—" }}</td>
+                <td class="font-monospace">{{ d.Location|default:"—" }}</td>
+                <td class="text-end font-monospace">{{ d.CapacityGB|default_if_none:"—" }} GB</td>
+                <td class="pe-3">
+                  {% with health=d.Status.Health %}
+                  <span class="badge {% if health == 'OK' %}bg-success{% elif health == 'Warning' %}bg-warning text-dark{% else %}bg-danger{% endif %}">{{ health|default:"?" }}</span>
+                  {% endwith %}
+                </td>
+                {% endif %}
+              </tr>
+              {% empty %}
+              <tr><td colspan="5" class="ps-3 text-muted small py-2">Không có đĩa.</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+
+        <div class="table-responsive">
+          <table class="table table-sm table-hover mb-0">
+            <thead class="table-light">
+              <tr><th class="ps-3">Enclosure</th><th>Location</th><th class="text-end">Bay Count</th><th class="pe-3">Health</th></tr>
+            </thead>
+            <tbody>
+              {% for e in c.enclosures %}
+              <tr>
+                <td class="ps-3">Enclosure {{ e.Id }}</td>
+                <td class="font-monospace">{{ e.Location|default:"—" }}</td>
+                <td class="text-end">{{ e.DriveBayCount|default_if_none:"—" }}</td>
+                <td class="pe-3">
+                  {% with health=e.Status.Health %}
+                  <span class="badge {% if health == 'OK' %}bg-success{% elif health == 'Warning' %}bg-warning text-dark{% else %}bg-danger{% endif %}">{{ health|default:"?" }}</span>
+                  {% endwith %}
+                </td>
+              </tr>
+              {% empty %}
+              <tr><td colspan="4" class="ps-3 text-muted small py-2">Không có enclosure.</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      {% empty %}
+      <div class="text-center text-muted py-4">Không lấy được controller nào từ iLO.</div>
+      {% endfor %}
+    {% endif %}
+  </div>
+</div>
+{% endif %}
