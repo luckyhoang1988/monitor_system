@@ -4,6 +4,8 @@ import re
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
+from apps.devices.crypto import ensure_credentials_readable
+
 from .base import BaseCollector, NormalizedData, InterfaceData
 
 if TYPE_CHECKING:
@@ -52,6 +54,8 @@ class SwitchSSHCollector(BaseCollector):
             NetmikoAuthenticationException,
             NetmikoTimeoutException,
         )
+        # Mỗi lần đăng nhập sai là một lần tính vào ngưỡng khoá tài khoản AAA — không thử bằng chuỗi rỗng.
+        ensure_credentials_readable(self.device, "ssh_password")
         try:
             return ConnectHandler(**self._connect_params)
         except NetmikoAuthenticationException:

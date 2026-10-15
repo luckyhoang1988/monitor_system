@@ -6,6 +6,8 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
+from apps.devices.crypto import CredentialDecryptError, UnreadableCredential
+
 logger = logging.getLogger(__name__)
 
 OID_SYS_DESCR = "1.3.6.1.2.1.1.1.0"
@@ -198,7 +200,19 @@ def resolve_snmp_backend() -> str:
 
 
 def create_snmp_session(snmp_kwargs: dict[str, Any], backend: str | None = None) -> Any:
-    """Tạo SNMP session — easysnmp Session hoặc PySnmpSession (v1/v2c only)."""
+    """Tạo SNMP session — easysnmp Session hoặc PySnmpSession (v1/v2c only).
+
+    Điểm chặn chung của mọi đường SNMP (collector, topology, lệnh verify_*): community/mật khẩu v3 mà
+    không giải mã được (ENCRYPTION_KEY thiếu/sai) → từ chối ngay, KHÔNG dựng phiên với chuỗi rỗng và chờ
+    timeout 3×10s mỗi walk rồi báo "thiết bị không trả lời".
+    """
+    for key in ("community", "auth_password", "privacy_password"):
+        value = snmp_kwargs.get(key)
+        if isinstance(value, UnreadableCredential):
+            raise CredentialDecryptError(
+                f"SNMP {key} của {snmp_kwargs.get('hostname', '?')} không giải mã được — {value.reason}. "
+                "Chưa tạo phiên SNMP."
+            )
     backend = backend or resolve_snmp_backend()
     if backend == "easysnmp":
         from easysnmp import Session

@@ -6,6 +6,8 @@ from requests import exceptions as req_exc
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
+from apps.devices.crypto import ensure_credentials_readable
+
 from .base import BaseCollector, NormalizedData
 
 if TYPE_CHECKING:
@@ -162,6 +164,8 @@ class HyperVCollector(BaseCollector):
         import winrm
         import winrm.exceptions
         from django.conf import settings as _s
+        # NTLM sai mật khẩu mỗi chu kỳ poll × 3 host → khoá tài khoản AD. Từ chối trước khi mở phiên.
+        ensure_credentials_readable(self.device, "ssh_password")
         if not self.device.ssh_username or not self.device.ssh_password:
             raise ValueError(f"WinRM credentials missing for device {self.device.name}")
         cert_validation = getattr(_s, "WINRM_CERT_VALIDATE", "validate")

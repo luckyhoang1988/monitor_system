@@ -3,6 +3,9 @@ import os
 import logging
 from datetime import datetime, timezone
 from django.conf import settings
+
+from .crypto import ensure_credentials_readable
+
 try:
     from netmiko import ConnectHandler
 except ImportError:
@@ -17,6 +20,7 @@ def run_ssh_backup(device) -> str:
         raise ImportError("Thư viện 'netmiko' chưa được cài đặt trong môi trường Python.")
     if device.protocol != "ssh":
         raise ValueError("Thiết bị không sử dụng giao thức SSH")
+    ensure_credentials_readable(device, "ssh_password")
     if not device.ssh_username or not device.ssh_password:
         raise ValueError("Thiết bị thiếu thông tin tài khoản hoặc mật khẩu SSH")
 

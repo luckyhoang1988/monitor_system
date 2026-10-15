@@ -763,6 +763,43 @@ thành `[]`, và timeout thật cũng vậy. Nơi nào GHI hoặc SO SÁNH theo 
 - Windows/Git Bash: `grep -c $'\r'` báo mọi file là CRLF (kể cả file LF) — kiểm bằng Python `read_bytes().count(b"\r\n")`.
   Repo TRỘN LF/CRLF (vd `snmp_client.py`/`tasks.py` CRLF, `topology_*.py` LF) → script vá phải tự nhận và giữ nguyên.
 
+### Bẫy: giải mã "mềm" trả lại ciphertext → credential sai được dùng và bị ghi đè (1.6, 2026-10-15)
+`decrypt_value` từng `except Exception: return ciphertext` (ý định: "plain-text cũ chưa migrate"). Chuỗi `gAAAA…` đi
+làm mật khẩu WinRM/iLO/SSH (mỗi lần poll = 1 lần đăng nhập sai → khoá tài khoản), và `get_prep_value` mã hoá lại
+chính giá trị vừa đọc nên `save()` đầy đủ ghi `encrypt(token)` đè token gốc.
+- **Phân biệt "chưa mã hoá" với "mã hoá nhưng không giải mã được" bằng CẤU TRÚC, không bằng "giải mã có được
+  không"**: `is_encrypted` (= giải mã được bằng khoá hiện tại) coi token của khoá khác là plain-text → lệnh migrate
+  mã hoá chồng. Cấu trúc Fernet: base64 url-safe, byte đầu `0x80`, ≥73 byte (không dựa tiền tố `gAAAAA`, chỉ đúng khi
+  timestamp còn trong 32 bit thấp). Chuỗi không có cấu trúc token VÀ không giống token hỏng → plain-text cũ, trả
+  nguyên.
+- **"Không đạt kiểm tra cấu trúc" ≠ "là plain-text" (review ngoài P2 sau 1.6)**: token mất `=` cuối (hoặc cắt
+  cụt, lẫn khoảng trắng) không có cấu trúc hợp lệ nhưng cũng không phải mật khẩu — bản đầu coi nó là plain-text
+  nên collector đăng nhập bằng `gAAAAA…` và `save()`/`encrypt_credentials` mã hoá chồng. Token của plaintext
+  ≤15 byte kết thúc `==`, 16–31 byte `=`, nên mất padding là kịch bản thật khi ai đó cắt/dán/chuẩn hoá chuỗi.
+  Ba trạng thái: token hợp lệ (cấu trúc) / token hỏng (`looks_damaged_token`: phần đầu `gAAAAA` sau `strip`) /
+  plain-text. Token hỏng đi cùng đường `UnreadableCredential` với khoá sai. Nhầm chiều an toàn: plain-text cũ
+  bắt đầu bằng `gAAAAA` bị từ chối chứ không gửi rác làm mật khẩu. Quy tắc chung: kiểm tra "đây là X?" trả
+  False thì hỏi tiếp "có dấu hiệu là X hỏng không?" trước khi coi là Y; test phải dùng token thật cắt/bỏ `=`,
+  không chỉ chuỗi tự bịa.
+- **Lỗi ở `from_db_value` KHÔNG được ném**: 1 dòng hỏng làm `Device.objects.all()` ném → sập dashboard, mọi
+  `poll_all_*`, `/health/`. Trả sentinel (`UnreadableCredential`: chuỗi RỖNG falsy mang `raw` + `reason`) rồi
+  chặn ở nơi DÙNG. Bắt buộc đi kèm 3 việc, thiếu 1 là mất dữ liệu: `get_prep_value` ghi ngược `raw` nguyên vẹn;
+  `save_form_data` không để ô trống xoá nó; lệnh bảo trì dùng kiểm tra cấu trúc.
+- **Đặt guard ở nơi DÙNG, và đọc nơi TẠO đối tượng xem có nằm trong `try` không**: `CollectorFactory.create` chạy
+  ngoài `try` của `_poll_device_once`; guard ở constructor sẽ sập cả lượt poll bằng traceback thay vì "Poll collect
+  failed" → Offline kèm lý do. Lưu lỗi lại (`_credential_error`), ném ở `_session`.
+- **Giá trị rỗng giả**: sentinel falsy hợp với `if not password`, nhưng các đoạn `(x or "").strip()` / "thiếu
+  mật khẩu → hạ cấp no_auth" biến nó thành "chưa đặt" và báo sai/hạ cấp thầm. Kiểm `ensure_credentials_readable`
+  TRƯỚC mọi validation kiểu "thiếu mật khẩu".
+- **Đo trạng thái cột mã hoá trước khi sửa, chỉ in số đếm**: script đọc cột THÔ (`SELECT … FROM devices_device`),
+  phân loại `empty / token_ok / token_FAILS / plain` rồi in đếm + id thiết bị, KHÔNG in giá trị (mẫu:
+  `scratchpad/crypto_state_probe.py`, chạy qua `docker compose exec -T worker python manage.py shell < script`).
+  2026-10-15: 23 thiết bị, mọi token giải mã được, 0 plain, 0 hỏng → lỗ hổng tiềm ẩn, ghi đúng như vậy.
+- **Test "không rò" phải đi qua dữ liệu thật**: đột biến lộ test chỉ kiểm sentinel dựng tay. Nạp từ DB, rồi kiểm
+  thông điệp lỗi, `reason` và `caplog.text` không chứa token đọc thẳng từ cột.
+- Script đột biến/vá viết `\n` trong heredoc Python bị biến thành xuống dòng thật (đã dính 3 lần): sửa trực tiếp
+  file script bằng Edit thay vì sinh nó qua heredoc.
+
 ## 2. Deploy
 ```
 ./deploy.sh            # push origin master + pull/build/restart trên monitorsrv

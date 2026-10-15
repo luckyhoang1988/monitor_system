@@ -1,5 +1,12 @@
 from django import forms
+
+from .crypto import unreadable_credentials
 from .models import Device
+
+# Các cột mã hoá (EncryptedCharField) hiển thị trên form.
+_CREDENTIAL_FIELDS = (
+    "snmp_community", "snmpv3_auth_password", "snmpv3_priv_password", "ssh_password", "ilo_password",
+)
 
 
 class DeviceForm(forms.ModelForm):
@@ -14,6 +21,16 @@ class DeviceForm(forms.ModelForm):
         required=False, max_length=128, label="iLO cert SHA-256",
         widget=forms.TextInput(attrs={"placeholder": "64 ký tự hex (có thể có dấu ':')", "autocomplete": "off"}),
     )
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # {tên field: nhãn} của credential đã lưu mà KHÔNG giải mã được (ENCRYPTION_KEY thiếu/sai). Template
+        # hiện cảnh báo; để trống ô đó = giữ nguyên bản mã hoá cũ (fields.save_form_data), nhập mới = thay thế.
+        self.unreadable_credentials: dict[str, str] = {
+            name: str(self.fields[name].label or name)
+            for name in unreadable_credentials(self.instance, _CREDENTIAL_FIELDS)
+            if name in self.fields
+        }
 
     class Meta:
         model = Device

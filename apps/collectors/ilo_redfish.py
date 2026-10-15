@@ -116,6 +116,8 @@ import urllib3
 from django.conf import settings
 from requests.adapters import HTTPAdapter
 
+from apps.devices.crypto import unreadable_credentials
+
 if TYPE_CHECKING:
     from apps.devices.models import Device
 
@@ -202,6 +204,17 @@ class IloRedfishClient:
     def collect_raw(self) -> dict[str, Any] | None:
         device = self.device
         if not device.ilo_ip_address:
+            return None
+
+        unreadable = unreadable_credentials(device, ("ilo_password",))
+        if unreadable:
+            # iLO làm chậm/khoá sau nhiều lần đăng nhập sai: không gửi chuỗi rỗng/ciphertext đi làm mật khẩu.
+            reason = unreadable["ilo_password"]
+            logger.error(
+                "iLO %s (%s): mật khẩu iLO đã lưu không giải mã được (%s) — không gửi credentials",
+                device.name, device.ilo_ip_address, reason,
+            )
+            self.last_error = f"Mật khẩu iLO đã lưu không giải mã được ({reason}) — chưa gửi credentials"
             return None
 
         base = f"https://{device.ilo_ip_address}"

@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING
 
 import yaml
 
+from apps.devices.crypto import CredentialDecryptError, ensure_credentials_readable
+
 from . import cpu_state
 from .base import BaseCollector, NormalizedData, InterfaceData
 from .snmp_client import (
@@ -117,7 +119,15 @@ def _load_oid_profile(os_family: str) -> dict:
 class SwitchSNMPCollector(BaseCollector):
     def __init__(self, device: "Device") -> None:
         super().__init__(device)
-        self._snmp_kwargs = self._build_snmp_kwargs()
+        # Credential không đọc được KHÔNG được ném ở constructor: `CollectorFactory.create` chạy NGOÀI try
+        # của `_poll_device_once`, ném ở đây là sập cả lượt poll bằng traceback. Giữ lỗi lại, ném khi
+        # thật sự cần phiên SNMP (`_session`) → đi đường "Poll collect failed" → Offline kèm lý do.
+        self._credential_error: CredentialDecryptError | None = None
+        try:
+            self._snmp_kwargs = self._build_snmp_kwargs()
+        except CredentialDecryptError as exc:
+            self._snmp_kwargs = {}
+            self._credential_error = exc
         self._snmp_backend = resolve_snmp_backend()
         self.__session = None
 
@@ -128,6 +138,14 @@ class SwitchSNMPCollector(BaseCollector):
         effective_version = version_map.get(self.device.snmp_version)
         if effective_version is None:
             raise ValueError(f"SNMP version '{self.device.snmp_version}' không hợp lệ.")
+
+        # Kiểm TRƯỚC các validation "thiếu mật khẩu" bên dưới: credential không đọc được là chuỗi rỗng, sẽ bị
+        # báo nhầm là "yêu cầu auth password" hoặc lặng lẽ hạ cấp xuống no_auth_or_privacy.
+        ensure_credentials_readable(
+            self.device,
+            *(("snmp_community",) if effective_version in (1, 2)
+              else ("snmpv3_auth_password", "snmpv3_priv_password")),
+        )
 
         kwargs = {
             "hostname": self.device.ip_address,
@@ -174,6 +192,8 @@ class SwitchSNMPCollector(BaseCollector):
     @property
     def _session(self):
         """Lazy-init SNMP Session để tái sử dụng kết nối (giảm chi phí setup UDP/SNMP)."""
+        if self._credential_error is not None:
+            raise self._credential_error
         if self.__session is None:
             self.__session = create_snmp_session(self._snmp_kwargs, backend=self._snmp_backend)
         return self.__session
