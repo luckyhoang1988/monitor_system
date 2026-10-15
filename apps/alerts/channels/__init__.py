@@ -58,6 +58,16 @@ def redact(text: object) -> str:
     return _BOT_TOKEN_RE.sub("<token-đã-che>", out)
 
 
+def port_context(alert) -> tuple[str, str]:
+    """(tên cổng, tên thiết bị đối diện) của alert THEO CỔNG; ("", "") với alert cấp thiết bị.
+
+    Mẫu RECOVERED không in `alert.message` nên phải lấy 2 giá trị này từ cột đã chụp lúc tạo alert
+    (`Alert.interface_name`/`peer_name`) — không tra topology lúc gửi."""
+    name = getattr(alert, "interface_name", "")
+    peer = getattr(alert, "peer_name", "")
+    return (name if isinstance(name, str) else "", peer if isinstance(peer, str) else "")
+
+
 # Cấu hình sai (không phải sự cố tạm thời): thử lại không giúp gì.
 _CONFIG_REQUEST_ERRORS = (
     requests.exceptions.InvalidURL,

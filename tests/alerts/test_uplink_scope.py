@@ -215,14 +215,20 @@ class TestUndeterminedScope:
         assert alert.is_active and alert.closed_reason == ""
         assert not recoveries(alert).exists()
 
-    def test_missing_status_only_neither_fires_nor_resolves(self, device, parent, rule):
+
+    def test_missing_status_only_creates_no_port_alert_and_supersedes_the_device_level_one(
+        self, device, parent, rule,
+    ):
+        # Thiết kế B: cổng thiếu dữ liệu không fire/resolve; alert cấp thiết bị kiểu cũ vẫn bị thay (không RECOVERED)
+        # vì mô hình đã đổi — không phải vì có bằng chứng sự cố đã hết.
         p = iface(device, "Gi0/1", 1)                       # chưa có dòng trạng thái nào
         link(device, p, parent)
         alert = legacy_alert(device, rule, down_interface_ids=[p.pk])
         evaluate(device)
         alert.refresh_from_db()
-        assert alert.is_active and alert.closed_reason == ""
-        assert Alert.objects.filter(device=device).count() == 1
+        assert alert.is_active is False and alert.closed_reason == Alert.CLOSED_SUPERSEDED
+        assert not recoveries(alert).exists()
+        assert not Alert.objects.filter(device=device, is_active=True).exists()
 
     def test_partially_missing_status_names_the_port_in_a_warning(self, device, parent, rule, caplog):
         ok = iface(device, "Gi0/1", 1, status="up")
@@ -267,7 +273,10 @@ class TestDownBeatsMissing:
 
 @pytest.mark.django_db
 class TestScopeChangeClosure:
-    def test_legacy_alert_whose_monitored_ports_are_all_up_is_closed_without_recovered(self, device, parent, rule):
+
+    def test_legacy_alert_whose_monitored_ports_are_all_up_is_superseded_without_recovered(
+        self, device, parent, rule,
+    ):
         p = iface(device, "Gi0/1", 1, status="up")
         link(device, p, parent)
         iface(device, "Gi0/2", 2, status="down", port_mode="trunk", is_uplink=True)   # lý do alert cũ
@@ -277,30 +286,33 @@ class TestScopeChangeClosure:
 
         alert.refresh_from_db()
         assert alert.is_active is False
-        assert alert.closed_reason == Alert.CLOSED_SCOPE_CHANGED
+        assert alert.closed_reason == Alert.CLOSED_SUPERSEDED
         assert alert.resolved_at is not None
-        assert "phạm vi" in alert.message
+        assert "thay bằng" in alert.message
         assert not recoveries(alert).exists()                         # không RECOVERED
         assert AlertNotification.objects.filter(alert=alert).count() == 1   # chỉ còn dòng fire cũ
 
-    def test_legacy_alert_is_kept_and_adopts_the_down_port_when_a_monitored_port_is_down(self, device, parent, rule):
+
+    def test_legacy_alert_is_superseded_and_the_down_port_gets_its_own_alert(self, device, parent, rule):
         p = iface(device, "Gi0/1", 1, status="down")
         link(device, p, parent)
-        alert = legacy_alert(device, rule)
+        legacy = legacy_alert(device, rule)
 
         evaluate(device)
 
-        alert.refresh_from_db()
-        assert alert.is_active and alert.closed_reason == ""
-        assert alert.down_interface_ids == [p.pk]
-        assert Alert.objects.filter(device=device).count() == 1       # không tạo alert thứ hai
+        legacy.refresh_from_db()
+        assert legacy.is_active is False and legacy.closed_reason == Alert.CLOSED_SUPERSEDED
+        assert not recoveries(legacy).exists()
+        own = Alert.objects.get(device=device, rule=rule, is_active=True)
+        assert own.pk != legacy.pk and own.interface_id == p.pk and own.down_interface_ids == [p.pk]
 
-        # Cổng hồi phục thật → RECOVERED bình thường (alert đã được nhận về phạm vi mới).
+        # Cổng hồi phục thật → RECOVERED bình thường, của alert theo cổng.
+        AlertNotification.objects.filter(alert=own, kind="fire").update(status="sent")
         set_status(p, "up")
         evaluate(device)
-        alert.refresh_from_db()
-        assert alert.is_active is False and alert.closed_reason == ""
-        assert recoveries(alert).count() == 1
+        own.refresh_from_db()
+        assert own.is_active is False and own.closed_reason == ""
+        assert recoveries(own).count() == 1
 
     def test_alert_whose_cause_left_the_scope_is_closed_without_recovered(self, device, parent, rule):
         a = iface(device, "Gi0/1", 1, status="down")
@@ -325,15 +337,17 @@ class TestScopeChangeClosure:
         assert not recoveries(alert).exists()
         assert Alert.objects.filter(device=device, is_active=True).count() == 0
 
-    def test_cause_that_left_the_scope_but_new_port_is_down_keeps_alert_active(self, device, parent, rule):
+
+    def test_cause_that_left_the_scope_but_new_port_is_down_gets_a_new_port_alert(self, device, parent, rule):
         a = iface(device, "Gi0/1", 1, status="up")
         b = iface(device, "Gi0/2", 2, status="down")
         link(device, b, parent)
-        alert = legacy_alert(device, rule, down_interface_ids=[a.pk])   # nguyên nhân cũ không còn trong phạm vi
+        legacy = legacy_alert(device, rule, down_interface_ids=[a.pk])   # nguyên nhân cũ không còn trong phạm vi
         evaluate(device)
-        alert.refresh_from_db()
-        assert alert.is_active and alert.closed_reason == ""
-        assert sorted(alert.down_interface_ids) == sorted([a.pk, b.pk])
+        legacy.refresh_from_db()
+        assert legacy.is_active is False and legacy.closed_reason == Alert.CLOSED_SUPERSEDED
+        new = Alert.objects.get(device=device, rule=rule, is_active=True)
+        assert new.interface_id == b.pk
 
     def test_genuine_recovery_of_a_monitored_port_still_sends_recovered(self, device, parent, rule):
         p = iface(device, "Gi0/1", 1, status="down")
@@ -349,32 +363,29 @@ class TestScopeChangeClosure:
         assert alert.is_active is False and alert.closed_reason == ""
         assert recoveries(alert).count() == 1
 
-    def test_second_port_dropping_while_alert_is_active_extends_the_cause(self, device, parent, rule):
+
+    def test_second_port_dropping_while_one_alert_is_active_gets_its_own_alert(self, device, parent, rule):
         a = iface(device, "Gi0/1", 1, status="down")
         b = iface(device, "Gi0/2", 2, status="up")
         link(device, a, parent)
         link(device, b, CiscoSNMPDeviceFactory())
         evaluate(device)
-        alert = Alert.objects.get(device=device, rule=rule)
-        AlertNotification.objects.filter(alert=alert, kind="fire").update(status="sent")
+        first = Alert.objects.get(device=device, rule=rule)
+        AlertNotification.objects.filter(alert=first, kind="fire").update(status="sent")
 
         set_status(b, "down")
         evaluate(device)
-        alert.refresh_from_db()
-        assert sorted(alert.down_interface_ids) == sorted([a.pk, b.pk])
+        assert Alert.objects.filter(device=device, rule=rule, is_active=True).count() == 2
 
-        set_status(a, "up")                                 # a hồi phục, b vẫn down → vẫn active
+        set_status(a, "up")                                 # a hồi phục, b vẫn down → chỉ alert của a đóng
         evaluate(device)
-        alert.refresh_from_db()
-        assert alert.is_active
+        first.refresh_from_db()
+        assert first.is_active is False and recoveries(first).count() == 1
+        second = Alert.objects.get(device=device, rule=rule, is_active=True)
+        assert second.interface_id == b.pk
 
-        set_status(b, "up")
-        evaluate(device)
-        alert.refresh_from_db()
-        assert alert.is_active is False and alert.closed_reason == ""
-        assert recoveries(alert).count() == 1
 
-    def test_many_devices_changing_scope_at_once_send_no_recovered_burst(self, rule, mocker):
+    def test_many_devices_superseded_at_once_send_no_recovered_burst(self, rule, mocker):
         send_recovery = mocker.patch(SEND_RECOVERY)
         alerts = []
         for _ in range(5):
@@ -388,11 +399,12 @@ class TestScopeChangeClosure:
         assert send_recovery.call_count == 0
         assert AlertNotification.objects.filter(kind="recovery").count() == 0
         assert all(
-            Alert.objects.get(pk=a.pk).closed_reason == Alert.CLOSED_SCOPE_CHANGED for _, a in alerts
+            Alert.objects.get(pk=a.pk).closed_reason == Alert.CLOSED_SUPERSEDED for _, a in alerts
         )
 
-    def test_scope_closed_alert_is_not_given_a_late_recovery(self, device, parent, rule):
-        # Alert đóng vì đổi phạm vi mà fire còn pending: sweep vẫn có thể gửi fire, nhưng KHÔNG được thêm RECOVERED.
+
+    def test_superseded_alert_is_not_given_a_late_recovery(self, device, parent, rule):
+        # Alert đóng vì bị thay mà fire còn pending: sweep vẫn có thể gửi fire, nhưng KHÔNG được thêm RECOVERED.
         p = iface(device, "Gi0/1", 1, status="up")
         link(device, p, parent)
         alert = Alert.objects.create(
@@ -401,11 +413,10 @@ class TestScopeChangeClosure:
         fire = AlertNotification.objects.create(alert=alert, channel="telegram", kind="fire", status="pending")
         evaluate(device)
         alert.refresh_from_db()
-        assert alert.closed_reason == Alert.CLOSED_SCOPE_CHANGED
+        assert alert.closed_reason == Alert.CLOSED_SUPERSEDED
         engine._queue_late_recovery_if_resolved(alert.pk, "telegram")
         assert not recoveries(alert).exists()
         assert AlertNotification.objects.filter(pk=fire.pk).exists()
-
 
 @pytest.mark.django_db
 class TestManualPinLifecycle:
@@ -497,14 +508,28 @@ class TestCacheMode:
 
 @pytest.mark.django_db
 class TestPresentation:
-    def test_history_page_labels_scope_closed_alerts_and_not_recovered_ones(self, logged_in_client, rule):
+
+    def test_history_page_labels_closed_without_recovery_alerts_and_not_recovered_ones(
+        self, logged_in_client, rule,
+    ):
         from django.urls import reverse
 
-        scoped = CiscoSNMPDeviceFactory(last_seen=now())
-        p = iface(scoped, "Gi0/1", 1, status="up")
-        link(scoped, p, CiscoSNMPDeviceFactory())
-        legacy_alert(scoped, rule)
-        evaluate(scoped)                                   # → đóng scope_changed
+        superseded = CiscoSNMPDeviceFactory(last_seen=now())
+        p = iface(superseded, "Gi0/1", 1, status="up")
+        link(superseded, p, CiscoSNMPDeviceFactory())
+        legacy_alert(superseded, rule)
+        evaluate(superseded)                               # → đóng superseded
+
+        rescoped = CiscoSNMPDeviceFactory(last_seen=now())
+        a = iface(rescoped, "Gi0/1", 1, status="down")
+        iface(rescoped, "Gi0/2", 2, status="up")
+        rescoped.uplink_ports = ["Gi0/1"]
+        rescoped.save()
+        evaluate(rescoped)                                 # alert theo cổng a
+        rescoped.uplink_ports = ["Gi0/2"]
+        rescoped.save()
+        evaluate(rescoped)                                 # → a rời phạm vi: đóng scope_changed
+        assert Alert.objects.get(device=rescoped, interface=a).closed_reason == "scope_changed"
 
         healthy = CiscoSNMPDeviceFactory(last_seen=now())
         q = iface(healthy, "Gi0/1", 1, status="down")
@@ -515,7 +540,9 @@ class TestPresentation:
 
         body = logged_in_client.get(reverse("alerts:list")).content.decode("utf-8")
         assert body.count("Đổi phạm vi") == 1
+        assert body.count("Thay bằng alert theo cổng") == 1
         assert "Rule bị tắt" not in body
+        assert "Gi0/1" in body                             # tên cổng hiện cạnh tên rule
 
     def test_admin_lists_monitored_uplinks_and_deleting_one_unpins_the_port(self, admin_client, device, parent, rule):
         from django.urls import reverse
@@ -536,39 +563,7 @@ class TestPresentation:
         assert not MonitoredUplink.objects.filter(pk=pin.pk).exists()
 
 
-@pytest.mark.django_db
-class TestSustainedFireRecordsTheScopeWhenPortIsAlreadyBackUp:
-    def test_cause_unknown_at_fire_time_is_the_whole_scope_so_recovery_is_genuine(self, device, parent, mocker):
-        """duration_min>0: cửa sổ có mẫu down nên FIRE, nhưng lần đọc tức thời cổng đã up lại (danh sách down
-        rỗng). Nguyên nhân phải ghi là cả phạm vi — nếu ghi rỗng thì lượt sau coi alert "đã rời phạm vi" và
-        đóng scope_changed thay vì RECOVERED dù cổng hồi phục thật."""
-        mocker.patch("apps.alerts.engine._use_cache", return_value=True)
-        rule = AlertRule.objects.create(
-            name="Uplink sustained 2", device_type="switch", metric="if_status", condition="lt",
-            threshold=1.0, severity="CRITICAL", channels=["telegram"], enabled=True, duration_min=5,
-        )
-        p = iface(device, "Gi0/1", 1)
-        link(device, p, parent)
-        mocker.patch("apps.alerts.engine._fresh_latest",
-                     return_value={"interfaces": {str(p.pk): {"status": "up"}}})
-        mocker.patch("apps.alerts.engine.metrics_cache.get_if_series",
-                     return_value=[{"ts": time.time() - 120, "status": "down"},
-                                   {"ts": time.time(), "status": "up"}])
-        mocker.patch("apps.alerts.engine.metrics_cache.epoch_to_dt",
-                     side_effect=lambda ts: datetime.fromtimestamp(ts, tz=UTC))
 
-        evaluate(device)
-        alert = Alert.objects.get(device=device, rule=rule)
-        assert alert.down_interface_ids == [p.pk]
-        AlertNotification.objects.filter(alert=alert, kind="fire").update(status="sent")
-
-        # Cửa sổ đã sạch, cổng up → hồi phục thật.
-        mocker.patch("apps.alerts.engine.metrics_cache.get_if_series",
-                     return_value=[{"ts": time.time(), "status": "up"}])
-        evaluate(device)
-        alert.refresh_from_db()
-        assert alert.is_active is False and alert.closed_reason == ""
-        assert recoveries(alert).count() == 1
 
 
 def _wait_until_a_backend_is_waiting_for_a_lock(give_up: threading.Event, deadline_secs: float = 10.0) -> bool:
@@ -587,16 +582,17 @@ def _wait_until_a_backend_is_waiting_for_a_lock(give_up: threading.Event, deadli
     return False
 
 
+
 @pytest.mark.django_db(transaction=True)
-class TestScopeClosureIsRaceSafe:
-    def test_two_evaluations_closing_the_same_legacy_alert_close_it_once(self, mocker):
-        """Poll inline và `evaluate_alert_rules` có thể chạy đồng thời trên 2 worker. Cả hai thấy alert cũ +
-        mọi cổng giám sát đều up → đều đóng nó. Không có khoá Device thì cả hai cùng ghi và ghi chú
-        "đã đóng vì thay đổi phạm vi" bị nối 2 lần; có khoá thì bên sau thấy alert đã đóng và bỏ qua."""
+class TestSupersedeIsRaceSafe:
+    def test_two_evaluations_superseding_the_same_device_level_alert_close_it_once(self, mocker):
+        """Poll inline và `evaluate_alert_rules` có thể chạy đồng thời trên 2 worker. Cả hai thấy alert cấp thiết
+        bị cũ → đều đóng nó. Không có khoá Device thì cả hai cùng ghi và ghi chú "đã đóng vì được thay bằng..."
+        bị nối 2 lần; có khoá thì bên sau thấy alert đã đóng và bỏ qua."""
         dev = CiscoSNMPDeviceFactory(last_seen=now())
         rule = AlertRule.objects.create(
-            name="Uplink race", device_type="switch", metric="if_status", condition="lt",
-            threshold=1.0, severity="CRITICAL", channels=["telegram"], enabled=True,
+            name="Uplink race", device_type="switch", metric="if_status", condition="eq",
+            threshold=0.0, severity="CRITICAL", channels=["telegram"], enabled=True,
         )
         p = iface(dev, "Gi0/1", 1, status="up")
         link(dev, p, CiscoSNMPDeviceFactory())
@@ -605,7 +601,7 @@ class TestScopeClosureIsRaceSafe:
         in_close = threading.Event()
         release = threading.Event()
         calls = []
-        original = engine._close_alert_scope_changed
+        original = engine._close_alert_without_recovery
 
         def slow_close(a, *args, **kwargs):
             calls.append(a.pk)
@@ -614,7 +610,7 @@ class TestScopeClosureIsRaceSafe:
                 release.wait(timeout=10)
             return original(a, *args, **kwargs)
 
-        mocker.patch.object(engine, "_close_alert_scope_changed", side_effect=slow_close)
+        mocker.patch.object(engine, "_close_alert_without_recovery", side_effect=slow_close)
 
         def run():
             try:
@@ -640,20 +636,19 @@ class TestScopeClosureIsRaceSafe:
         t2.join(timeout=15)
 
         alert.refresh_from_db()
-        assert alert.closed_reason == Alert.CLOSED_SCOPE_CHANGED
-        assert alert.message.count("phạm vi giám sát") == 1
+        assert alert.closed_reason == Alert.CLOSED_SUPERSEDED
+        assert alert.message.count("thay bằng cảnh báo theo từng cổng") == 1
         assert blocked, "bên đóng thứ hai phải bị chặn ở khoá trong lúc bên đầu chưa commit"
         assert len(calls) == 1
 
-    def test_a_fire_racing_with_the_closure_still_ends_with_an_active_alert(self, mocker):
-        """Lượt A thấy mọi cổng up → đóng alert cũ (scope_changed). Lượt B (worker khác, snapshot mới hơn)
-        thấy 1 cổng down → `_fire_alert`. Nếu việc đóng không đi qua khoá Device thì B đọc thấy alert cũ "còn
-        active" (chưa commit đóng) và bỏ qua; xong việc đóng, thiết bị có cổng down mà KHÔNG có alert nào. Có
-        khoá Device thì B chờ, thấy alert cũ đã đóng và tạo alert mới."""
+    def test_a_fire_racing_with_the_supersede_still_ends_with_an_active_port_alert(self, mocker):
+        """Lượt A thay alert cấp thiết bị cũ (superseded). Lượt B (worker khác, snapshot mới hơn) thấy cổng down →
+        `_fire_alert`. Việc đóng giữ khoá Device nên B chờ rồi tạo alert theo cổng; kết quả: alert cũ đã đóng,
+        đúng 1 alert theo cổng đang active."""
         dev = CiscoSNMPDeviceFactory(last_seen=now())
         rule = AlertRule.objects.create(
-            name="Uplink race fire", device_type="switch", metric="if_status", condition="lt",
-            threshold=1.0, severity="CRITICAL", channels=[], enabled=True,
+            name="Uplink race fire", device_type="switch", metric="if_status", condition="eq",
+            threshold=0.0, severity="CRITICAL", channels=[], enabled=True,
         )
         p = iface(dev, "Gi0/1", 1, status="up")
         link(dev, p, CiscoSNMPDeviceFactory())
@@ -661,20 +656,20 @@ class TestScopeClosureIsRaceSafe:
 
         in_close = threading.Event()
         release = threading.Event()
-        original = engine._close_alert_scope_changed
+        original = engine._close_alert_without_recovery
 
         def slow_close(a, *args, **kwargs):
             in_close.set()
             release.wait(timeout=10)
             return original(a, *args, **kwargs)
 
-        mocker.patch.object(engine, "_close_alert_scope_changed", side_effect=slow_close)
+        mocker.patch.object(engine, "_close_alert_without_recovery", side_effect=slow_close)
 
         errors: list[BaseException] = []
 
         def closer():
             try:
-                engine._close_alerts_out_of_scope(dev, rule, [p.pk])
+                engine._supersede_device_level_alerts(dev, rule)
             except BaseException as exc:   # noqa: BLE001 — để test thấy lỗi thật thay vì "0 alert"
                 errors.append(exc)
             finally:
@@ -682,7 +677,7 @@ class TestScopeClosureIsRaceSafe:
 
         def firer():
             try:
-                engine._fire_alert(dev, rule, 0.0, down_interface_ids=[p.pk])
+                engine._fire_alert(dev, rule, 0.0, interface=p)
             except BaseException as exc:   # noqa: BLE001
                 errors.append(exc)
             finally:
@@ -707,85 +702,42 @@ class TestScopeClosureIsRaceSafe:
 
         assert not errors, errors
         old.refresh_from_db()
-        assert old.closed_reason == Alert.CLOSED_SCOPE_CHANGED
+        assert old.closed_reason == Alert.CLOSED_SUPERSEDED
         assert blocked, "việc tạo alert phải chờ việc đóng (cùng khoá Device)"
         active = list(Alert.objects.filter(device=dev, rule=rule, is_active=True))
-        assert len(active) == 1 and active[0].pk != old.pk
+        assert len(active) == 1 and active[0].pk != old.pk and active[0].interface_id == p.pk
+
 
 
 @pytest.mark.django_db
-class TestSettleOnlyTouchesWhatItDecidedOn:
-    """Review ngoài sau bản đầu của A (2026-10-15): `_settle_if_status_alerts` đóng alert ngoài phạm vi ở một
-    transaction, rồi `_resolve_alert` ở transaction khác lấy MỌI alert đang active của (thiết bị, rule). Worker
-    khác tạo alert DOWN mới giữa hai bước (hoặc giữa lúc quyết định và lúc xử lý) thì alert đó bị resolve nhầm
-    — dù cổng của nó đang down, và dù quyết định "mọi cổng đều up" được đưa ra từ trạng thái cũ hơn nó."""
+class TestDecisionsOnlyTouchWhatWasObserved:
+    """Review ngoài sau bản đầu của A (2026-10-15): quyết định "đã hồi phục"/"đóng" chỉ có giá trị với alert ĐÃ
+    THẤY lúc đưa ra quyết định. Worker khác tạo alert DOWN mới (dữ liệu mới hơn) giữa chừng thì không được
+    resolve/đóng nhầm. Ở thiết kế B (từng cổng) điều đó áp cho từng alert theo cổng."""
 
-    def test_alert_created_by_another_worker_between_close_and_resolve_stays_active(
+    def test_alert_created_by_another_worker_while_we_read_port_state_is_not_ours_to_resolve(
         self, device, parent, rule, mocker,
     ):
-        p = iface(device, "Gi0/1", 1, status="up")
+        p = iface(device, "Gi0/1", 1, status="down")
         link(device, p, parent)
-        old = legacy_alert(device, rule)          # nổ theo ngữ nghĩa cũ → sẽ bị đóng scope_changed
-        original = engine._close_alerts_out_of_scope
-
-        def close_then_another_worker_fires(*args, **kwargs):
-            closed = original(*args, **kwargs)
-            engine._fire_alert(device, rule, 0.0, down_interface_ids=[p.pk])
-            return closed
-
-        mocker.patch.object(engine, "_close_alerts_out_of_scope", side_effect=close_then_another_worker_fires)
         evaluate(device)
+        decided_on = Alert.objects.get(device=device, rule=rule, interface=p)
+        AlertNotification.objects.filter(alert=decided_on, kind="fire").update(status="sent")
+        set_status(p, "up")                                 # dữ liệu ta sắp đọc: cổng đã up → "hồi phục"
+        original = engine._uplink_statuses
 
-        old.refresh_from_db()
-        assert old.closed_reason == Alert.CLOSED_SCOPE_CHANGED
-        fresh = Alert.objects.get(device=device, rule=rule, is_active=True)
-        assert fresh.pk != old.pk
-        assert fresh.down_interface_ids == [p.pk]
-        assert not recoveries(fresh).exists()
-
-    def test_alert_created_after_the_decision_is_not_resolved_by_it(self, device, parent, rule, mocker):
-        """Giữa lúc quyết định (alert A cũ, mọi cổng up) và lúc xử lý: worker khác resolve A rồi tạo alert B
-        (cổng down). Quyết định "hồi phục" chỉ có giá trị với A, không phải B."""
-        p = iface(device, "Gi0/1", 1, status="up")
-        link(device, p, parent)
-        decided_on = legacy_alert(device, rule, down_interface_ids=[p.pk])
-        original = engine._settle_if_status_alerts
-
-        def another_worker_swaps_the_alert_then_we_settle(*args, **kwargs):
+        def another_worker_swaps_the_alert_while_we_read(*args, **kwargs):
+            # Worker khác (dữ liệu mới hơn): resolve alert cũ rồi tạo alert MỚI cho cùng cổng (down trở lại).
             Alert.objects.filter(pk=decided_on.pk).update(is_active=False, resolved_at=now())
-            engine._fire_alert(device, rule, 0.0, down_interface_ids=[p.pk])
+            engine._fire_alert(device, rule, 0.0, interface=p)
             return original(*args, **kwargs)
 
-        mocker.patch.object(engine, "_settle_if_status_alerts",
-                            side_effect=another_worker_swaps_the_alert_then_we_settle)
+        mocker.patch.object(engine, "_uplink_statuses", side_effect=another_worker_swaps_the_alert_while_we_read)
         evaluate(device)
 
-        fresh = Alert.objects.get(device=device, rule=rule, is_active=True)
+        fresh = Alert.objects.get(device=device, rule=rule, interface=p, is_active=True)
         assert fresh.pk != decided_on.pk
         assert not recoveries(fresh).exists()
-
-    def test_cause_added_after_the_decision_keeps_the_alert_active(self, device, parent, rule, mocker):
-        """Quyết định "hồi phục" dựa trên nguyên nhân p1 đã up. Trong lúc đó worker có dữ liệu mới hơn thêm p2
-        (đang down) vào nguyên nhân — resolve lúc này là báo hồi phục khi p2 còn down."""
-        p1 = iface(device, "Gi0/1", 1, status="up")
-        p2 = iface(device, "Gi0/2", 2, status="up")
-        link(device, p1, parent)
-        link(device, p2, parent)
-        alert = legacy_alert(device, rule, down_interface_ids=[p1.pk])
-        original = engine._settle_if_status_alerts
-
-        def another_worker_adds_a_cause_then_we_settle(*args, **kwargs):
-            engine._extend_if_status_causes(device, rule, [p2.pk])
-            return original(*args, **kwargs)
-
-        mocker.patch.object(engine, "_settle_if_status_alerts",
-                            side_effect=another_worker_adds_a_cause_then_we_settle)
-        evaluate(device)
-
-        alert.refresh_from_db()
-        assert alert.is_active is True
-        assert alert.down_interface_ids == sorted([p1.pk, p2.pk])
-        assert not recoveries(alert).exists()
 
     def test_alert_for_a_port_outside_the_scope_we_decided_on_is_not_closed_by_us(
         self, device, parent, rule, mocker,
@@ -795,49 +747,35 @@ class TestSettleOnlyTouchesWhatItDecidedOn:
         p1 = iface(device, "Gi0/1", 1, status="up")
         p2 = iface(device, "Gi0/2", 2, status="down")
         link(device, p1, parent)
-        decided_on = legacy_alert(device, rule, down_interface_ids=[p1.pk])
-        original = engine._settle_if_status_alerts
-
-        def another_worker_with_a_newer_scope_fires_then_we_settle(*args, **kwargs):
-            Alert.objects.filter(pk=decided_on.pk).update(is_active=False, resolved_at=now())
-            engine._fire_alert(device, rule, 0.0, down_interface_ids=[p2.pk])
-            return original(*args, **kwargs)
-
-        mocker.patch.object(engine, "_settle_if_status_alerts",
-                            side_effect=another_worker_with_a_newer_scope_fires_then_we_settle)
-        evaluate(device)
-
-        fresh = Alert.objects.get(device=device, rule=rule, is_active=True)
-        assert fresh.down_interface_ids == [p2.pk]
-        assert fresh.closed_reason == ""
-
-    def test_alert_created_while_we_were_reading_port_state_is_not_ours_to_resolve(
-        self, device, parent, rule, mocker,
-    ):
-        """Ảnh chụp alert phải đọc TRƯỚC trạng thái cổng: alert xuất hiện trong lúc ta đọc trạng thái dựa trên
-        dữ liệu mới hơn thứ ta đang cầm, nên "mọi cổng đều up" (từ dữ liệu cũ) không áp cho nó."""
-        p = iface(device, "Gi0/1", 1, status="up")
-        link(device, p, parent)
-        decided_on = legacy_alert(device, rule, down_interface_ids=[p.pk])
         original = engine._uplink_statuses
 
-        def another_worker_swaps_the_alert_while_we_read(*args, **kwargs):
-            Alert.objects.filter(pk=decided_on.pk).update(is_active=False, resolved_at=now())
-            engine._fire_alert(device, rule, 0.0, down_interface_ids=[p.pk])
+        def another_worker_with_a_newer_scope_fires(*args, **kwargs):
+            engine._fire_alert(device, rule, 0.0, interface=p2)
             return original(*args, **kwargs)
 
-        mocker.patch.object(engine, "_uplink_statuses", side_effect=another_worker_swaps_the_alert_while_we_read)
+        patched = mocker.patch.object(
+            engine, "_uplink_statuses", side_effect=another_worker_with_a_newer_scope_fires,
+        )
         evaluate(device)
 
-        fresh = Alert.objects.get(device=device, rule=rule, is_active=True)
-        assert fresh.pk != decided_on.pk
+        fresh = Alert.objects.get(device=device, rule=rule, interface=p2)
+        assert fresh.is_active is True and fresh.closed_reason == ""
+
+        # Lượt sau thấy alert đó ngoài phạm vi (ta không ghim p2) → đóng đúng cách, không RECOVERED.
+        mocker.stop(patched)
+        evaluate(device)
+        fresh.refresh_from_db()
+        assert fresh.is_active is False and fresh.closed_reason == Alert.CLOSED_SCOPE_CHANGED
         assert not recoveries(fresh).exists()
 
     def test_unchanged_alert_is_still_resolved_normally(self, device, parent, rule):
         """Đối chứng: không có gì xen vào thì hồi phục thật vẫn RECOVERED đúng 1 lần."""
-        p = iface(device, "Gi0/1", 1, status="up")
+        p = iface(device, "Gi0/1", 1, status="down")
         link(device, p, parent)
-        alert = legacy_alert(device, rule, down_interface_ids=[p.pk])
+        evaluate(device)
+        alert = Alert.objects.get(device=device, rule=rule, interface=p)
+        AlertNotification.objects.filter(alert=alert, kind="fire").update(status="sent")
+        set_status(p, "up")
         evaluate(device)
         alert.refresh_from_db()
         assert alert.is_active is False and alert.closed_reason == ""

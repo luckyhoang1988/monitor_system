@@ -6,7 +6,7 @@ import logging
 from django.conf import settings
 from django.utils import timezone
 
-from . import ChannelNotConfigured, post_json
+from . import ChannelNotConfigured, port_context, post_json
 
 logger = logging.getLogger(__name__)
 
@@ -99,9 +99,16 @@ def send_telegram_recovery(alert) -> None:
     device_path = f"/{alert.device.device_type}/{alert.device.pk}/" if alert.device.device_type in ("switch", "router", "firewall", "hyperv") else "/"
     base = getattr(settings, "SITE_URL", "") or ""
     device_url = f"{base}{device_path}" if base else device_path
+    port_name, peer_name = port_context(alert)
+    port_lines = ""
+    if port_name:
+        port_lines = f"<b>Cổng:</b> <code>{_esc(port_name)}</code>\n"
+        if peer_name:
+            port_lines += f"<b>Nối tới:</b> {_esc(peer_name)}\n"
     text = (
         f"✅ <b>RECOVERED</b>\n"
         f"<b>Thiết bị:</b> <code>{_esc(alert.device.name)}</code> ({_esc(alert.device.ip_address)})\n"
+        f"{port_lines}"
         f"<b>Rule:</b> {_esc(alert.rule.name)}\n"
         f"<b>Recovered lúc:</b> {resolved_str} ({_esc(settings.TIME_ZONE)})\n"
         f"<b>Link:</b> {_esc(device_url)}"

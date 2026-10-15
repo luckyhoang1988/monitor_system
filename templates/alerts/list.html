@@ -51,7 +51,7 @@
               {{ a.device.name }}
             {% endif %}
           </td>
-          <td class="text-muted">{{ a.rule.name }}</td>
+          <td class="text-muted">{{ a.rule.name }}{% if a.interface_name %} <span class="badge bg-light text-dark border ms-1" title="Cổng gây ra cảnh báo{% if a.peer_name %} — nối tới {{ a.peer_name }}{% endif %}">{{ a.interface_name }}</span>{% endif %}</td>
           <td class="text-end font-monospace">{{ a.metric_value_label }}</td>
           <td class="text-muted small">{{ a.triggered_at|date:"d/m/Y H:i" }}</td>
           <td class="text-muted small">
@@ -110,11 +110,11 @@
             <span class="badge bg-secondary rounded-pill px-2">{{ a.severity }}</span>
           </td>
           <td class="text-muted">{{ a.device.name }}</td>
-          <td class="text-muted">{{ a.rule.name }}</td>
+          <td class="text-muted">{{ a.rule.name }}{% if a.interface_name %} <span class="badge bg-light text-dark border ms-1" title="Cổng gây ra cảnh báo{% if a.peer_name %} — nối tới {{ a.peer_name }}{% endif %}">{{ a.interface_name }}</span>{% endif %}</td>
           <td class="text-end font-monospace text-muted">{{ a.metric_value_label }}</td>
           <td class="text-muted small">{{ a.triggered_at|date:"d/m/Y H:i" }}</td>
           <td class="text-muted small">{{ a.resolved_at|date:"d/m/Y H:i"|default:"—" }}
-            {% if a.closed_reason == "rule_disabled" %}<span class="badge bg-warning text-dark ms-1" title="Alert bị đóng vì rule bị tắt — chưa có dữ liệu nào cho thấy sự cố đã hết">Rule bị tắt</span>{% elif a.closed_reason == "scope_changed" %}<span class="badge bg-warning text-dark ms-1" title="Alert bị đóng vì cổng gây ra nó không còn nằm trong phạm vi giám sát uplink — chưa có dữ liệu nào cho thấy sự cố đã hết">Đổi phạm vi</span>{% endif %}
+            {% if a.closed_reason == "rule_disabled" %}<span class="badge bg-warning text-dark ms-1" title="Alert bị đóng vì rule bị tắt — chưa có dữ liệu nào cho thấy sự cố đã hết">Rule bị tắt</span>{% elif a.closed_reason == "scope_changed" %}<span class="badge bg-warning text-dark ms-1" title="Alert bị đóng vì cổng gây ra nó không còn nằm trong phạm vi giám sát uplink — chưa có dữ liệu nào cho thấy sự cố đã hết">Đổi phạm vi</span>{% elif a.closed_reason == "superseded" %}<span class="badge bg-warning text-dark ms-1" title="Alert cấp thiết bị kiểu cũ — đã được thay bằng alert theo từng cổng; chưa có dữ liệu nào cho thấy sự cố đã hết">Thay bằng alert theo cổng</span>{% endif %}
           </td>
         </tr>
         {% endfor %}

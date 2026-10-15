@@ -14,6 +14,7 @@ class AlertSerializer(serializers.ModelSerializer):
         model = Alert
         fields = [
             "id", "rule", "device", "device_name", 
-            "severity", "message", "is_active", "metric_value", 
-            "triggered_at", "resolved_at"
+            "severity", "message", "is_active", "metric_value",
+            "triggered_at", "resolved_at",
+            "interface_name", "peer_name", "closed_reason",
         ]

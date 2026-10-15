@@ -4,7 +4,7 @@ import logging
 
 from django.conf import settings
 
-from . import ChannelNotConfigured, post_json
+from . import ChannelNotConfigured, port_context, post_json
 
 logger = logging.getLogger(__name__)
 
@@ -50,9 +50,16 @@ def send_slack_recovery(alert) -> None:
 
     resolved_str = (alert.resolved_at.strftime("%H:%M:%S %d/%m/%Y")
                     if alert.resolved_at else "N/A")
+    port_name, peer_name = port_context(alert)
+    port_lines = ""
+    if port_name:
+        port_lines = f"*Cổng:* {port_name}\n"
+        if peer_name:
+            port_lines += f"*Nối tới:* {peer_name}\n"
     text = (
         f"✅ *RECOVERED*\n"
         f"*Thiết bị:* {alert.device.name} ({alert.device.ip_address})\n"
+        f"{port_lines}"
         f"*Rule:* {alert.rule.name}\n"
         f"*Hồi phục lúc:* {resolved_str} UTC"
     )
@@ -82,9 +89,16 @@ def send_teams_recovery(alert) -> None:
 
     resolved_str = (alert.resolved_at.strftime("%H:%M:%S %d/%m/%Y")
                     if alert.resolved_at else "N/A")
+    port_name, peer_name = port_context(alert)
+    port_lines = ""
+    if port_name:
+        port_lines = f"**Cổng:** {port_name}\n"
+        if peer_name:
+            port_lines += f"**Nối tới:** {peer_name}\n"
     text = (
         f"### ✅ RECOVERED\n"
         f"**Thiết bị:** {alert.device.name} ({alert.device.ip_address})\n"
+        f"{port_lines}"
         f"**Rule:** {alert.rule.name}\n"
         f"**Hồi phục lúc:** {resolved_str} UTC"
     )

@@ -6,7 +6,7 @@ from django.core.mail import send_mail
 from django.conf import settings
 from django.utils import timezone
 
-from . import ChannelNotConfigured, ChannelTransientError
+from . import ChannelNotConfigured, ChannelTransientError, port_context
 
 logger = logging.getLogger(__name__)
 
@@ -86,10 +86,17 @@ def send_email_recovery(alert) -> None:
     device_path = f"/{alert.device.device_type}/{alert.device.pk}/" if alert.device.device_type in ("switch", "router", "firewall", "hyperv") else "/"
     base = getattr(settings, "SITE_URL", "") or ""
     device_url = f"{base}{device_path}" if base else device_path
+    port_name, peer_name = port_context(alert)
+    port_lines = ""
+    if port_name:
+        port_lines = f"Cổng      : {port_name}\n"
+        if peer_name:
+            port_lines += f"Nối tới   : {peer_name}\n"
     body = (
         f"Cảnh báo đã được giải quyết\n"
         f"{'=' * 50}\n"
         f"Thiết bị  : {alert.device.name} ({alert.device.ip_address})\n"
+        f"{port_lines}"
         f"Rule      : {alert.rule.name}\n"
         f"Trigger   : {triggered_local.strftime('%Y-%m-%d %H:%M:%S')} ({settings.TIME_ZONE})\n"
         f"Recovered : {resolved_local.strftime('%Y-%m-%d %H:%M:%S') if resolved_local else 'N/A'} ({settings.TIME_ZONE})\n"

@@ -177,6 +177,8 @@ class Alert(models.Model):
     CLOSED_RULE_DISABLED = "rule_disabled"
     # Alert `if_status` bị đóng vì cổng gây ra nó không còn nằm trong phạm vi giám sát (xem `MonitoredUplink`).
     CLOSED_SCOPE_CHANGED = "scope_changed"
+    # Alert `if_status` CẤP THIẾT BỊ (kiểu cũ, `interface` NULL) bị thay bằng alert theo từng cổng (thiết kế B).
+    CLOSED_SUPERSEDED = "superseded"
 
     device          = models.ForeignKey(Device, on_delete=models.CASCADE, related_name="alerts")
     rule            = models.ForeignKey(AlertRule, on_delete=models.CASCADE, related_name="alerts")
@@ -199,10 +201,29 @@ class Alert(models.Model):
     # phải if_status → chưa biết cổng nào gây ra nó. Engine dùng tập này để phân biệt "cổng đã hồi phục"
     # (RECOVERED) với "cổng gây ra alert đã bị loại khỏi phạm vi giám sát" (đóng, không RECOVERED).
     down_interface_ids = models.JSONField(null=True, blank=True)
+    # Cảnh báo THEO TỪNG CỔNG (rule `if_status`, thiết kế B 2026-10-16): cổng gây ra alert. NULL = alert cấp
+    # thiết bị (mọi rule khác, hoặc `if_status` kiểu cũ — sẽ bị đóng `superseded`). SET_NULL (không CASCADE):
+    # xoá/tạo lại Interface không được làm mất lịch sử; tên cổng được chụp sẵn ở `interface_name`.
+    interface       = models.ForeignKey(
+        Interface, null=True, blank=True, on_delete=models.SET_NULL, related_name="+",
+    )
+    interface_name  = models.CharField(max_length=100, blank=True, default="", db_default="")
+    # Tên thiết bị ở đầu bên kia của link switch, chụp LÚC TẠO alert (chỉ khi link còn mới và khớp ĐÚNG cổng).
+    # Outbox/retry và mẫu RECOVERED chỉ ĐỌC cột này — không tra topology lúc gửi nên nội dung không đổi.
+    peer_name       = models.CharField(max_length=200, blank=True, default="", db_default="")
 
     class Meta:
         verbose_name = "Alert"
         ordering = ["-triggered_at"]
+        constraints = [
+            # Mỗi (thiết bị, rule, cổng) tối đa MỘT alert đang active — DB bảo đảm, không chỉ nhờ khoá Device.
+            # Chỉ áp cho alert có cổng: alert cấp thiết bị của mọi rule khác giữ nguyên ngữ nghĩa cũ.
+            models.UniqueConstraint(
+                fields=["device", "rule", "interface"],
+                condition=models.Q(is_active=True, interface__isnull=False),
+                name="uniq_active_alert_per_port",
+            ),
+        ]
 
     def __str__(self) -> str:
         return f"{self.severity}: {self.device.name} — {self.rule.name}"

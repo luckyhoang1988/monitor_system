@@ -40,7 +40,10 @@ class AlertAdmin(AdminRBACMixin, admin.ModelAdmin):
     list_display   = ("device", "rule", "severity", "metric_value", "is_active", "triggered_at")
     list_filter    = ("severity", "is_active", "device__device_type")
     search_fields  = ("device__name",)
-    readonly_fields = ("triggered_at", "resolved_at", "closed_reason", "down_interface_ids")
+    readonly_fields = (
+        "triggered_at", "resolved_at", "closed_reason", "down_interface_ids",
+        "interface", "interface_name", "peer_name",
+    )
     inlines = [AlertNotificationInline]
 
 
