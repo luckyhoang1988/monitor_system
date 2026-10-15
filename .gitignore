@@ -13,6 +13,10 @@ build/
 .env.local
 *.env
 .env.production
+# Bản sao lưu/biến thể của file môi trường (vd .env.production.bak.<timestamp> do thao tác tay trên server)
+# chứa SECRET_KEY/ENCRYPTION_KEY/mật khẩu thật — repo là PUBLIC, không bao giờ được commit.
+.env.*
+!.env.example
 
 # Django
 db.sqlite3
