@@ -661,6 +661,15 @@ thành mất thông báo thật: prod 309/1.843 dòng, 15/38 fire riêng ngày 2
   nếu không chủ cũ gửi chậm sẽ hẹn lại đè kết quả của chủ mới.
 - **`SoftTimeLimitExceeded` kế thừa `Exception`**: bắt riêng TRƯỚC `except Exception`, trả row về pending rồi
   raise lại. Test hồi quy bằng ĐỘT BIẾN (tạm phá từng hành vi, xác nhận đúng test đỏ), không chỉ chạy xanh.
+- **Regex che bí mật: KHÔNG dùng `\b` trước chữ số và phải thử trên HÌNH DẠNG THẬT.** `\b\d{6,}:...` không khớp
+  `/bot123456:AAH...` (giữa `t` và `1` không có ranh giới từ) nên `redact()` bản đầu rò token ở 121/294 dòng thật
+  dù test (dùng URL đầy đủ) xanh. Cách làm đúng: (1) quét MỌI cột text/varchar/json bằng `DO $$ ... format('%I')`
+  để biết bí mật nằm ở đâu; (2) liệt kê hình dạng đã che (`regexp_replace` rồi `GROUP BY`) và dùng đúng các hình
+  dạng đó làm test; (3) chạy hàm che lên dữ liệu thật CHỈ ĐỌC, đếm dòng còn rò (không in nội dung).
+- **Migration dọn dữ liệu nhạy cảm**: tự chứa regex (không import code ứng dụng — nghĩa phải cố định), `.update()`
+  theo pk để không đổi `auto_now`/mốc dùng cho logic khác, reverse noop, idempotent, và thử khô trên dữ liệu thật
+  trước deploy. Che phần bí mật, giữ phần còn lại để vẫn đọc được lỗi. Bản sao DB/backup đã tạo trước đó vẫn chứa
+  bí mật → xoay khoá là quyết định riêng, phải nói rõ với người vận hành.
 - Tình trạng thông báo cũ `failed`: đo xem alert tương ứng còn active không TRƯỚC khi quyết định phát lại —
   cả 309 dòng prod thuộc alert đã hồi phục nên không phát lại gì cả.
 

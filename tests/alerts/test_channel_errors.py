@@ -238,3 +238,23 @@ class TestRedact:
 
     def test_leaves_plain_text_alone(self):
         assert redact("SMTP timeout") == "SMTP timeout"
+
+    @pytest.mark.parametrize("text", [
+        # 3 hình dạng THẬT đo trên prod 2026-10-15 (294 dòng AlertNotification.error), token đã thay bằng giá trị giả.
+        f"429 Client Error: Too Many Requests for url: https://api.telegram.org/bot{TOKEN}/sendMessage",
+        f"400 Client Error: Bad Request for url: https://api.telegram.org/bot{TOKEN}/sendMessage",
+        f"HTTPSConnectionPool(host='api.telegram.org', port=443): Max retries exceeded with url: "
+        f"/bot{TOKEN}/sendMessage (Caused by NameResolutionError(\"HTTPSConnection: Failed to resolve\"))",
+    ])
+    def test_real_production_error_shapes_are_fully_scrubbed(self, text):
+        """Review 2026-10-15: bản đầu dùng `\\b` trước chữ số nên KHÔNG khớp `/bot<token>` (giữa `t` và
+        chữ số không có ranh giới từ) — rò token ở 121/294 dòng thật dạng 'url: /bot<token>/sendMessage'."""
+        out = redact(text)
+        assert TOKEN not in out
+        assert "AAH-secretTokenValue_xyz" not in out
+        assert "123456789" not in out
+
+    def test_bare_bot_path_keeps_context_but_not_the_secret(self):
+        out = redact(f"Max retries exceeded with url: /bot{TOKEN}/sendMessage (Caused by Timeout)")
+        assert "Max retries exceeded" in out and "(Caused by Timeout)" in out
+        assert "AAH-secretTokenValue_xyz" not in out

@@ -45,7 +45,10 @@ class ChannelTransientError(ChannelError):
 
 # Bot token Telegram: "<bot_id>:<35 ký tự>". URL (webhook Slack/Teams, api.telegram.org/bot<token>/...)
 # mang bí mật trong path → che cả path, giữ lại host để còn đọc được lỗi của dịch vụ nào.
-_BOT_TOKEN_RE = re.compile(r"\b\d{6,}:[A-Za-z0-9_-]{20,}")
+# KHÔNG dùng `\b` trước chữ số: trong `/bot123456:AAH...` giữa `t` và `1` không có ranh giới từ nên
+# `\b\d{6,}` không khớp — dạng "Max retries exceeded with url: /bot<token>/sendMessage" từng rò token
+# (121/294 dòng prod, review 2026-10-15). Chỉ cần chữ số đứng đầu dãy không dính vào dãy số trước nó.
+_BOT_TOKEN_RE = re.compile(r"(?<![0-9])[0-9]{6,}:[A-Za-z0-9_-]{20,}")
 _URL_PATH_RE = re.compile(r"(https?://[^/\s'\"<>]+)/[^\s'\"<>]*")
 
 
