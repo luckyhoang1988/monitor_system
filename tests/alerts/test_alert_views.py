@@ -120,6 +120,13 @@ class TestAlertViews:
         assert response.status_code == 200
         assert alert_rule.name in response.content.decode("utf-8")
 
+        # Hạng mục 1.4: POST rỗng KHÔNG còn xoá — phải gõ đúng tên rule (chi tiết: test_rule_delete_flow.py).
         response = logged_in_client.post(reverse("alerts:rule_delete", args=[alert_rule.pk]))
+        assert response.status_code == 200
+        assert AlertRule.objects.filter(pk=alert_rule.pk).exists()
+
+        response = logged_in_client.post(
+            reverse("alerts:rule_delete", args=[alert_rule.pk]), data={"confirm_name": alert_rule.name},
+        )
         assert response.status_code == 302
         assert not AlertRule.objects.filter(pk=alert_rule.pk).exists()

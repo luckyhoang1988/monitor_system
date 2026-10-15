@@ -12,5 +12,6 @@ urlpatterns = [
     path("rules/", views.rule_list, name="rule_list"),
     path("rules/add/", views.rule_create, name="rule_create"),
     path("rules/<int:pk>/edit/", views.rule_edit, name="rule_edit"),
+    path("rules/<int:pk>/disable/", views.rule_disable, name="rule_disable"),
     path("rules/<int:pk>/delete/", views.rule_delete, name="rule_delete"),
 ]

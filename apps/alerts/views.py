@@ -9,7 +9,9 @@ from django.http import HttpResponseForbidden
 from django.conf import settings
 from django.db import connection
 from django.utils import timezone
-from .models import Alert, AlertRule, AlertConfig
+from django.views.decorators.http import require_POST
+from .engine import close_alerts_for_disabled_rule
+from .models import Alert, AlertRule, AlertConfig, AlertNotification
 from .forms import AlertRuleForm, AlertConfigForm
 
 
@@ -176,9 +178,14 @@ def rule_edit(request, pk):
     if not _can_write(request):
         return HttpResponseForbidden("Bạn không có quyền thực hiện thao tác này.")
     rule = get_object_or_404(AlertRule, pk=pk)
+    # Đọc TRƯỚC khi bind form: `is_valid()` ghi dữ liệu đã làm sạch lên chính `rule`.
+    was_enabled = rule.enabled
     form = AlertRuleForm(request.POST or None, instance=rule)
     if request.method == "POST" and form.is_valid():
         form.save()
+        if was_enabled and not rule.enabled:
+            # Cùng hệ quả với nút "Tắt rule": alert đang active của rule tắt sẽ không bao giờ được resolve.
+            close_alerts_for_disabled_rule(rule, by=request.user.username)
         return redirect("alerts:rule_list")
     return render(request, "alerts/rules/form.html", {"form": form, "title": f"Sửa: {rule.name}"})
 
@@ -197,12 +204,63 @@ def notification_config(request):
     return render(request, "alerts/config.html", {"form": form})
 
 
+def _rule_delete_impact(rule: AlertRule) -> dict:
+    """Số bản ghi `rule.delete()` sẽ xoá THEO CASCADE (Alert.rule và AlertNotification.alert đều CASCADE).
+
+    Chỉ có đúng 2 model — test `TestCountsCoverEveryCascade` buộc cập nhật hàm này nếu ai thêm model khác
+    trỏ vào AlertRule/Alert với CASCADE.
+    """
+    alerts = Alert.objects.filter(rule=rule)
+    return {
+        "alert_count": alerts.count(),
+        "active_alert_count": alerts.filter(is_active=True).count(),
+        "notification_count": AlertNotification.objects.filter(alert__rule=rule).count(),
+    }
+
+
 @login_required
-def rule_delete(request, pk):
+@require_POST
+def rule_disable(request, pk):
+    """Tắt rule (hành động CHÍNH thay cho xoá): giữ nguyên lịch sử, đóng alert đang active (không RECOVERED)."""
     if not _can_write(request):
         return HttpResponseForbidden("Bạn không có quyền thực hiện thao tác này.")
     rule = get_object_or_404(AlertRule, pk=pk)
+    if rule.enabled:
+        rule.enabled = False
+        rule.save(update_fields=["enabled"])
+    # Sau khi `enabled=False` đã commit (autocommit) — xem docstring close_alerts_for_disabled_rule.
+    closed = close_alerts_for_disabled_rule(rule, by=request.user.username)
+    extra = f" Đã đóng {closed} alert đang active (không gửi RECOVERED)." if closed else ""
+    messages.success(
+        request, f"Đã tắt rule “{rule.name}”. Lịch sử alert và thông báo được giữ nguyên.{extra}"
+    )
+    return redirect("alerts:rule_list")
+
+
+@login_required
+def rule_delete(request, pk):
+    """Trang xác nhận + XOÁ VĨNH VIỄN (hành động phụ). Chỉ xoá khi POST kèm `confirm_name` đúng tên rule.
+
+    Xoá rule xoá luôn mọi Alert và AlertNotification của nó (CASCADE) — trang hiển thị số thật sự sẽ mất.
+    Mở trang (GET), POST rỗng hay sai tên đều KHÔNG xoá gì; kiểm tra ở server, không dựa vào JS.
+    """
+    if not _can_write(request):
+        return HttpResponseForbidden("Bạn không có quyền thực hiện thao tác này.")
+    rule = get_object_or_404(AlertRule, pk=pk)
+    confirm_error = False
     if request.method == "POST":
-        rule.delete()
-        return redirect("alerts:rule_list")
-    return render(request, "alerts/rules/confirm_delete.html", {"rule": rule})
+        typed = (request.POST.get("confirm_name") or "").strip()
+        if typed == rule.name.strip():
+            name = rule.name
+            _, per_model = rule.delete()
+            alerts = per_model.get(Alert._meta.label, 0)
+            notifications = per_model.get(AlertNotification._meta.label, 0)
+            messages.success(
+                request,
+                f"Đã xóa vĩnh viễn rule “{name}” cùng {alerts} alert và {notifications} thông báo trong lịch sử.",
+            )
+            return redirect("alerts:rule_list")
+        confirm_error = True
+    return render(request, "alerts/rules/confirm_delete.html", {
+        "rule": rule, "confirm_error": confirm_error, **_rule_delete_impact(rule),
+    })

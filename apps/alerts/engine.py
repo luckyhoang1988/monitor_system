@@ -1079,6 +1079,12 @@ def _fire_alert(device: Device, rule: AlertRule, value: float) -> None:
                 return
             renotify = active
         else:
+            # Hạng mục 1.4 (2026-10-15): `rule` được nạp lúc vòng eval bắt đầu — người dùng có thể đã TẮT
+            # (hoặc xoá) rule rồi alert cũ của nó bị đóng (`close_alerts_for_disabled_rule`) trước khi tới
+            # đây. Tạo alert mới cho rule đã tắt = alert không bao giờ được resolve (engine chỉ xét rule
+            # enabled). Kiểm TRONG khoá Device, chỉ ở nhánh tạo mới (không tốn query ở nhánh alert đang active).
+            if not AlertRule.objects.filter(pk=rule.pk, enabled=True).exists():
+                return
             alert = Alert.objects.create(
                 device=device,
                 rule=rule,
@@ -1157,6 +1163,50 @@ def _resolve_alert(device: Device, rule: AlertRule) -> None:
         if channels_to_notify:
             _dispatch_notifications(alert, channels_to_notify, kind="recovery")
     logger.info("ALERT resolved: %s — %s", device.name, rule.name)
+
+
+def close_alerts_for_disabled_rule(rule: AlertRule, by: str = "") -> int:
+    """Đóng mọi alert ĐANG ACTIVE của `rule` vì rule vừa bị tắt. Trả số alert đã đóng.
+
+    Hạng mục 1.4 (A4, 2026-10-15). `check_device_alerts` chỉ đánh giá rule `enabled=True`, nên alert đang
+    active của 1 rule đã tắt không còn đường nào tới `_resolve_alert` — kẹt `is_active=True` vĩnh viễn trên
+    panel Active Alerts và bộ đếm dashboard (cùng họ lỗi "alert kẹt hàng chục ngày"; 11 alert kẹt hiện có
+    trên prod KHÔNG do việc này — 0 rule nào đang tắt lúc đo 2026-10-15).
+
+    * KHÔNG ghi AlertNotification nào, KHÔNG gửi "RECOVERED": tắt rule không có nghĩa sự cố đã hồi phục.
+      Lý do đóng được ghi vào cuối `Alert.message` để người xem lịch sử không hiểu nhầm là đã hồi phục.
+    * Lịch sử giữ nguyên (chỉ đổi is_active/resolved_at/message). Bật lại rule: điều kiện còn đúng thì engine
+      tạo alert MỚI và thông báo như thường.
+    * Khoá `Device` rồi khoá hàng `Alert` đúng thứ tự của `_fire_alert`/`_resolve_alert` (không deadlock; 2
+      đường đóng đồng thời không đóng đôi). Người gọi phải commit `enabled=False` TRƯỚC khi gọi — cùng guard
+      trong `_fire_alert` loại cửa sổ race "vòng eval đang chạy tạo alert mới sau khi đã đóng".
+    * Fire đang chờ gửi (pending/processing) của alert vừa đóng vẫn đi qua cơ chế sẵn có
+      (`_finalize_fire_sent` → recovery trễ theo từng kênh) nên thứ tự ALERT → RECOVERED vẫn nhất quán.
+    """
+    device_ids = list(
+        Alert.objects.filter(rule=rule, is_active=True).values_list("device_id", flat=True).distinct()
+    )
+    closed = 0
+    for device_id in device_ids:
+        with transaction.atomic():
+            Device.objects.select_for_update().filter(pk=device_id).first()
+            alerts = list(
+                Alert.objects.select_for_update().filter(device_id=device_id, rule=rule, is_active=True)
+            )
+            if not alerts:
+                continue
+            now = timezone.now()
+            stamp = timezone.localtime(now).strftime("%H:%M %d/%m/%Y")
+            who = f" bởi {by}" if by else ""
+            note = f" [Đã đóng vì rule bị tắt lúc {stamp}{who} — không phải đã hồi phục]"
+            for alert in alerts:
+                Alert.objects.filter(pk=alert.pk).update(
+                    is_active=False, resolved_at=now, message=alert.message + note,
+                )
+            closed += len(alerts)
+    if closed:
+        logger.info("ALERT closed (rule bị tắt): %s — %d alert", rule.name, closed)
+    return closed
 
 
 def _queue_late_recovery_if_resolved(alert_id: int, channel: str) -> None:

@@ -1,30 +1,104 @@
 {% extends "base.html" %}
-{% block title %}Xóa Rule{% endblock %}
-{% block breadcrumb %}Xóa Alert Rule{% endblock %}
+{% block title %}Tắt hoặc xóa rule{% endblock %}
+{% block breadcrumb %}
+  <a href="{% url 'alerts:rule_list' %}" class="text-decoration-none text-muted">Alert Rules</a>
+  <span class="mx-2 text-muted">/</span> Tắt hoặc xóa
+{% endblock %}
 
 {% block content %}
 <div class="row justify-content-center">
-  <div class="col-lg-5">
-    <div class="card border-danger">
-      <div class="card-header bg-danger text-white py-3">
-        <h6 class="mb-0"><i class="bi bi-exclamation-triangle me-2"></i>Xác nhận xóa</h6>
-      </div>
+  <div class="col-lg-6">
+
+    <div class="card mb-3">
       <div class="card-body">
-        <p class="mb-1">Bạn có chắc muốn xóa alert rule:</p>
-        <p class="fw-bold fs-5 text-danger mb-3">{{ rule.name }}</p>
-        <p class="text-muted small mb-4">
-          Tất cả alerts đã trigger từ rule này sẽ vẫn còn trong lịch sử,
-          nhưng rule sẽ không còn đánh giá nữa.
+        <div class="d-flex align-items-center justify-content-between">
+          <p class="fw-bold fs-5 mb-0">{{ rule.name }}</p>
+          {% if rule.enabled %}
+            <span class="badge bg-success rounded-pill">Đang bật</span>
+          {% else %}
+            <span class="badge bg-secondary rounded-pill">Đang tắt</span>
+          {% endif %}
+        </div>
+        <p class="text-muted small mb-2">{{ rule.metric_label }} · {{ rule.get_condition_display }} {{ rule.threshold_label }}</p>
+        <p class="small mb-0">
+          Lịch sử của rule này: <strong>{{ alert_count }}</strong> alert
+          (<strong>{{ active_alert_count }}</strong> đang active) và <strong>{{ notification_count }}</strong> thông báo.
         </p>
-        <form method="post" class="d-flex gap-2">
+      </div>
+    </div>
+
+    {% if rule.enabled %}
+    <div class="card border-primary mb-3">
+      <div class="card-body">
+        <h6 class="fw-bold mb-2">
+          Tắt rule <span class="badge bg-primary ms-1">Khuyến nghị</span>
+        </h6>
+        <p class="small text-muted">
+          Rule ngừng đánh giá; <strong>toàn bộ lịch sử alert và thông báo được giữ nguyên</strong>.
+          Bật lại bất cứ lúc nào ở trang Sửa rule.
+          {% if active_alert_count %}
+            <strong>{{ active_alert_count }}</strong> alert đang active sẽ được đóng lại
+            (không gửi RECOVERED vì chưa hề hồi phục).
+          {% endif %}
+        </p>
+        <form method="post" action="{% url 'alerts:rule_disable' rule.pk %}" class="d-flex gap-2">
           {% csrf_token %}
-          <button type="submit" class="btn btn-danger px-4">
-            <i class="bi bi-trash me-1"></i>Xóa
+          <button type="submit" class="btn btn-primary px-4">
+            <i class="bi bi-power me-1"></i>Tắt rule
           </button>
           <a href="{% url 'alerts:rule_list' %}" class="btn btn-outline-secondary px-4">Hủy</a>
         </form>
       </div>
     </div>
+    {% else %}
+    <div class="alert alert-secondary small">
+      Rule đang tắt: không còn được đánh giá, lịch sử vẫn được giữ. Bật lại ở trang
+      <a href="{% url 'alerts:rule_edit' rule.pk %}">Sửa rule</a>.
+    </div>
+    <a href="{% url 'alerts:rule_list' %}" class="btn btn-outline-secondary mb-3">Quay lại danh sách</a>
+    {% endif %}
+
+    <details class="card border-danger"{% if confirm_error %} open{% endif %}>
+      <summary class="card-header text-danger fw-bold py-3" style="cursor: pointer;">
+        <i class="bi bi-trash me-1"></i>Xóa vĩnh viễn…
+      </summary>
+      <div class="card-body">
+        {% if confirm_error %}
+        <div class="alert alert-danger small py-2">Tên nhập không khớp — chưa xóa gì.</div>
+        {% endif %}
+        <p class="small">
+          Xóa rule sẽ <strong>xóa luôn toàn bộ lịch sử của nó</strong>:
+          <strong>{{ alert_count }}</strong> alert (trong đó <strong>{{ active_alert_count }}</strong> đang active)
+          và <strong>{{ notification_count }}</strong> thông báo.
+          Hành động này <strong>không thể hoàn tác</strong>.
+        </p>
+        <form method="post" autocomplete="off">
+          {% csrf_token %}
+          <label for="confirm_name" class="form-label small">
+            Gõ chính xác tên rule <code>{{ rule.name }}</code> để xác nhận:
+          </label>
+          <input type="text" id="confirm_name" name="confirm_name" class="form-control mb-3"
+                 autocomplete="off" required>
+          <button type="submit" id="confirm_delete_btn" class="btn btn-danger px-4">
+            <i class="bi bi-trash me-1"></i>Xóa vĩnh viễn
+          </button>
+        </form>
+      </div>
+    </details>
+
   </div>
 </div>
+
+<script>
+// Chỉ là tiện ích: nút xóa chỉ bật khi tên khớp. Cổng thật là kiểm tra ở server (rule_delete).
+(function () {
+  var input = document.getElementById("confirm_name");
+  var btn = document.getElementById("confirm_delete_btn");
+  if (!input || !btn) return;
+  var expected = "{{ rule.name|escapejs }}".trim();
+  function sync() { btn.disabled = input.value.trim() !== expected; }
+  input.addEventListener("input", sync);
+  sync();
+})();
+</script>
 {% endblock %}

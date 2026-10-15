@@ -1,5 +1,6 @@
 from django.contrib import admin
 from apps.accounts.admin_mixins import AdminRBACMixin
+from .engine import close_alerts_for_disabled_rule
 from .models import AlertRule, Alert, AlertNotification, AlertConfig
 
 
@@ -12,6 +13,13 @@ class AlertConfigAdmin(AdminRBACMixin, admin.ModelAdmin):
 class AlertRuleAdmin(AdminRBACMixin, admin.ModelAdmin):
     list_display = ("name", "device_type", "metric", "condition", "threshold", "severity", "enabled")
     list_filter  = ("severity", "device_type", "enabled")
+
+    def save_model(self, request, obj, form, change):
+        super().save_model(request, obj, form, change)
+        # Cùng hệ quả với nút "Tắt rule" ở UI chính (hạng mục 1.4): rule tắt không còn được engine đánh
+        # giá nên alert đang active của nó sẽ không bao giờ được resolve.
+        if change and "enabled" in form.changed_data and not obj.enabled:
+            close_alerts_for_disabled_rule(obj, by=request.user.username)
 
 
 class AlertNotificationInline(admin.TabularInline):
