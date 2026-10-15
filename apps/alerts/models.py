@@ -144,6 +144,9 @@ class AlertRule(models.Model):
 
 
 class Alert(models.Model):
+    # Lý do alert bị ĐÓNG mà KHÔNG phải vì sự cố đã hồi phục (xem `closed_reason`).
+    CLOSED_RULE_DISABLED = "rule_disabled"
+
     device          = models.ForeignKey(Device, on_delete=models.CASCADE, related_name="alerts")
     rule            = models.ForeignKey(AlertRule, on_delete=models.CASCADE, related_name="alerts")
     severity        = models.CharField(max_length=20)
@@ -154,6 +157,12 @@ class Alert(models.Model):
     acknowledged_by = models.CharField(max_length=100, blank=True)
     acknowledged_at = models.DateTimeField(null=True, blank=True)
     is_active       = models.BooleanField(default=True, db_index=True)
+    # Vì sao alert đã đóng mà KHÔNG phải do hồi phục. Rỗng = còn active, hoặc đã hồi phục thật (đường
+    # `_resolve_alert`). `is_active=False` một mình KHÔNG có nghĩa "đã hồi phục": mọi cơ chế suy ra RECOVERED
+    # từ trạng thái đóng (late-recovery trong engine) phải bỏ qua alert có giá trị ở đây — chưa có dữ liệu nào
+    # cho thấy sự cố đã hết (hạng mục 1.4, review sau 30b09aa). `db_default` để mã cũ (khi rollback) vẫn
+    # INSERT được dù không biết cột này.
+    closed_reason   = models.CharField(max_length=20, blank=True, default="", db_default="")
 
     class Meta:
         verbose_name = "Alert"

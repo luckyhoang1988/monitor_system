@@ -113,7 +113,9 @@
           <td class="text-muted">{{ a.rule.name }}</td>
           <td class="text-end font-monospace text-muted">{{ a.metric_value_label }}</td>
           <td class="text-muted small">{{ a.triggered_at|date:"d/m/Y H:i" }}</td>
-          <td class="text-muted small">{{ a.resolved_at|date:"d/m/Y H:i"|default:"—" }}</td>
+          <td class="text-muted small">{{ a.resolved_at|date:"d/m/Y H:i"|default:"—" }}
+            {% if a.closed_reason %}<span class="badge bg-warning text-dark ms-1" title="Alert bị đóng vì rule bị tắt — chưa có dữ liệu nào cho thấy sự cố đã hết">Rule bị tắt</span>{% endif %}
+          </td>
         </tr>
         {% endfor %}
       </tbody>

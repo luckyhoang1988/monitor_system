@@ -239,8 +239,14 @@ class TestDisableViaAdmin:
             data["enabled"] = "on"
         return client.post(reverse("admin:alerts_alertrule_change", args=[rule.pk]), data=data)
 
-    def test_unticking_enabled_in_admin_closes_active_alerts(self, admin_client, rule, history):
-        response = self._post(admin_client, rule, enabled=False)
+    def test_unticking_enabled_in_admin_closes_active_alerts(
+        self, admin_client, rule, history, django_capture_on_commit_callbacks
+    ):
+        # Admin chỉ đóng alert SAU khi `enabled=False` đã commit (transaction.on_commit) — test bọc trong 1
+        # transaction nên phải chủ động chạy các callback on_commit. Thứ tự "đóng sau commit" được chứng minh
+        # bằng kết nối thứ hai ở test_rule_disable_races.py.
+        with django_capture_on_commit_callbacks(execute=True):
+            response = self._post(admin_client, rule, enabled=False)
 
         assert response.status_code == 302, getattr(response, "context", None) and response.context["adminform"].form.errors
         rule.refresh_from_db()

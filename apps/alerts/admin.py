@@ -1,4 +1,5 @@
 from django.contrib import admin
+from django.db import transaction
 from apps.accounts.admin_mixins import AdminRBACMixin
 from .engine import close_alerts_for_disabled_rule
 from .models import AlertRule, Alert, AlertNotification, AlertConfig
@@ -19,7 +20,11 @@ class AlertRuleAdmin(AdminRBACMixin, admin.ModelAdmin):
         # Cùng hệ quả với nút "Tắt rule" ở UI chính (hạng mục 1.4): rule tắt không còn được engine đánh
         # giá nên alert đang active của nó sẽ không bao giờ được resolve.
         if change and "enabled" in form.changed_data and not obj.enabled:
-            close_alerts_for_disabled_rule(obj, by=request.user.username)
+            # Django admin bọc cả request trong `transaction.atomic()`: đóng NGAY ở đây sẽ chạy khi
+            # `enabled=False` còn chưa commit — worker vẫn đọc thấy `enabled=True` và tạo alert mới sau lần
+            # đóng này (review sau 30b09aa). Chờ commit rồi mới đóng.
+            by = request.user.username
+            transaction.on_commit(lambda: close_alerts_for_disabled_rule(obj, by=by))
 
 
 class AlertNotificationInline(admin.TabularInline):

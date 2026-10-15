@@ -1165,6 +1165,18 @@ def _resolve_alert(device: Device, rule: AlertRule) -> None:
     logger.info("ALERT resolved: %s — %s", device.name, rule.name)
 
 
+def _every_device_id() -> list[int]:
+    """pk MỌI Device, sắp theo pk (thứ tự khoá ổn định).
+
+    Cố ý KHÔNG thu hẹp theo `rule.device_type`. Phạm vi của rule có thể bị đổi cùng lúc với việc tắt nó (lưu
+    rule "Tất cả" → "HyperV" rồi tắt): worker đã nạp rule theo phạm vi CŨ đang nổ alert cho 1 Switch, mà
+    phạm vi MỚI không chứa Switch → Device đó không bị khoá, alert đang tạo (chưa commit) lại không có trong
+    truy vấn "Device đã có alert active" → đóng 0 alert (review thứ ba sau 30b09aa, tái hiện bằng 2
+    connection Postgres). Tập Device của 1 fleet giám sát chỉ cỡ vài chục dòng; mỗi Device khoá trong
+    transaction riêng, ngắn."""
+    return list(Device.objects.order_by("pk").values_list("pk", flat=True))
+
+
 def close_alerts_for_disabled_rule(rule: AlertRule, by: str = "") -> int:
     """Đóng mọi alert ĐANG ACTIVE của `rule` vì rule vừa bị tắt. Trả số alert đã đóng.
 
@@ -1174,20 +1186,29 @@ def close_alerts_for_disabled_rule(rule: AlertRule, by: str = "") -> int:
     trên prod KHÔNG do việc này — 0 rule nào đang tắt lúc đo 2026-10-15).
 
     * KHÔNG ghi AlertNotification nào, KHÔNG gửi "RECOVERED": tắt rule không có nghĩa sự cố đã hồi phục.
-      Lý do đóng được ghi vào cuối `Alert.message` để người xem lịch sử không hiểu nhầm là đã hồi phục.
-    * Lịch sử giữ nguyên (chỉ đổi is_active/resolved_at/message). Bật lại rule: điều kiện còn đúng thì engine
-      tạo alert MỚI và thông báo như thường.
-    * Khoá `Device` rồi khoá hàng `Alert` đúng thứ tự của `_fire_alert`/`_resolve_alert` (không deadlock; 2
-      đường đóng đồng thời không đóng đôi). Người gọi phải commit `enabled=False` TRƯỚC khi gọi — cùng guard
-      trong `_fire_alert` loại cửa sổ race "vòng eval đang chạy tạo alert mới sau khi đã đóng".
-    * Fire đang chờ gửi (pending/processing) của alert vừa đóng vẫn đi qua cơ chế sẵn có
-      (`_finalize_fire_sent` → recovery trễ theo từng kênh) nên thứ tự ALERT → RECOVERED vẫn nhất quán.
+      Lý do đóng được ghi vào cuối `Alert.message` (cho người đọc) VÀ vào `Alert.closed_reason` (cho engine):
+      `_queue_late_recovery_if_resolved` bỏ qua alert có `closed_reason`, nên fire đang chờ/đang gửi của alert
+      vừa đóng vẫn có thể được gửi (sự cố đã xảy ra) nhưng KHÔNG có RECOVERED theo sau — kể cả khi rule được
+      bật lại sau đó. Alert đã hồi phục THẬT trước khi rule bị tắt không bị đụng tới (không còn active).
+    * Lịch sử giữ nguyên (chỉ đổi is_active/resolved_at/closed_reason/message). Bật lại rule: điều kiện còn
+      đúng thì engine tạo alert MỚI và thông báo như thường.
+    * ⚠️ KHOÁ — đây là chỗ review sau 30b09aa bắt được (2 vòng): `_fire_alert` kiểm `enabled=True` rồi tạo
+      Alert dưới khoá `Device`. Vòng 1: chỉ khoá các Device ĐÃ có alert active thì alert đang được tạo (chưa
+      commit) không thấy được → đóng 0 alert → worker tạo tiếp → alert active của rule đã tắt, mãi mãi.
+      Vòng 2: khoá theo `rule.device_type` HIỆN TẠI cũng không đủ — lưu rule đổi phạm vi và tắt cùng lúc thì
+      Device thuộc phạm vi CŨ (worker đang xử lý) nằm ngoài phạm vi mới. Nên khoá MỌI Device
+      (`_every_device_id`), từng cái một, rồi mới đọc alert: Device nào đang có worker giữ khoá thì ta chờ nó
+      commit rồi thấy alert của nó và đóng. Chứng minh: worker đã đọc thấy `enabled=True` thì nó đang giữ
+      khoá Device từ TRƯỚC lúc `enabled=False` commit; ta chỉ xin khoá SAU lúc đó nên phải chờ tới khi nó
+      commit. Worker đọc SAU commit thì thấy `enabled=False` và không tạo gì (Device tạo sau lúc liệt kê
+      cũng vậy: worker của nó chỉ chạy sau commit). Khoá từng Device trong transaction riêng (không giữ
+      nhiều khoá cùng lúc) nên không thể deadlock với `_fire_alert`/`_resolve_alert` (cùng thứ tự Device →
+      Alert).
+    * Người gọi phải ĐÃ COMMIT `enabled=False` TRƯỚC khi gọi (và KHÔNG gọi trong 1 transaction còn mở chứa
+      lệnh tắt — Django admin bọc cả request trong `atomic()`, nên admin dùng `transaction.on_commit`).
     """
-    device_ids = list(
-        Alert.objects.filter(rule=rule, is_active=True).values_list("device_id", flat=True).distinct()
-    )
     closed = 0
-    for device_id in device_ids:
+    for device_id in _every_device_id():
         with transaction.atomic():
             Device.objects.select_for_update().filter(pk=device_id).first()
             alerts = list(
@@ -1202,6 +1223,7 @@ def close_alerts_for_disabled_rule(rule: AlertRule, by: str = "") -> int:
             for alert in alerts:
                 Alert.objects.filter(pk=alert.pk).update(
                     is_active=False, resolved_at=now, message=alert.message + note,
+                    closed_reason=Alert.CLOSED_RULE_DISABLED,
                 )
             closed += len(alerts)
     if closed:
@@ -1249,6 +1271,11 @@ def _queue_late_recovery_if_resolved(alert_id: int, channel: str) -> None:
         alert = Alert.objects.select_related("rule").get(pk=alert_id, is_active=False)
     except Alert.DoesNotExist:
         return  # Alert chưa resolve (hoặc đã bị xoá) — chưa có gì "nợ", nhánh resolve lo sau.
+    if alert.closed_reason:
+        # Đóng vì lý do KHÁC hồi phục (rule bị tắt, hạng mục 1.4): `is_active=False` ở đây không có nghĩa sự cố
+        # đã hết, nên không được gửi RECOVERED — kể cả khi fire còn pending/processing lúc đóng và chỉ được
+        # gửi xong SAU đó (review sau 30b09aa), và kể cả khi rule đã được bật lại.
+        return
     if AlertNotification.objects.filter(alert=alert, channel=channel, kind="recovery").exists():
         return
     AlertNotification.objects.create(alert=alert, channel=channel, kind="recovery", status="pending")
