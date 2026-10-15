@@ -1,7 +1,10 @@
 """Alert rule engine — đánh giá ngưỡng và tạo Alert record."""
 import logging
+import re
 import time
 import uuid
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import timedelta
 
 from celery.exceptions import SoftTimeLimitExceeded
@@ -14,7 +17,7 @@ from apps.devices.models import Device
 from apps.metrics import cache as metrics_cache
 from . import cooldown
 from .channels import ChannelTransientError, redact
-from .models import AlertRule, Alert, AlertNotification
+from .models import AlertRule, Alert, AlertNotification, MonitoredUplink
 
 logger = logging.getLogger(__name__)
 
@@ -271,54 +274,190 @@ def _latest_mem(device: Device, since) -> float | None:
     return rec.mem_percent
 
 
-def _check_if_status(device: Device, since) -> float | None:
-    """Trả về 0 nếu có uplink nào DOWN, 1 nếu tất cả UP."""
-    from apps.devices.models import Interface
+@dataclass(frozen=True)
+class UplinkScope:
+    """Kết quả `_sync_uplink_scope`: các cổng đang được giám sát, tên `uplink_ports` không khớp cổng nào, và tên
+    khớp NHIỀU cổng (mơ hồ — không tự chọn) kèm tên các cổng ứng viên."""
+    interface_ids: tuple[int, ...]
+    unmatched_manual: tuple[str, ...] = ()
+    ambiguous_manual: tuple[tuple[str, tuple[str, ...]], ...] = ()
 
+
+def _port_key(name) -> str:
+    return (name or "").strip().casefold()
+
+
+# Tên viết tắt có BẰNG CHỨNG trên prod (đo 2026-10-15: `uplink_ports` ghi `Gi1/0/20`, `XGE0/0/1` còn cổng là
+# `GigabitEthernet1/0/20`, `XGigabitEthernet0/0/1`). Cố ý chỉ 2 cặp: `GE0/0/25` cũng có trên prod nhưng không có
+# bằng chứng nó ứng với cổng nào, và đoán tên cổng là cách thiết bị bị giám sát nhầm cổng mà không ai biết.
+_PORT_ALIAS_RE = re.compile(r"^(xgigabitethernet|xge|gigabitethernet|gi)(?=\d)")
+_PORT_ALIAS_FULL = {"xge": "xgigabitethernet", "gi": "gigabitethernet"}
+
+
+def _port_alias_key(name) -> str:
+    """Khoá so khớp có xét viết tắt: `Gi`→`GigabitEthernet`, `XGE`→`XGigabitEthernet`, phần còn lại (toàn bộ số
+    cổng/stack/slot) giữ NGUYÊN — `Gi1/0/2` không bao giờ trùng `GigabitEthernet1/0/20`."""
+    key = _port_key(name)
+    m = _PORT_ALIAS_RE.match(key)
+    if not m:
+        return key
+    prefix = m.group(1)
+    return _PORT_ALIAS_FULL.get(prefix, prefix) + key[m.end():]
+
+
+def _manual_port_names(value) -> list[str]:
+    """Tên cổng trong `Device.uplink_ports`, đã làm phẳng và bỏ ký tự thừa.
+
+    Dữ liệu thật trên prod (đo 2026-10-15) có cả `"['Gi1/0/20']"` (list bị lưu thành 1 chuỗi), `'[]'` và
+    `"['GE0/0/25']"` lồng trong list — nên không thể so khớp thẳng từng phần tử."""
+    names: list[str] = []
+
+    def walk(v) -> None:
+        if v is None:
+            return
+        if isinstance(v, (list, tuple, set)):
+            for item in v:
+                walk(item)
+            return
+        for part in re.split(r"[,;]", str(v)):
+            name = part.strip().strip("[]()'\"").strip()
+            if name:
+                names.append(name)
+
+    walk(value)
+    return names
+
+
+def _sync_uplink_scope(device: Device) -> UplinkScope:
+    """Xác lập + trả phạm vi giám sát cổng uplink của `device` (bảng `MonitoredUplink`).
+
+    Nguồn: (1) cổng local của link switch↔switch ĐANG CÒN MỚI (`is_stale=False`) — được ghim và GIỮ LẠI
+    kể cả khi link down hay chuyển stale; (2) tên trong `Device.uplink_ports`. Link stale mà chưa từng được
+    thấy còn mới KHÔNG được đưa vào. Dòng `manual` bị bỏ khi tên không còn trong `uplink_ports` (trừ khi cổng
+    cũng có link topology). `Interface.port_mode`/`is_uplink` KHÔNG tham gia — trunk không tự là đối tượng
+    cảnh báo.
+
+    Tên thủ công: khớp chính xác (không phân biệt hoa/thường) luôn được ưu tiên; không có thì thử viết tắt
+    (`_port_alias_key`, chỉ Gi/GigabitEthernet và XGE/XGigabitEthernet) và chỉ nhận khi ra ĐÚNG MỘT cổng —
+    nhiều cổng ứng viên là mơ hồ (WARNING nêu tên, không tự chọn).
+
+    Gọi mỗi lượt đánh giá (≈3 truy vấn đọc); chỉ ghi khi phạm vi đổi."""
+    from apps.devices.models import Interface, TopologyLink
+
+    rows = list(Interface.objects.filter(device=device).values_list("pk", "name"))
+    by_key = {_port_key(name): pk for pk, name in rows}
+    valid = set(by_key.values())
+    exact_ids: dict[str, set[int]] = {}
+    alias_ids: dict[str, set[int]] = {}
+    for pk, name in rows:
+        exact_ids.setdefault(_port_key(name), set()).add(pk)
+        alias_ids.setdefault(_port_alias_key(name), set()).add(pk)
+    name_of = dict(rows)
+
+    from_topology: set[int] = set()
+    for iface_id, port in TopologyLink.objects.filter(
+        local_device=device, link_kind="switch", is_stale=False,
+    ).values_list("local_interface_id", "local_port"):
+        pk = iface_id if iface_id in valid else by_key.get(_port_key(port))
+        if pk is not None:
+            from_topology.add(pk)
+
+    from_manual: set[int] = set()
+    unmatched: list[str] = []
+    ambiguous: list[tuple[str, tuple[str, ...]]] = []
+    for name in _manual_port_names(device.uplink_ports):
+        candidates = exact_ids.get(_port_key(name)) or alias_ids.get(_port_alias_key(name)) or set()
+        if len(candidates) == 1:
+            from_manual.add(next(iter(candidates)))
+        elif candidates:
+            ambiguous.append((name, tuple(sorted(name_of[pk] for pk in candidates))))
+        else:
+            unmatched.append(name)
+
+    pins = dict(MonitoredUplink.objects.filter(device=device).values_list("interface_id", "source"))
+
+    new_rows = []
+    for pk in sorted(from_topology | from_manual):
+        if pk not in pins:
+            source = MonitoredUplink.SOURCE_TOPOLOGY if pk in from_topology else MonitoredUplink.SOURCE_MANUAL
+            new_rows.append(MonitoredUplink(device=device, interface_id=pk, source=source))
+            pins[pk] = source
+    if new_rows:
+        # ignore_conflicts: 2 lượt đánh giá đồng thời cùng ghim 1 cổng (unique theo interface) không được ném lỗi.
+        MonitoredUplink.objects.bulk_create(new_rows, ignore_conflicts=True)
+
+    upgrade = [pk for pk, src in pins.items()
+               if src == MonitoredUplink.SOURCE_MANUAL and pk in from_topology]
+    if upgrade:
+        MonitoredUplink.objects.filter(device=device, interface_id__in=upgrade).update(
+            source=MonitoredUplink.SOURCE_TOPOLOGY)
+        for pk in upgrade:
+            pins[pk] = MonitoredUplink.SOURCE_TOPOLOGY
+
+    drop = [pk for pk, src in pins.items()
+            if src == MonitoredUplink.SOURCE_MANUAL and pk not in from_manual and pk not in from_topology]
+    if drop:
+        MonitoredUplink.objects.filter(device=device, interface_id__in=drop).delete()
+        for pk in drop:
+            pins.pop(pk, None)
+
+    return UplinkScope(tuple(sorted(pins)), tuple(unmatched), tuple(ambiguous))
+
+
+def _uplink_statuses(device: Device, interface_ids, since) -> dict[int, str | None]:
+    """Trạng thái MỚI NHẤT (trong cửa sổ `since`) của từng cổng; `None` = không có dữ liệu."""
+    ids = list(interface_ids)
     if _use_cache():
-        uplink_ids = list(Interface.objects.filter(device=device, is_uplink=True).values_list("id", flat=True))
-        if not uplink_ids:
-            return None
         snap = _fresh_latest(device, since)
-        if not snap:
-            return None
-        ifs = snap.get("interfaces") or {}
-        for uid in uplink_ids:
-            status = (ifs.get(str(uid)) or {}).get("status")
-            if status is None:
-                return None
-            if status != "up":
-                return 0.0
-        return 1.0
+        ifs = (snap or {}).get("interfaces") or {}
+        return {pk: (ifs.get(str(pk)) or {}).get("status") for pk in ids}
 
+    from apps.devices.models import Interface
     from apps.metrics.models import InterfaceStats
     from django.db.models import OuterRef, Subquery
 
-    uplinks = Interface.objects.filter(device=device, is_uplink=True)
-    if not uplinks.exists():
-        return None
-
-    # Annotate latest status per uplink in one query instead of N queries
+    # 1 truy vấn: trạng thái mới nhất của mọi cổng (thay vì N truy vấn).
     latest_sq = (InterfaceStats.objects
                  .filter(interface=OuterRef("pk"), timestamp__gte=since)
                  .order_by("-timestamp")
                  .values("status")[:1])
-    for uplink in uplinks.annotate(latest_status=Subquery(latest_sq)):
-        if uplink.latest_status is None:
-            return None
-        if uplink.latest_status != "up":
-            return 0.0
+    got = {i.pk: i.latest_status
+           for i in Interface.objects.filter(pk__in=ids).annotate(latest_status=Subquery(latest_sq))}
+    return {pk: got.get(pk) for pk in ids}
+
+
+def _reduce_if_status(statuses: dict[int, str | None]) -> float | None:
+    """0.0 nếu có cổng đã BIẾT là không up; None nếu chưa đủ dữ liệu; 1.0 nếu mọi cổng đều up.
+
+    Cổng không up thắng cổng thiếu dữ liệu: một cổng đã down thì phải báo, dù cổng khác chưa có trạng thái
+    (bản cũ trả None ngay khi gặp cổng thiếu đầu tiên, nên che mất cổng down nằm phía sau)."""
+    if any(s is not None and s != "up" for s in statuses.values()):
+        return 0.0
+    if any(s is None for s in statuses.values()):
+        return None
     return 1.0
 
 
-def _sustained_if_status(device: Device, window_since) -> float | None:
-    """Sustained version of if_status within a time window.
+def _check_if_status(device: Device, since, interface_ids=None) -> float | None:
+    """0.0 nếu có cổng giám sát nào DOWN, 1.0 nếu tất cả UP, None nếu chưa xác định phạm vi / thiếu dữ liệu."""
+    ids = list(interface_ids) if interface_ids is not None else list(_sync_uplink_scope(device).interface_ids)
+    if not ids:
+        return None
+    return _reduce_if_status(_uplink_statuses(device, ids, since))
 
-    Returns 0.0 if ANY uplink had a non-up status within window.
-    Returns 1.0 if all uplinks stayed up within window and we have at least one sample per uplink.
-    Returns None if no uplinks or not enough data.
+
+def _sustained_if_status(device: Device, window_since, interface_ids=None) -> float | None:
+    """Sustained version of if_status within a time window, trên các cổng GIÁM SÁT (không phải mọi trunk).
+
+    Returns 0.0 if ANY monitored port had a non-up status within window.
+    Returns 1.0 if all monitored ports stayed up within window and we have a recent sample per port.
+    Returns None if scope undetermined or not enough data.
     """
     from apps.devices.models import Interface
+
+    ids = list(interface_ids) if interface_ids is not None else list(_sync_uplink_scope(device).interface_ids)
+    if not ids:
+        return None
 
     from django.conf import settings as _settings
     _min_grace = getattr(_settings, "ALERT_GRACE_PERIOD_SECS", 120)
@@ -326,28 +465,23 @@ def _sustained_if_status(device: Device, window_since) -> float | None:
     min_ts = timezone.now() - timedelta(seconds=grace_secs)
 
     if _use_cache():
-        uplink_ids = list(Interface.objects.filter(device=device, is_uplink=True).values_list("id", flat=True))
-        if not uplink_ids:
-            return None
-        for uid in uplink_ids:
-            series = metrics_cache.get_if_series(uid, window_since)
+        series_by_id = {uid: metrics_cache.get_if_series(uid, window_since) for uid in ids}
+        # Cổng đã có mẫu không-up trong cửa sổ thì báo ngay, không để cổng thiếu mẫu khác che đi.
+        if any(s.get("status") != "up" for series in series_by_id.values() for s in series):
+            return 0.0
+        for series in series_by_id.values():
             if not series:
                 return None  # thiếu dữ liệu → chưa kết luận
-            if any(s.get("status") != "up" for s in series):
-                return 0.0
-            latest = series[-1]
-            if metrics_cache.epoch_to_dt(latest.get("ts", 0)) < min_ts:
+            if metrics_cache.epoch_to_dt(series[-1].get("ts", 0)) < min_ts:
                 return None  # mẫu mới nhất quá cũ (poll kẹt)
         return 1.0
 
     from apps.metrics.models import InterfaceStats
     from django.db.models import Exists, OuterRef, Subquery
 
-    uplinks_qs = Interface.objects.filter(device=device, is_uplink=True)
-    if not uplinks_qs.exists():
-        return None
+    uplinks_qs = Interface.objects.filter(pk__in=ids)
 
-    # Annotate each uplink with: has non-up in window, latest timestamp, latest status
+    # Annotate each monitored port with: has non-up in window, latest timestamp, latest status
     nonup_in_window = InterfaceStats.objects.filter(
         interface=OuterRef("pk"), timestamp__gte=window_since
     ).exclude(status="up")
@@ -366,11 +500,11 @@ def _sustained_if_status(device: Device, window_since) -> float | None:
         latest_status=Subquery(latest_status_sq),
     ))
 
-    # If ANY uplink goes non-up within the window -> down (0).
+    # If ANY monitored port goes non-up within the window -> down (0).
     if any(u.has_nonup for u in uplinks):
         return 0.0
 
-    # Require at least one recent sample per uplink (avoid false "up" when polling is stuck).
+    # Require at least one recent sample per port (avoid false "up" when polling is stuck).
     for uplink in uplinks:
         if uplink.latest_ts is None:
             return None
@@ -379,6 +513,173 @@ def _sustained_if_status(device: Device, window_since) -> float | None:
         if uplink.latest_status != "up":
             return 0.0
     return 1.0
+
+
+def _evaluate_if_status(device: Device, rule: AlertRule, since) -> None:
+    """Đánh giá rule `if_status` trên PHẠM VI giám sát (cổng topology switch↔switch + `uplink_ports`).
+
+    Khác các metric khác ở 3 điểm (hướng A, 2026-10-15; prod có 11 alert "Switch Uplink Down" kẹt 53–115
+    ngày vì `is_uplink` = mọi cổng trunk):
+      * Phạm vi chưa xác định → WARNING mỗi lượt và KHÔNG fire/resolve/đóng gì — không mặc định "mọi uplink
+        đều up" (sẽ resolve + RECOVERED cho alert chưa từng được chứng minh là đã hết).
+      * Alert đang active mà cổng gây ra nó (`Alert.down_interface_ids`) không còn trong phạm vi → đóng với
+        `closed_reason="scope_changed"`, KHÔNG gửi RECOVERED (xem `_settle_if_status_alerts`).
+      * Vẫn MỘT alert cho mỗi (thiết bị, rule): cổng thứ hai rớt khi alert đã active chỉ được ghi thêm vào
+        `down_interface_ids`, không có thông báo riêng (giới hạn đã biết — thuộc bản nâng cấp tách alert theo cổng).
+    """
+    scope = _sync_uplink_scope(device)
+    if scope.unmatched_manual:
+        logger.warning(
+            "Switch %s: uplink_ports có tên không khớp cổng nào của thiết bị (kiểm tra tên cổng): %s",
+            device.name, ", ".join(scope.unmatched_manual),
+        )
+    for name, candidates in scope.ambiguous_manual:
+        logger.warning(
+            "Switch %s: uplink_ports '%s' khớp nhiều cổng (%s) — mơ hồ nên không tự chọn; ghi đúng tên cổng",
+            device.name, name, ", ".join(candidates),
+        )
+    ids = list(scope.interface_ids)
+    if not ids:
+        logger.warning(
+            "Rule '%s' (id=%s) — %s: chưa xác định được cổng uplink cần giám sát (chưa có link switch↔switch "
+            "còn mới và uplink_ports không khớp cổng nào) — chưa đủ dữ liệu, không fire/resolve",
+            rule.name, rule.pk, device.name,
+        )
+        return
+
+    # Ảnh chụp các alert đang active + nguyên nhân của chúng, đọc TRƯỚC trạng thái cổng. Mọi quyết định đóng/
+    # resolve bên dưới chỉ áp cho ĐÚNG những alert này ở ĐÚNG trạng thái này: alert do worker khác tạo (hoặc
+    # nguyên nhân được worker khác thêm vào) sau lúc đó dựa trên dữ liệu mới hơn dữ liệu ta đang cầm, nên
+    # không thuộc quyết định này (xem `_settle_if_status_alerts`).
+    observed = {
+        pk: _norm_causes(causes)
+        for pk, causes in Alert.objects.filter(device=device, rule=rule, is_active=True)
+        .values_list("pk", "down_interface_ids")
+    }
+
+    statuses = _uplink_statuses(device, ids, since)
+    down = sorted(pk for pk, s in statuses.items() if s is not None and s != "up")
+    instant = _reduce_if_status(statuses)
+
+    # Thiếu trạng thái của MỘT PHẦN cổng giám sát (còn cổng khác có): thường là cổng đã ghim không còn trong
+    # snapshot (tháo module, đổi tên) — nếu không nêu ra, nó chặn resolve im lặng mãi. Thiếu TOÀN BỘ là thiết bị
+    # không trả dữ liệu (đã có alert offline) nên không ồn thêm ở đây.
+    missing = [pk for pk, s in statuses.items() if s is None]
+    if missing and len(missing) < len(ids):
+        from apps.devices.models import Interface
+        names = sorted(Interface.objects.filter(pk__in=missing).values_list("name", flat=True))
+        logger.warning(
+            "Rule '%s' (id=%s) — %s: %d/%d cổng giám sát chưa có trạng thái (%s) — chưa đủ dữ liệu cho cổng đó; "
+            "nếu cổng không còn tồn tại, bỏ giám sát bằng cách xoá dòng trong 'Cổng uplink giám sát' (admin)",
+            rule.name, rule.pk, device.name, len(missing), len(ids), ", ".join(names),
+        )
+
+    has_active = bool(observed)
+    if has_active and down and any(
+        known is None or not set(down) <= set(known) for known in observed.values()
+    ):
+        _extend_if_status_causes(device, rule, down)
+
+    if rule.duration_min and rule.duration_min > 0:
+        window_since = timezone.now() - timedelta(minutes=int(rule.duration_min))
+        value = _sustained_if_status(device, window_since, ids)
+        if value is None:
+            # Như nhánh sustained chung: resolve KHÔNG cần sustain — chỉ FIRE mới cần.
+            if has_active and instant is not None and _decide_transition(rule, instant, True) == "resolve":
+                _settle_if_status_alerts(device, rule, ids, observed)
+            return
+    else:
+        value = instant
+
+    if value is None:
+        return
+    action = _decide_transition(rule, value, has_active)
+    if action == "fire":
+        # Sustained có thể báo 0.0 trong khi cổng đã up lại ở lần đọc tức thời (down rỗng) → ghi cả phạm vi:
+        # nguyên nhân nằm đâu đó trong tập này, và "chưa biết" (None) sẽ bị coi là alert cũ.
+        _fire_alert(device, rule, value, down_interface_ids=down or ids)
+    elif action == "resolve":
+        _settle_if_status_alerts(device, rule, ids, observed)
+
+
+def _norm_causes(causes) -> list[int] | None:
+    """Dạng so sánh của `Alert.down_interface_ids`: danh sách đã sắp, hoặc None (nổ theo ngữ nghĩa cũ)."""
+    return None if causes is None else sorted(causes)
+
+
+def _extend_if_status_causes(device: Device, rule: AlertRule, down: list[int]) -> None:
+    """Ghi thêm `down` vào `down_interface_ids` của alert active (đọc-sửa-ghi dưới khoá Device)."""
+    with transaction.atomic():
+        Device.objects.select_for_update().filter(pk=device.pk).first()
+        for alert in Alert.objects.select_for_update().filter(device=device, rule=rule, is_active=True):
+            current = alert.down_interface_ids
+            merged = sorted(set(current or []) | set(down))
+            if current is None or merged != sorted(current):
+                Alert.objects.filter(pk=alert.pk).update(down_interface_ids=merged)
+
+
+def _close_alert_scope_changed(alert: Alert) -> None:
+    """Đóng 1 alert `if_status` vì cổng gây ra nó không còn trong phạm vi giám sát. Gọi dưới khoá Device.
+
+    KHÔNG ghi AlertNotification, KHÔNG gửi RECOVERED: chưa có dữ liệu nào cho thấy sự cố đã hết, chỉ là cổng
+    đó không còn được giám sát. `closed_reason` giữ cho late-recovery (`_queue_late_recovery_if_resolved`) bỏ qua."""
+    now = timezone.now()
+    stamp = timezone.localtime(now).strftime("%H:%M %d/%m/%Y")
+    note = f" [Đã đóng vì thay đổi phạm vi giám sát cổng uplink lúc {stamp} — không phải đã hồi phục]"
+    Alert.objects.filter(pk=alert.pk).update(
+        is_active=False, resolved_at=now, message=alert.message + note,
+        closed_reason=Alert.CLOSED_SCOPE_CHANGED,
+    )
+    logger.info("ALERT closed (thay đổi phạm vi giám sát): %s — alert #%s", alert.device.name, alert.pk)
+
+
+def _close_alerts_out_of_scope(
+    device: Device, rule: AlertRule, monitored_ids, only_if: Callable[[Alert], bool] | None = None,
+) -> int:
+    """Đóng (`scope_changed`, không RECOVERED) mọi alert active của (device, rule) mà cổng gây ra nó không
+    còn trong `monitored_ids`; alert nổ theo ngữ nghĩa cũ (`down_interface_ids is None`) cũng thuộc nhóm này.
+    Trả số alert đã đóng.
+
+    Quyết định đọc lại alert DƯỚI khoá Device (cùng thứ tự khoá Device → Alert như `_fire_alert`/
+    `_resolve_alert`): (a) 2 lượt đánh giá đồng thời (poll inline + safety net) không cùng đóng 1 alert;
+    (b) `_fire_alert` của lượt khác chờ việc đóng commit rồi mới đọc "alert active" — nếu không, nó thấy alert
+    cũ còn active và bỏ qua, để thiết bị có cổng down mà không có alert nào.
+
+    `only_if(alert)` (tuỳ chọn, gọi dưới khoá với dòng vừa đọc lại): alert nào không thoả thì BỎ QUA — dùng để
+    giới hạn việc đóng trong đúng những alert mà người gọi đã quyết định trên đó."""
+    monitored = set(monitored_ids)
+    closed = 0
+    with transaction.atomic():
+        Device.objects.select_for_update().filter(pk=device.pk).first()
+        for alert in Alert.objects.select_for_update().filter(device=device, rule=rule, is_active=True):
+            if only_if is not None and not only_if(alert):
+                continue
+            causes = alert.down_interface_ids
+            if causes is None or not (set(causes) & monitored):
+                _close_alert_scope_changed(alert)
+                closed += 1
+    return closed
+
+
+def _settle_if_status_alerts(device: Device, rule: AlertRule, monitored_ids, observed: dict) -> None:
+    """Mọi cổng giám sát đã UP và có alert đang active: hồi phục thật hay chỉ là cổng đã rời phạm vi?
+
+    * Alert có `down_interface_ids` giao với phạm vi hiện tại → cổng gây ra nó (còn được giám sát) đã up →
+      hồi phục thật → `_resolve_alert` (RECOVERED như thường).
+    * Alert nổ theo ngữ nghĩa cũ (`None`) hoặc mọi cổng gây ra nó đã rời phạm vi → đóng `scope_changed`,
+      KHÔNG RECOVERED (mọi cổng đang giám sát đều up nhưng đó không phải lý do alert này nổ).
+
+    `observed` = {pk alert: nguyên nhân đã chuẩn hoá} đọc TRƯỚC khi đọc trạng thái cổng. Quyết định "mọi cổng
+    đều up" chỉ có giá trị với alert đúng như đã thấy lúc đó: alert tạo MỚI sau đó (cổng của nó down theo dữ
+    liệu mới hơn) hoặc alert được worker khác thêm nguyên nhân thì KHÔNG bị đóng/resolve ở đây — vòng đánh giá
+    kế tiếp quyết định lại với dữ liệu của nó. Bản đầu của A đóng ngoài-phạm vi rồi gọi `_resolve_alert` cho
+    MỌI alert active nên resolve luôn alert vừa tạo giữa hai bước (review ngoài, 2026-10-15)."""
+    def as_observed(alert: Alert) -> bool:
+        return alert.pk in observed and _norm_causes(alert.down_interface_ids) == observed[alert.pk]
+
+    _close_alerts_out_of_scope(device, rule, monitored_ids, only_if=as_observed)
+    # Còn alert nào active (và đúng như đã thấy) ở đây là alert hồi phục thật. Không còn → tự return.
+    _resolve_alert(device, rule, only_if=as_observed)
 
 
 def _uplink_traffic_max(device: Device, since, direction: str) -> float | None:
@@ -879,6 +1180,11 @@ def _evaluate_rule(device: Device, rule: AlertRule, since) -> None:
     if not getter:
         return
 
+    if rule.metric == "if_status":
+        # Có phạm vi giám sát riêng + đóng alert khi đổi phạm vi (không RECOVERED) — xem `_evaluate_if_status`.
+        _evaluate_if_status(device, rule, since)
+        return
+
     has_active = Alert.objects.filter(device=device, rule=rule, is_active=True).exists()
 
     # duration_min: if set, require condition to be sustained for the whole window.
@@ -886,9 +1192,6 @@ def _evaluate_rule(device: Device, rule: AlertRule, since) -> None:
         window_since = timezone.now() - timedelta(minutes=int(rule.duration_min))
         if rule.metric in SUSTAINABLE_METRICS:
             value = _sustained_cpu_mem(device, rule, window_since)
-        elif rule.metric == "if_status":
-            # if_status semantics: 1 if all uplinks up, 0 if any down
-            value = _sustained_if_status(device, window_since)
         elif rule.metric in ("uplink_in_mbps_max", "uplink_out_mbps_max"):
             value = _sustained_uplink_traffic_max(device, rule, window_since)
         elif rule.metric in ("vm_count_running", "vm_repl_unhealthy"):
@@ -1002,7 +1305,8 @@ def _persist_incident_snapshot(device: Device) -> None:
         logger.warning("persist incident snapshot (dev=%s) failed: %s", device.name, exc)
 
 
-def _fire_alert(device: Device, rule: AlertRule, value: float) -> None:
+def _fire_alert(device: Device, rule: AlertRule, value: float,
+                down_interface_ids: list[int] | None = None) -> None:
     def _fmt_metric(metric: str, v: float) -> str:
         if metric in ("cpu_percent", "mem_percent"):
             return f"{v:.1f}%"
@@ -1092,6 +1396,8 @@ def _fire_alert(device: Device, rule: AlertRule, value: float) -> None:
                 message=message,
                 metric_value=float(value),
                 is_active=True,
+                # Chỉ rule if_status truyền vào; None = không biết (alert cũ / metric khác).
+                down_interface_ids=(list(down_interface_ids) if down_interface_ids is not None else None),
             )
             is_flapping = _is_flapping(device, rule)
             if not is_flapping:
@@ -1112,7 +1418,12 @@ def _fire_alert(device: Device, rule: AlertRule, value: float) -> None:
     logger.warning("ALERT fired: %s", alert.message)
 
 
-def _resolve_alert(device: Device, rule: AlertRule) -> None:
+def _resolve_alert(
+    device: Device, rule: AlertRule, only_if: Callable[[Alert], bool] | None = None,
+) -> None:
+    # `only_if(alert)` (tuỳ chọn, gọi dưới khoá Device với dòng vừa đọc lại): chỉ resolve alert thoả — người gọi
+    # đã quyết định trên 1 tập alert cụ thể (xem `_settle_if_status_alerts`), alert xuất hiện/đổi sau đó thì không.
+    #
     # ⚠️ Alert được eval từ CẢ inline sau mỗi poll (_poll_device_once) LẪN periodic
     # evaluate_alert_rules (safety net) — 2 đường có thể chạy gần như đồng thời trên các
     # worker Celery khác nhau (--concurrency=4). Bản cũ đọc alerts_to_resolve (không lock)
@@ -1126,6 +1437,8 @@ def _resolve_alert(device: Device, rule: AlertRule) -> None:
         alerts_to_resolve = list(
             Alert.objects.select_for_update().filter(device=device, rule=rule, is_active=True)
         )
+        if only_if is not None:
+            alerts_to_resolve = [a for a in alerts_to_resolve if only_if(a)]
         if not alerts_to_resolve:
             return
         resolved_at = timezone.now()

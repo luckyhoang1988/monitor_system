@@ -2,7 +2,7 @@ from django.contrib import admin
 from django.db import transaction
 from apps.accounts.admin_mixins import AdminRBACMixin
 from .engine import close_alerts_for_disabled_rule
-from .models import AlertRule, Alert, AlertNotification, AlertConfig
+from .models import AlertRule, Alert, AlertNotification, AlertConfig, MonitoredUplink
 
 
 @admin.register(AlertConfig)
@@ -40,5 +40,15 @@ class AlertAdmin(AdminRBACMixin, admin.ModelAdmin):
     list_display   = ("device", "rule", "severity", "metric_value", "is_active", "triggered_at")
     list_filter    = ("severity", "is_active", "device__device_type")
     search_fields  = ("device__name",)
-    readonly_fields = ("triggered_at", "resolved_at")
+    readonly_fields = ("triggered_at", "resolved_at", "closed_reason", "down_interface_ids")
     inlines = [AlertNotificationInline]
+
+
+@admin.register(MonitoredUplink)
+class MonitoredUplinkAdmin(AdminRBACMixin, admin.ModelAdmin):
+    """Phạm vi giám sát của rule `if_status`. Engine ghi dòng; XOÁ 1 dòng ở đây = ngừng giám sát cổng đó
+    (cách duy nhất bỏ 1 cổng topology, vd cáp đã gỡ hẳn — cổng đã xác lập được giữ khi link stale)."""
+    list_display = ("device", "interface", "source", "pinned_at")
+    list_filter = ("source", "device__device_type")
+    search_fields = ("device__name", "interface__name")
+    readonly_fields = ("pinned_at",)

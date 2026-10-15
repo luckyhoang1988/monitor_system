@@ -1,6 +1,6 @@
 from django.core.exceptions import ValidationError
 from django.db import models
-from apps.devices.models import Device
+from apps.devices.models import Device, Interface
 
 CHANNEL_CHOICES = [
     ("email",    "Email"),
@@ -175,6 +175,8 @@ class AlertRule(models.Model):
 class Alert(models.Model):
     # Lý do alert bị ĐÓNG mà KHÔNG phải vì sự cố đã hồi phục (xem `closed_reason`).
     CLOSED_RULE_DISABLED = "rule_disabled"
+    # Alert `if_status` bị đóng vì cổng gây ra nó không còn nằm trong phạm vi giám sát (xem `MonitoredUplink`).
+    CLOSED_SCOPE_CHANGED = "scope_changed"
 
     device          = models.ForeignKey(Device, on_delete=models.CASCADE, related_name="alerts")
     rule            = models.ForeignKey(AlertRule, on_delete=models.CASCADE, related_name="alerts")
@@ -192,6 +194,11 @@ class Alert(models.Model):
     # cho thấy sự cố đã hết (hạng mục 1.4, review sau 30b09aa). `db_default` để mã cũ (khi rollback) vẫn
     # INSERT được dù không biết cột này.
     closed_reason   = models.CharField(max_length=20, blank=True, default="", db_default="")
+    # Chỉ dùng cho rule `if_status`: pk các cổng (Interface) đã được thấy KHÔNG up trong lúc alert này active.
+    # `None` = alert nổ theo ngữ nghĩa CŨ ("mọi cổng trunk/hybrid", trước khi có `MonitoredUplink`) hoặc không
+    # phải if_status → chưa biết cổng nào gây ra nó. Engine dùng tập này để phân biệt "cổng đã hồi phục"
+    # (RECOVERED) với "cổng gây ra alert đã bị loại khỏi phạm vi giám sát" (đóng, không RECOVERED).
+    down_interface_ids = models.JSONField(null=True, blank=True)
 
     class Meta:
         verbose_name = "Alert"
@@ -205,6 +212,37 @@ class Alert(models.Model):
         """Use the same metric semantics as rule thresholds in the web UI."""
         rule = AlertRule(metric=self.rule.metric, threshold=self.metric_value)
         return rule.threshold_label
+
+
+class MonitoredUplink(models.Model):
+    """Cổng uplink của 1 thiết bị mà rule `if_status` ("Switch Uplink Down") phải theo dõi trạng thái.
+
+    Phạm vi giám sát được XÁC LẬP từ 2 nguồn rồi GIỮ LẠI (engine ghi, xem `_sync_uplink_scope`):
+      * topology — cổng local của 1 `TopologyLink(link_kind="switch")` đang CÒN MỚI (chưa stale) lúc engine
+        nhìn thấy nó. Dòng được giữ khi link sau đó down hoặc chuyển stale: nếu chỉ lấy link "chưa stale" thì
+        uplink đứt sẽ biến mất khỏi phạm vi rồi bị coi là đã hồi phục. Link stale mà engine CHƯA TỪNG thấy
+        còn mới thì KHÔNG được đưa vào (không tự nhập link cũ vào danh sách).
+      * manual — tên cổng trong `Device.uplink_ports`. Dòng này bị bỏ khi tên bị xoá khỏi `uplink_ports`
+        (người vận hành chủ động đổi cấu hình), trừ khi cổng cũng đã có link topology.
+    Xoá 1 dòng (Django admin) = ngừng giám sát cổng đó — cách duy nhất để bỏ 1 cổng topology (vd cáp đã gỡ hẳn).
+    KHÔNG liên quan `Interface.port_mode`/`is_uplink`: cổng trunk không tự trở thành đối tượng cảnh báo.
+    """
+    SOURCE_TOPOLOGY = "topology"
+    SOURCE_MANUAL = "manual"
+    SOURCE_CHOICES = [(SOURCE_TOPOLOGY, "Topology switch↔switch"), (SOURCE_MANUAL, "uplink_ports thủ công")]
+
+    device    = models.ForeignKey(Device, on_delete=models.CASCADE, related_name="monitored_uplinks")
+    interface = models.OneToOneField(Interface, on_delete=models.CASCADE, related_name="monitored_uplink")
+    source    = models.CharField(max_length=10, choices=SOURCE_CHOICES, default=SOURCE_TOPOLOGY)
+    pinned_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Cổng uplink giám sát"
+        verbose_name_plural = "Cổng uplink giám sát"
+        ordering = ["device__name", "interface__name"]
+
+    def __str__(self) -> str:
+        return f"{self.device.name}: {self.interface.name} ({self.source})"
 
 
 class AlertConfig(models.Model):
