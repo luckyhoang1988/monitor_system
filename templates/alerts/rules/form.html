@@ -12,6 +12,7 @@
       <div class="card-body">
         <form method="post" novalidate>
           {% csrf_token %}
+          {% if form.non_field_errors %}<div class="alert alert-danger py-2 small">{{ form.non_field_errors.0 }}</div>{% endif %}
 
           <div class="mb-3">
             <label class="form-label fw-medium">Tên rule <span class="text-danger">*</span></label>
@@ -23,6 +24,8 @@
             <div class="col-md-6">
               <label class="form-label fw-medium">Loại thiết bị</label>
               {{ form.device_type }}
+              {% if form.device_type.errors %}<div class="text-danger small mt-1">{{ form.device_type.errors.0 }}</div>
+              {% elif form.instance.pk and form.instance.enabled %}<div class="form-text">Chỉ đổi được khi rule đang tắt.</div>{% endif %}
             </div>
             <div class="col-md-6">
               <label class="form-label fw-medium">Metric <span class="text-danger">*</span></label>

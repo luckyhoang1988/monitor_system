@@ -1,3 +1,4 @@
+from django.core.exceptions import ValidationError
 from django.db import models
 from apps.devices.models import Device
 
@@ -91,8 +92,36 @@ class AlertRule(models.Model):
         verbose_name = "Alert Rule"
         ordering = ["severity", "name"]
 
+    # Hiện cho người dùng khi form/admin từ chối đổi phạm vi của rule đang bật (xem `clean`).
+    SCOPE_LOCKED_MESSAGE = (
+        "Rule đang bật nên chưa đổi được loại thiết bị: alert đang active của loại cũ sẽ không còn rule nào "
+        "đánh giá và bị kẹt vĩnh viễn. Hãy tắt rule trước (bỏ tick “Kích hoạt” rồi lưu, hoặc dùng nút "
+        "Tắt rule), sau đó đổi loại thiết bị và bật lại."
+    )
+
     def __str__(self) -> str:
         return f"{self.name} ({self.severity})"
+
+    def clean(self) -> None:
+        """Rule đang BẬT không được đổi `device_type` (sau review thứ ba của hạng mục 1.4).
+
+        Engine chỉ đánh giá rule `enabled=True` và chỉ cho thiết bị thuộc `device_type__in=[loại, "all"]`;
+        `_resolve_alert` chỉ được gọi từ đó. Đổi "Tất cả" → "HyperV" trên rule đang bật làm alert đang active
+        của Switch không còn rule nào đánh giá → `is_active=True` mãi mãi. Bắt buộc đi qua đường tắt rule
+        (đóng alert active, ghi lý do) → đổi phạm vi → bật lại.
+
+        * So với giá trị ĐÃ LƯU trong DB (form đã ghi giá trị mới lên instance trước khi gọi clean).
+        * Cho phép: rule đã tắt; hoặc cùng lần lưu đó tắt rule (đường đóng alert sẽ lo alert của phạm vi cũ).
+        * Đặt ở model để form UI và Django admin (cùng ModelForm) đi chung 1 quy tắc. KHÔNG chặn được thao
+          tác ghi thẳng (`save()` từ code/CLI như `seed_alert_rules --overwrite`) — đó là hành động có chủ đích
+          của người vận hành.
+        """
+        super().clean()
+        if self.pk is None or not self.enabled:
+            return
+        stored = AlertRule.objects.filter(pk=self.pk).values("enabled", "device_type").first()
+        if stored and stored["enabled"] and stored["device_type"] != self.device_type:
+            raise ValidationError({"device_type": self.SCOPE_LOCKED_MESSAGE})
 
     @property
     def metric_label(self) -> str:
