@@ -38,3 +38,13 @@ debug-*.log
 
 # TLS certificates (private keys — never commit)
 nginx/certs/
+
+# Bảng tính chứa IP/tài khoản/mật khẩu thiết bị (vd "SERVER PFVNip.xlsx") — repo GitHub là PUBLIC
+*.xlsx
+*.xls
+
+# Bản sao lưu cấu hình thiết bị (chứa community SNMP, hash mật khẩu...) — repo GitHub là PUBLIC
+backups/
+
+# Nơi làm việc tạm của agent (probe/dump thiết bị, script một lần) — không thuộc mã nguồn, có thể chứa dữ liệu thật
+scratchpad/

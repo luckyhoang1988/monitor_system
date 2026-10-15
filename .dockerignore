@@ -45,6 +45,10 @@ venv/
 .venv/
 env/
 
+# Bảng tính chứa IP/tài khoản/mật khẩu thiết bị (vd "SERVER PFVNip.xlsx") — không thuộc image
+*.xlsx
+*.xls
+
 # Dữ liệu vận hành / backup — không phải mã nguồn, không thuộc image
 db.sqlite3
 backups/
