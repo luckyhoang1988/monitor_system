@@ -5,6 +5,18 @@ from factory.django import DjangoModelFactory
 from apps.devices.models import Device
 
 
+@pytest.fixture(autouse=True)
+def _fast_password_hasher(settings):
+    """Băm mật khẩu nhanh cho MỌI test.
+
+    Hasher mặc định của Django là PBKDF2 với 1.000.000 vòng (đo 0,66s/lần trên máy dev, ~1,6s khi máy
+    bận). Mỗi fixture `create_user(password=...)` + `client.login(...)` băm 2 lần nên mỗi test đăng nhập
+    mất 1,3–3,3s CHỈ ở setup — 45 file test dùng; đo thật: suite 481s → 62,8s khi dùng hasher nhanh. Không
+    test nào kiểm tra định dạng băm. Chỉ đổi cho test: cấu hình dev/prod giữ nguyên hasher mạnh.
+    """
+    settings.PASSWORD_HASHERS = ["django.contrib.auth.hashers.MD5PasswordHasher"]
+
+
 class DeviceFactory(DjangoModelFactory):
     class Meta:
         model = Device
