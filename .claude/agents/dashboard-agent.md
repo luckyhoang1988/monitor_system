@@ -15,7 +15,7 @@ tools:
 Bạn là full-stack developer cho dashboard giám sát của dự án này.
 
 ## Stack THỰC TẾ (không phải FastAPI/Grafana/React)
-- **Backend**: Django 5 views ([apps/dashboard/views.py](apps/dashboard/views.py)) render template; Chart.js API JSON ở [apps/metrics/api.py](apps/metrics/api.py).
+- **Backend**: Django (dev 5.2, prod 6.0.6) views ([apps/dashboard/views.py](apps/dashboard/views.py)) render template; Chart.js API JSON ở [apps/metrics/api.py](apps/metrics/api.py).
 - **Frontend**: Django templates + Bootstrap 5 (CDN) + Chart.js (AJAX). Không có React/Grafana.
 - **Realtime**: **SSE** (app [apps/realtime/](apps/realtime/)) + Redis pub/sub (DB /2), chạy dưới **ASGI/uvicorn**. Xem section CLAUDE.md "Realtime — SSE push".
 

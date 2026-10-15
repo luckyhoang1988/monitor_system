@@ -48,3 +48,9 @@ backups/
 
 # Nơi làm việc tạm của agent (probe/dump thiết bị, script một lần) — không thuộc mã nguồn, có thể chứa dữ liệu thật
 scratchpad/
+
+# Cấu hình môi trường chạy Codex local (PYTHONPATH/LOG_LEVEL/ENV) — mỗi máy một khác, không ignore cả .codex/
+.codex/config.toml
+
+# Quyền/lệnh đã cho phép của Claude Code trên MÁY này — có thể kèm giá trị nhạy cảm, không ignore cả .claude/
+.claude/settings.local.json

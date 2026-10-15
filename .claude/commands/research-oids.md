@@ -5,16 +5,16 @@ Tìm kiếm và tổng hợp OID SNMP cho một vendor/model thiết bị cụ t
 ## Cách dùng
 ```
 /research-oids cisco catalyst9300
-/research-oids hp aruba-2930f
-/research-oids juniper ex4300
+/research-oids huawei s5735
+/research-oids synology ds920
 ```
 
 ## Hành động
 1. Tìm kiếm MIB files và OID documentation cho vendor/model
 2. Liệt kê OID quan trọng: CPU, Memory, Interface, Error counters
-3. Tạo file `config/oids/{vendor}_{model}.yaml` với OID mapping
-4. Ghi chú SNMP version support (v1/v2c/v3)
-5. Test OID bằng snmpwalk nếu có thiết bị thật
+3. Tạo/cập nhật `oids/{os_family}.yaml` (vd `oids/huawei_vrp.yaml`) với OID mapping — file chỉ là dữ liệu, collector `apps/collectors/switch_snmp.py` + adapter phải đọc đúng khoá đó
+4. Ghi chú SNMP version support (v1/v2c/v3); v3 chỉ chạy khi có backend easysnmp, prod đang dùng pysnmp v1/v2c
+5. Verify bằng walk trên worker (`docker compose exec -T worker python manage.py shell` hoặc lệnh `verify_*_oids`) — SNMP ACL của thiết bị thường chỉ cho monitorsrv
 
 ## Xác minh runtime cột bảng (BẮT BUỘC khi không có MIB)
 Số cột `.x` trong bảng SNMP khác nhau theo firmware → **không tin số đếm/giá trị
@@ -40,17 +40,14 @@ nếu chưa đối chiếu với mốc thật**. Quy trình đã dùng cho Huawe
 
 ## Output format
 ```yaml
-# config/oids/cisco_catalyst9300.yaml
-vendor: cisco
-model: catalyst9300
+# oids/cisco_ios.yaml (cấu trúc thật — mở file để lấy đủ khoá)
+os_family: cisco_ios
 snmp_versions: [v2c, v3]
-oids:
-  cpu_5min: 1.3.6.1.4.1.9.2.1.58.0
-  cpu_1min: 1.3.6.1.4.1.9.2.1.57.0
-  memory_used: 1.3.6.1.4.1.9.2.1.8.0
-  memory_free: 1.3.6.1.4.1.9.2.1.6.0
-interfaces:
-  table: 1.3.6.1.2.1.2.2
-  in_octets: 1.3.6.1.2.1.2.2.1.10
-  out_octets: 1.3.6.1.2.1.2.2.1.16
+cpu:
+  cpu_5min: "1.3.6.1.4.1.9.2.1.58.0"      # OLD-CISCO-CPU-MIB
+memory:
+  mem_processor_used: "1.3.6.1.4.1.9.9.48.1.1.1.5.1"   # CISCO-MEMORY-POOL-MIB
+  mem_processor_free: "1.3.6.1.4.1.9.9.48.1.1.1.6.1"
+vlan:
+  vm_vlan: "1.3.6.1.4.1.9.9.68.1.2.2.1.2"        # CISCO-VLAN-MEMBERSHIP-MIB
 ```
