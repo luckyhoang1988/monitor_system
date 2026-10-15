@@ -797,6 +797,59 @@ def _is_flapping(device: Device, rule: AlertRule) -> bool:
     return recent_fires >= threshold
 
 
+def _queue_renotify_if_suppressed(alert: Alert, rule: AlertRule) -> bool:
+    """Alert ĐANG ACTIVE mà chưa từng có fire notification (bị flapping-suppress lúc fire) và đã kéo dài
+    `ALERT_FLAP_RENOTIFY_MIN` phút → ghi fire notification `pending` cho từng channel. True nếu đã ghi.
+
+    Hạng mục 1.1 (A1, 2026-10-15). Gốc: lần fire thứ N trong cửa sổ flapping tạo Alert nhưng không tạo
+    notification (`_fire_alert`), các vòng sau thấy `is_active` nên im lặng cho tới khi tự hồi phục, và vì
+    fire chưa từng gửi nên `_resolve_alert` cũng không gửi RECOVERED. Prod 2026-10-15: alert #662 "Thiết bị
+    offline" active 19,7 ngày (thiết bị mất kết nối thật) không một thông báo nào.
+
+    * Chỉ gọi từ `_fire_alert`, BÊN TRONG transaction đã khoá `Device`: "chưa có dòng fire" kiểm ở đây và
+      dòng pending ghi ở đây cùng nằm dưới khoá đó, nên 2 đường eval đồng thời (poll inline + safety net)
+      không nhắc đôi.
+    * Trần = ĐÚNG 1 lần cho mỗi alert: điều kiện là "KHÔNG có dòng fire nào" nên sau khi ghi dòng pending
+      (dù sau đó gửi thành công hay thất bại) sẽ không nhắc lại. Hết lượt gửi → xem hạng mục 1.2.
+    * Đi qua outbox như fire thường: dòng `pending` sống sót khi worker chết (sweep nhặt), và
+      `_finalize_fire_sent` + late-recovery sẵn có lo thứ tự ALERT → RECOVERED.
+    * Chỉ nhắc alert KHÔNG có dòng fire nào. Alert có dòng fire `failed` (kênh lỗi, hết lượt) không thuộc
+      hạng mục này — đó là chuyện gửi lại của 1.2 và nhắc lại ở đây chỉ tái hiện vòng lặp gửi thất bại.
+    """
+    minutes = int(getattr(settings, "ALERT_FLAP_RENOTIFY_MIN", 30))
+    if minutes <= 0 or not rule.channels:
+        return False
+    lasted = timezone.now() - alert.triggered_at
+    if lasted < timedelta(minutes=minutes):
+        return False
+    if AlertNotification.objects.filter(alert=alert, kind="fire").exists():
+        return False
+
+    window = int(getattr(settings, "ALERT_FLAP_WINDOW_MIN", 30))
+    threshold = int(getattr(settings, "ALERT_FLAP_THRESHOLD", 4))
+    # Số lần fire trong cửa sổ TÍNH ĐẾN lúc alert này nổ — đúng phép đếm `_is_flapping` đã dùng để chặn nó
+    # (đếm cả chính nó). Không cần cận trên: alert còn active thì chưa thể có alert nổ sau nó (mỗi
+    # (device, rule) chỉ 1 alert active, dưới khoá Device). Dùng cho tiền tố, không quyết định gửi.
+    fires = Alert.objects.filter(
+        device_id=alert.device_id, rule_id=alert.rule_id,
+        triggered_at__gte=alert.triggered_at - timedelta(minutes=window),
+    ).count()
+    elapsed = int(lasted.total_seconds() // 60)
+    if threshold > 0 and fires >= threshold:
+        prefix = (f"⚠️ FLAPPING ({fires} lần/{window} phút) — thông báo trước đó bị chặn, "
+                  f"sự cố vẫn đang kéo dài {elapsed} phút. ")
+    else:
+        prefix = f"⚠️ Chưa từng có thông báo nào cho cảnh báo này — sự cố vẫn đang kéo dài {elapsed} phút. "
+    message = prefix + alert.message
+    Alert.objects.filter(pk=alert.pk).update(message=message)
+    alert.message = message
+    AlertNotification.objects.bulk_create([
+        AlertNotification(alert=alert, channel=ch, kind="fire", status="pending")
+        for ch in rule.channels
+    ])
+    return True
+
+
 def check_device_alerts(device: Device, since) -> None:
     rules = AlertRule.objects.filter(enabled=True).filter(
         device_type__in=[device.device_type, "all"]
@@ -1013,25 +1066,37 @@ def _fire_alert(device: Device, rule: AlertRule, value: float) -> None:
     # có bằng chứng nào, và vòng eval kế tiếp coi alert đã is_active=True là "đã xử lý xong" nên
     # không bao giờ tự gửi lại → mất trắng thông báo. is_flapping tính TRONG transaction (cùng
     # connection nên vẫn thấy `alert` vừa create dù chưa commit — read-committed) để quyết định
-    # có tạo pending row hay không (giữ nguyên hành vi cũ: flapping thì không notification nào).
+    # có tạo pending row hay không (flapping thì không notification lúc nổ — nhưng nếu alert đó VẪN
+    # active sau ALERT_FLAP_RENOTIFY_MIN phút thì nhắc đúng 1 lần, xem _queue_renotify_if_suppressed).
+    renotify: Alert | None = None
     with transaction.atomic():
         Device.objects.select_for_update().filter(pk=device.pk).first()
-        if Alert.objects.filter(device=device, rule=rule, is_active=True).exists():
-            return
-        alert = Alert.objects.create(
-            device=device,
-            rule=rule,
-            severity=rule.severity,
-            message=message,
-            metric_value=float(value),
-            is_active=True,
-        )
-        is_flapping = _is_flapping(device, rule)
-        if not is_flapping:
-            AlertNotification.objects.bulk_create([
-                AlertNotification(alert=alert, channel=ch, kind="fire", status="pending")
-                for ch in rule.channels
-            ])
+        active = Alert.objects.filter(device=device, rule=rule, is_active=True).first()
+        if active is not None:
+            # Đã có alert active → không tạo alert mới. Chỉ có việc phải làm nếu nó từng bị flapping-
+            # suppress và nay đã kéo dài: ghi pending (cùng transaction, dưới khoá Device) rồi gửi bên dưới.
+            if not _queue_renotify_if_suppressed(active, rule):
+                return
+            renotify = active
+        else:
+            alert = Alert.objects.create(
+                device=device,
+                rule=rule,
+                severity=rule.severity,
+                message=message,
+                metric_value=float(value),
+                is_active=True,
+            )
+            is_flapping = _is_flapping(device, rule)
+            if not is_flapping:
+                AlertNotification.objects.bulk_create([
+                    AlertNotification(alert=alert, channel=ch, kind="fire", status="pending")
+                    for ch in rule.channels
+                ])
+    if renotify is not None:
+        _dispatch_notifications(renotify, rule.channels, kind="fire")
+        logger.warning("ALERT re-notified (từng bị flapping-suppress, vẫn active): %s", renotify.message)
+        return
     # Cache-mode: lưu bằng chứng CPU/mem vào Postgres cho sự cố này.
     _persist_incident_snapshot(device)
     if is_flapping:

@@ -312,6 +312,10 @@ ALERT_HYSTERESIS_PCT  = env.float("ALERT_HYSTERESIS_PCT", default=0.1)
 # Flapping: nếu một (device, rule) fire ≥ THRESHOLD lần trong WINDOW phút → bỏ qua notification.
 ALERT_FLAP_WINDOW_MIN = env.int("ALERT_FLAP_WINDOW_MIN", default=30)
 ALERT_FLAP_THRESHOLD  = env.int("ALERT_FLAP_THRESHOLD", default=4)
+# Alert bị flapping-suppress (không có notification nào) mà VẪN đang active sau ngần này phút → nhắc ĐÚNG 1 lần
+# (hạng mục 1.1, 2026-10-15). Trước đó sự cố thật kéo dài sau lần fire thứ N không bao giờ được báo (prod: alert
+# #662 offline 19,7 ngày không một thông báo). 0 = tắt (giữ nguyên hành vi cũ: suppress tới khi tự hồi phục).
+ALERT_FLAP_RENOTIFY_MIN = env.int("ALERT_FLAP_RENOTIFY_MIN", default=30)
 
 # Gửi lại thông báo lỗi TẠM THỜI (429/5xx/mất kết nối) — apps/alerts/engine.py `_settle_failed_attempt`,
 # `retry_pending_alert_notifications` (review 2026-10-15, hạng mục 1.2). Prod trước khi có cơ chế này:

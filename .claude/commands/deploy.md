@@ -800,6 +800,14 @@ chính giá trị vừa đọc nên `save()` đầy đủ ghi `encrypt(token)` �
 - Script đột biến/vá viết `\n` trong heredoc Python bị biến thành xuống dòng thật (đã dính 3 lần): sửa trực tiếp
   file script bằng Edit thay vì sinh nó qua heredoc.
 
+### Bẫy: cơ chế "chặn/giảm thông báo" không có điều kiện thoát → chặn vĩnh viễn sự cố thật (1.1, 2026-10-15)
+Flapping-suppress (`_fire_alert`) tạo Alert nhưng không tạo thông báo; vòng sau thấy alert active nên im lặng, và vì fire chưa từng gửi nên `_resolve_alert` cũng không gửi RECOVERED. Prod: alert #662 offline 19,7 ngày, 0 thông báo. Quy tắc chung: mọi cơ chế "không gửi" (flapping, dedup, cooldown, silence) phải trả lời được "khi nào thì ngừng chặn?" — alert còn active mà không có thông báo nào đã gửi/đang chờ là lỗ hổng.
+- **Đo trước**: đếm alert bị chặn bằng SQL self-join (≥N alert cùng device+rule trong cửa sổ tính đến nó); khi METRICS_WRITE_MODE=cache không có raw, kiểm "ca dài có thật không" bằng bảng `*Hourly` (`metrics_systemhealthhourly`: thiếu dòng = không có poll thành công) trước khi gọi là sự cố thật.
+- **Trần không cần cột mới**: tiêu chí "chưa có dòng fire nào" tự khoá lại sau khi ghi pending (đúng 1 lần/alert). Kiểm "chưa có" và ghi pending PHẢI cùng dưới khoá Device — kiểm riêng bên ngoài rồi ghi bên trong là nhắc đôi khi 2 đường eval chạy đồng thời.
+- **Đi qua outbox, không gửi thẳng**: ghi `pending` cùng transaction rồi dispatch sau commit — nhờ vậy crash giữa chừng vẫn được sweep nhặt và late-recovery sẵn có lo thứ tự ALERT → RECOVERED.
+- **Phân biệt với 1.2**: alert có dòng fire nhưng tất cả `failed` KHÔNG thuộc nhóm này; nhắc lại ở đó chỉ tái hiện vòng lặp gửi thất bại. Retention tương lai không được xoá dòng thông báo của alert còn active.
+- **Mẹo test**: `triggered_at` là `auto_now_add` nên không đặt được lúc create → lùi bằng `Alert.objects.update(triggered_at=F("triggered_at") - timedelta(...))` (giữ khoảng cách tương đối giữa các lần fire); tên rule trùng rule migration seed ("Thiết bị offline") ném IntegrityError và rule seed tự gửi vào mock — dùng tên khác + `AlertRule.objects.exclude(pk=...).delete()` khi cần cô lập; recovery trễ do `_finalize_fire_sent` queue cần sweep lần 2 mới gửi. Test song song: rào chắn đặt ĐẦU hàm kiểm tra + timeout (có khoá thì bên kia chờ ở khoá nên rào hết giờ rồi chạy tuần tự); đột biến bỏ khoá phải làm test đỏ — nếu không, test không đo gì.
+
 ## 2. Deploy
 ```
 ./deploy.sh            # push origin master + pull/build/restart trên monitorsrv
