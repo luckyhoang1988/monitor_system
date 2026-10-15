@@ -1,16 +1,36 @@
 """Gửi alert qua Slack và Microsoft Teams Webhook API."""
+import hashlib
 import logging
-import requests
+
 from django.conf import settings
+
+from . import ChannelNotConfigured, post_json
 
 logger = logging.getLogger(__name__)
 
 
+def _webhook_url(setting: str) -> str:
+    """URL webhook hoặc ChannelNotConfigured (trước đây `return` im lặng → engine ghi "sent" giả).
+    URL webhook là bí mật nên thông điệp chỉ nêu TÊN biến cấu hình."""
+    url = getattr(settings, setting, "")
+    if not url:
+        raise ChannelNotConfigured(f"Chưa cấu hình {setting}")
+    return url
+
+
+_URL_SETTING = {"slack": "SLACK_WEBHOOK_URL", "teams": "TEAMS_WEBHOOK_URL"}
+
+
+def cooldown_key(channel: str) -> str | None:
+    """Khoá cooldown dùng chung theo webhook (xem apps/alerts/cooldown.py): băm URL vì URL là bí mật."""
+    url = getattr(settings, _URL_SETTING.get(channel, ""), "")
+    if not url:
+        return None
+    return f"{channel}:{hashlib.sha256(url.encode('utf-8')).hexdigest()[:12]}"
+
+
 def send_slack_alert(alert) -> None:
-    webhook_url = getattr(settings, "SLACK_WEBHOOK_URL", "")
-    if not webhook_url:
-        logger.warning("SLACK_WEBHOOK_URL chưa cấu hình")
-        return
+    webhook_url = _webhook_url("SLACK_WEBHOOK_URL")
 
     emoji = "🔴" if alert.severity == "CRITICAL" else "⚠️"
     text = (
@@ -21,15 +41,12 @@ def send_slack_alert(alert) -> None:
         f"*Thời gian:* {alert.triggered_at.strftime('%H:%M:%S %d/%m/%Y')} UTC"
     )
 
-    resp = requests.post(webhook_url, json={"text": text}, timeout=10)
-    resp.raise_for_status()
+    post_json(webhook_url, {"text": text}, service="Slack")
     logger.info("Slack alert sent for alert %s", alert.id)
 
 
 def send_slack_recovery(alert) -> None:
-    webhook_url = getattr(settings, "SLACK_WEBHOOK_URL", "")
-    if not webhook_url:
-        return
+    webhook_url = _webhook_url("SLACK_WEBHOOK_URL")
 
     resolved_str = (alert.resolved_at.strftime("%H:%M:%S %d/%m/%Y")
                     if alert.resolved_at else "N/A")
@@ -40,16 +57,12 @@ def send_slack_recovery(alert) -> None:
         f"*Hồi phục lúc:* {resolved_str} UTC"
     )
 
-    resp = requests.post(webhook_url, json={"text": text}, timeout=10)
-    resp.raise_for_status()
+    post_json(webhook_url, {"text": text}, service="Slack")
     logger.info("Slack recovery sent for alert %s", alert.id)
 
 
 def send_teams_alert(alert) -> None:
-    webhook_url = getattr(settings, "TEAMS_WEBHOOK_URL", "")
-    if not webhook_url:
-        logger.warning("TEAMS_WEBHOOK_URL chưa cấu hình")
-        return
+    webhook_url = _webhook_url("TEAMS_WEBHOOK_URL")
 
     emoji = "🔴" if alert.severity == "CRITICAL" else "⚠️"
     text = (
@@ -60,15 +73,12 @@ def send_teams_alert(alert) -> None:
         f"**Thời gian:** {alert.triggered_at.strftime('%H:%M:%S %d/%m/%Y')} UTC"
     )
 
-    resp = requests.post(webhook_url, json={"text": text}, timeout=10)
-    resp.raise_for_status()
+    post_json(webhook_url, {"text": text}, service="Teams")
     logger.info("Teams alert sent for alert %s", alert.id)
 
 
 def send_teams_recovery(alert) -> None:
-    webhook_url = getattr(settings, "TEAMS_WEBHOOK_URL", "")
-    if not webhook_url:
-        return
+    webhook_url = _webhook_url("TEAMS_WEBHOOK_URL")
 
     resolved_str = (alert.resolved_at.strftime("%H:%M:%S %d/%m/%Y")
                     if alert.resolved_at else "N/A")
@@ -79,6 +89,5 @@ def send_teams_recovery(alert) -> None:
         f"**Hồi phục lúc:** {resolved_str} UTC"
     )
 
-    resp = requests.post(webhook_url, json={"text": text}, timeout=10)
-    resp.raise_for_status()
+    post_json(webhook_url, {"text": text}, service="Teams")
     logger.info("Teams recovery sent for alert %s", alert.id)

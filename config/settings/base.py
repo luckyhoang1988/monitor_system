@@ -183,15 +183,16 @@ CELERY_BEAT_SCHEDULE = {
         "options": {"expires": ALERT_EVAL_INTERVAL_SECS, "expire_seconds": ALERT_EVAL_INTERVAL_SECS},
     },
     # Safety net cho transactional-outbox-lite (xem apps/alerts/engine.py) — retry
-    # AlertNotification "pending" bị kẹt do worker chết giữa commit Alert và gửi thật. 120s
-    # (không cần theo ALERT_EVAL_INTERVAL_SECS — đây là xử lý bù hiếm khi có việc, grace_secs=90
-    # mặc định trong hàm đã đủ tránh đua với lần gửi đang chạy hợp lệ). Nhớ cả expires LẪN
-    # expire_seconds — thiếu expire_seconds sẽ bị beat restart reset về None (xem CLAUDE.md
-    # mục "Celery Beat").
+    # AlertNotification "pending" bị kẹt do worker chết giữa commit Alert và gửi thật, VÀ gửi lại thông
+    # báo lỗi tạm thời đã đến hạn (`next_attempt_at`, hạng mục 1.2). 60s (trước đây 120s) để lần gửi
+    # lại sau 429 không trễ thêm tới 2 phút; truy vấn rẻ (bảng ~560 kB). Việc chống đua với lần gửi
+    # đang chạy hợp lệ do claim nguyên tử + grace_secs=90 trong hàm, không phụ thuộc chu kỳ này.
+    # Nhớ cả expires LẪN expire_seconds — thiếu expire_seconds sẽ bị beat restart reset về None
+    # (xem CLAUDE.md mục "Celery Beat").
     "retry-pending-alert-notifications": {
         "task": "apps.alerts.tasks.retry_pending_alert_notifications",
-        "schedule": 120,
-        "options": {"expires": 120, "expire_seconds": 120},
+        "schedule": 60,
+        "options": {"expires": 60, "expire_seconds": 60},
     },
     "cleanup-old-metrics": {
         "task": "apps.metrics.tasks.cleanup_old_metrics",
@@ -311,6 +312,20 @@ ALERT_HYSTERESIS_PCT  = env.float("ALERT_HYSTERESIS_PCT", default=0.1)
 # Flapping: nếu một (device, rule) fire ≥ THRESHOLD lần trong WINDOW phút → bỏ qua notification.
 ALERT_FLAP_WINDOW_MIN = env.int("ALERT_FLAP_WINDOW_MIN", default=30)
 ALERT_FLAP_THRESHOLD  = env.int("ALERT_FLAP_THRESHOLD", default=4)
+
+# Gửi lại thông báo lỗi TẠM THỜI (429/5xx/mất kết nối) — apps/alerts/engine.py `_settle_failed_attempt`,
+# `retry_pending_alert_notifications` (review 2026-10-15, hạng mục 1.2). Prod trước khi có cơ chế này:
+# 309/1.843 thông báo `failed` vĩnh viễn (172 là 429 Telegram, 124 lỗi kết nối).
+# Số lần gửi tối đa cho 1 thông báo (kể cả lần đầu). Backoff 30/60/120/300/600s rồi lặp 600s → ~38 phút.
+ALERT_NOTIFY_MAX_ATTEMPTS = env.int("ALERT_NOTIFY_MAX_ATTEMPTS", default=8)
+# Fire của alert ĐÃ hồi phục mà còn nằm trong hàng đợi quá ngần này giây thì bỏ (báo sự cố đã hết là cảnh
+# báo hết hiệu lực). Fire của alert còn active và mọi recovery KHÔNG bị áp trần tuổi này.
+ALERT_NOTIFY_FIRE_RESOLVED_MAX_AGE_SECS = env.int("ALERT_NOTIFY_FIRE_RESOLVED_MAX_AGE_SECS", default=3600)
+# Telegram giới hạn ~1 tin/giây/chat và 20 tin/phút/nhóm (core.telegram.org/bots/faq): sweep giãn cách tối
+# thiểu giữa 2 tin Telegram. 3s ≈ 20 tin/phút.
+ALERT_NOTIFY_TELEGRAM_MIN_INTERVAL_SECS = env.float("ALERT_NOTIFY_TELEGRAM_MIN_INTERVAL_SECS", default=3.0)
+# Ngân sách thời gian của 1 vòng sweep (giây); phần còn lại để vòng sau. Phải < soft_time_limit của task.
+ALERT_NOTIFY_SWEEP_BUDGET_SECS = env.int("ALERT_NOTIFY_SWEEP_BUDGET_SECS", default=45)
 
 # Chart API: giới hạn số điểm trả về cho series raw (downsample phía server).
 CHART_MAX_POINTS = env.int("CHART_MAX_POINTS", default=500)

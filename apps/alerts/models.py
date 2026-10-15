@@ -194,6 +194,24 @@ class AlertConfig(models.Model):
         return obj
 
 
+class ChannelCooldown(models.Model):
+    """Thời gian chờ (flood control) dùng chung cho 1 kênh gửi — theo bot/chat, KHÔNG theo từng tiến trình.
+
+    Telegram trả 429 kèm `retry_after`; mọi lần gửi trong khoảng đó (từ tác vụ poll khác, từ vòng sweep
+    kế tiếp) đều bị từ chối và đốt lượt thử vô ích. Trước đây thời hạn chỉ sống trong biến cục bộ của
+    1 vòng quét (review 2026-10-15). Xem apps/alerts/cooldown.py. Một dòng cho mỗi khoá, chỉ tăng `until`.
+    """
+    key = models.CharField(max_length=100, unique=True)
+    until = models.DateTimeField()
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Channel Cooldown"
+
+    def __str__(self) -> str:
+        return f"{self.key} until {self.until:%Y-%m-%d %H:%M:%S}"
+
+
 class AlertNotification(models.Model):
     KIND_CHOICES = [("fire", "Fire"), ("recovery", "Recovery")]
 
@@ -222,6 +240,13 @@ class AlertNotification(models.Model):
     # ghi đè kết quả của tiến trình đã reclaim sau nó. Xem apps/alerts/engine.py
     # _dispatch_notifications/retry_pending_alert_notifications.
     claim_token = models.CharField(max_length=36, blank=True, default="")
+    # Số lần gửi ĐÃ BẮT ĐẦU (tăng nguyên tử lúc claim, kể cả lần bị SIGKILL giữa chừng) — trần
+    # ALERT_NOTIFY_MAX_ATTEMPTS chặn thử lại vô hạn (review 2026-10-15, hạng mục 1.2).
+    attempts = models.PositiveSmallIntegerField(default=0)
+    # Lịch gửi lại khi lỗi TẠM THỜI (429 theo retry_after của Telegram, 5xx, mất kết nối): row quay về
+    # status="pending" kèm mốc này; sweep chỉ nhặt khi đã đến hạn. NULL = chưa từng lên lịch (gửi lần đầu,
+    # hoặc row kẹt chờ sweep nhặt sau grace_secs). Lưu trong DB nên không mất khi worker restart.
+    next_attempt_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         verbose_name = "Alert Notification"

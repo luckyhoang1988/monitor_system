@@ -2,6 +2,7 @@
 import pytest
 from unittest.mock import patch, MagicMock
 from django.test import override_settings
+from apps.alerts.channels import ChannelNotConfigured
 from apps.alerts.channels.webhook import (
     send_slack_alert,
     send_slack_recovery,
@@ -25,13 +26,15 @@ def mock_alert():
 
 
 class TestWebhookChannels:
-    @patch("apps.alerts.channels.webhook.requests.post")
+    @patch("apps.alerts.channels.requests.post")
     @override_settings(SLACK_WEBHOOK_URL="")
     def test_send_slack_alert_missing_setting(self, mock_post, mock_alert):
-        send_slack_alert(mock_alert)
+        # Trước 2026-10-15 hàm `return` im lặng và engine ghi "sent" giả. Nay là lỗi cấu hình rõ ràng.
+        with pytest.raises(ChannelNotConfigured):
+            send_slack_alert(mock_alert)
         mock_post.assert_not_called()
 
-    @patch("apps.alerts.channels.webhook.requests.post")
+    @patch("apps.alerts.channels.requests.post")
     @override_settings(SLACK_WEBHOOK_URL="https://slack.mock/webhooks/123")
     def test_send_slack_alert_success(self, mock_post, mock_alert):
         send_slack_alert(mock_alert)
@@ -41,7 +44,7 @@ class TestWebhookChannels:
             timeout=10,
         )
 
-    @patch("apps.alerts.channels.webhook.requests.post")
+    @patch("apps.alerts.channels.requests.post")
     @override_settings(SLACK_WEBHOOK_URL="https://slack.mock/webhooks/123")
     def test_send_slack_recovery_success(self, mock_post, mock_alert):
         send_slack_recovery(mock_alert)
@@ -51,7 +54,7 @@ class TestWebhookChannels:
             timeout=10,
         )
 
-    @patch("apps.alerts.channels.webhook.requests.post")
+    @patch("apps.alerts.channels.requests.post")
     @override_settings(TEAMS_WEBHOOK_URL="https://teams.mock/webhooks/456")
     def test_send_teams_alert_success(self, mock_post, mock_alert):
         send_teams_alert(mock_alert)
@@ -61,7 +64,7 @@ class TestWebhookChannels:
             timeout=10,
         )
 
-    @patch("apps.alerts.channels.webhook.requests.post")
+    @patch("apps.alerts.channels.requests.post")
     @override_settings(TEAMS_WEBHOOK_URL="https://teams.mock/webhooks/456")
     def test_send_teams_recovery_success(self, mock_post, mock_alert):
         send_teams_recovery(mock_alert)

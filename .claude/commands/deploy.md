@@ -638,6 +638,32 @@ container (chưa làm).
   CONNECT để chắc request có đi qua proxy), không chỉ kiểm tra cấu hình. Mọi kiểm tra bảo mật kiểu này nên
   thử cả đường trực tiếp lẫn đường proxy/biến môi trường.
 
+### Bẫy: lỗi gửi thông báo "tạm thời" bị ghi `failed` vĩnh viễn (đo prod 2026-10-15)
+`except Exception` → `status="failed"` biến mọi lỗi tạm thời (429 flood control, mất kết nối, task bị cắt)
+thành mất thông báo thật: prod 309/1.843 dòng, 15/38 fire riêng ngày 2026-10-11. Quy tắc cho mọi kênh/outbox:
+- **Channel phải phân loại lỗi** (tạm thời / vĩnh viễn / chưa cấu hình) bằng exception riêng; engine chỉ lên
+  lịch lại cho loại tạm thời. `return` im lặng khi thiếu cấu hình là bẫy: engine ghi "sent" giả.
+- **Lịch gửi lại phải nằm trong DB** (`next_attempt_at`) và số lần thử tăng NGUYÊN TỬ lúc claim — không dùng
+  sleep/Celery retry trong bộ nhớ (worker restart là mất), và lần bị SIGKILL giữa chừng cũng phải tính.
+- **429 thì tuân theo `parameters.retry_after`**; gửi lại hàng loạt không giãn cách chỉ tái hiện đúng đợt 429.
+  Telegram: ≤1 tin/giây/chat, ≤20 tin/phút/nhóm (FAQ Bot API).
+- **Cooldown phải DÙNG CHUNG giữa các tiến trình và các đường gửi, lưu trong DB** (`ChannelCooldown`, khoá theo
+  bot/chat). Biến cục bộ của 1 vòng quét (`held_until`) không đủ: vòng sau 60s và lần gửi TRỰC TIẾP từ tác vụ
+  poll (đường chính) vẫn đâm vào 429 và đốt lượt thử (review ngoài 2026-10-15, P2). Kiểm cooldown TRƯỚC khi
+  claim để không tốn lượt thử; ghi cooldown kể cả khi dòng đã bị reclaim/hết lượt (429 là sự thật về kênh).
+  Khoá băm token/URL, không lưu bí mật. Test bằng đột biến: bỏ kiểm tra ở từng đường → đúng test đỏ.
+- **Phân loại lỗi SMTP bằng NGUỒN thư viện, không đoán theo tên lớp**: `SMTPRecipientsRefused` kế thừa
+  `SMTPException` (không phải `SMTPResponseException`) nên nhánh "có `smtp_code`" bỏ sót nó; mã nằm trong
+  `exc.recipients`. `SMTPException` ⊂ `OSError` nên phải xét `SMTPException` TRƯỚC `OSError`.
+- **Không bao giờ lưu `str(requests.RequestException)`**: nó chứa nguyên URL (`/bot<token>/sendMessage`, URL
+  webhook). Channel tự dựng thông điệp; chỗ lưu/log dùng `redact()`.
+- **Ghi kết quả lần gửi phải khoá theo `claim_token`** (cả nhánh lỗi tạm thời, không chỉ nhánh sent/failed),
+  nếu không chủ cũ gửi chậm sẽ hẹn lại đè kết quả của chủ mới.
+- **`SoftTimeLimitExceeded` kế thừa `Exception`**: bắt riêng TRƯỚC `except Exception`, trả row về pending rồi
+  raise lại. Test hồi quy bằng ĐỘT BIẾN (tạm phá từng hành vi, xác nhận đúng test đỏ), không chỉ chạy xanh.
+- Tình trạng thông báo cũ `failed`: đo xem alert tương ứng còn active không TRƯỚC khi quyết định phát lại —
+  cả 309 dòng prod thuộc alert đã hồi phục nên không phát lại gì cả.
+
 ## 2. Deploy
 ```
 ./deploy.sh            # push origin master + pull/build/restart trên monitorsrv

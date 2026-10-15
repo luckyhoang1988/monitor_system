@@ -17,7 +17,9 @@ class AlertRuleAdmin(AdminRBACMixin, admin.ModelAdmin):
 class AlertNotificationInline(admin.TabularInline):
     model = AlertNotification
     extra = 0
-    readonly_fields = ("channel", "sent_at", "status", "error")
+    # kind/attempts/next_attempt_at: để người vận hành thấy thông báo đang chờ gửi lại lúc nào
+    # (lịch hẹn sau 429/lỗi mạng, hạng mục 1.2) — chỉ đọc, engine là nơi duy nhất ghi.
+    readonly_fields = ("channel", "kind", "sent_at", "status", "attempts", "next_attempt_at", "error")
 
 
 @admin.register(Alert)

@@ -1,13 +1,19 @@
 """Alert rule engine — đánh giá ngưỡng và tạo Alert record."""
 import logging
+import time
 import uuid
 from datetime import timedelta
+
+from celery.exceptions import SoftTimeLimitExceeded
 from django.conf import settings
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import F, Q, QuerySet
 from django.utils import timezone
+
 from apps.devices.models import Device
 from apps.metrics import cache as metrics_cache
+from . import cooldown
+from .channels import ChannelTransientError, redact
 from .models import AlertRule, Alert, AlertNotification
 
 logger = logging.getLogger(__name__)
@@ -1130,11 +1136,140 @@ def _finalize_fire_sent(alert: Alert, channel: str, token: str) -> bool:
         Device.objects.select_for_update().filter(pk=alert.device_id).first()
         updated = AlertNotification.objects.filter(
             alert=alert, channel=channel, kind="fire", status="processing", claim_token=token,
-        ).update(status="sent", updated_at=timezone.now())
+        ).update(status="sent", next_attempt_at=None, updated_at=timezone.now())
         if not updated:
             return False
         _queue_late_recovery_if_resolved(alert.pk, channel)
     return True
+
+
+# --- Thử lại có giới hạn cho lỗi gửi tạm thời (review ngoài 2026-10-15, hạng mục 1.2) ---------------
+# Số đo prod (1.843 dòng AlertNotification): 309 `failed` — 172 là 429 Telegram, 124 lỗi kết nối, 12
+# SoftTimeLimit, 1 là 4xx; trước đây `failed` là trạng thái cuối và sweep chỉ nhặt pending/processing.
+# Nay lỗi TẠM THỜI trả row về `pending` kèm `next_attempt_at` (lưu trong DB, sống sót khi worker chết);
+# sweep chỉ nhặt row đã đến hạn. Lỗi vĩnh viễn / hết số lần thử → `failed` như cũ.
+NOTIFY_RETRY_BACKOFF_SECS = (30, 60, 120, 300, 600)  # theo số lần đã thử; bậc cuối lặp lại
+NOTIFY_RETRY_AFTER_CAP_SECS = 3600                   # trần cho retry_after do phía kia đưa ra
+# Kênh có hạn mức tốc độ → sweep tự giãn cách giữa 2 tin (Telegram: ≤1 tin/giây/chat, ≤20 tin/phút/nhóm
+# — core.telegram.org/bots/faq). Gửi lại 15 tin cùng lúc chỉ tái hiện đúng đợt 429 vừa gây ra lỗi.
+PACED_CHANNELS = frozenset({"telegram"})
+# Số lỗi tạm thời LIÊN TIẾP trên 1 kênh trong 1 vòng sweep thì ngừng kênh đó đến hết vòng (mạng/dịch vụ
+# đang sập — thử tiếp chỉ đốt lượt thử của những dòng còn lại).
+NOTIFY_SWEEP_TRANSIENT_STREAK = 3
+
+
+def _notify_max_attempts() -> int:
+    return int(getattr(settings, "ALERT_NOTIFY_MAX_ATTEMPTS", 8))
+
+
+def _fire_resolved_max_age_secs() -> int:
+    return int(getattr(settings, "ALERT_NOTIFY_FIRE_RESOLVED_MAX_AGE_SECS", 3600))
+
+
+def _sweep_budget_secs() -> float:
+    return float(getattr(settings, "ALERT_NOTIFY_SWEEP_BUDGET_SECS", 45))
+
+
+def _telegram_min_interval_secs() -> float:
+    return float(getattr(settings, "ALERT_NOTIFY_TELEGRAM_MIN_INTERVAL_SECS", 3.0))
+
+
+def _retry_delay_secs(attempts: int, retry_after: int | None) -> int:
+    """Chờ bao lâu trước lần thử kế: bậc backoff theo `attempts` (đã thử mấy lần), nhưng không bao giờ
+    sớm hơn `retry_after` mà Telegram/Slack yêu cầu (+1s dư)."""
+    idx = min(max(attempts, 1), len(NOTIFY_RETRY_BACKOFF_SECS)) - 1
+    delay = NOTIFY_RETRY_BACKOFF_SECS[idx]
+    if retry_after:
+        delay = max(delay, min(int(retry_after), NOTIFY_RETRY_AFTER_CAP_SECS) + 1)
+    return delay
+
+
+def _safe_error_text(exc: BaseException) -> str:
+    """Thông điệp lỗi an toàn để LƯU DB/ghi log: không token bot, không path URL (requests nhét nguyên
+    URL `.../bot<token>/sendMessage` vào str(exc) — 294 dòng prod đang chứa token)."""
+    if isinstance(exc, SoftTimeLimitExceeded):
+        return "Tác vụ bị cắt bởi giới hạn thời gian đúng lúc đang gửi — sẽ thử lại"
+    text = redact(str(exc))
+    if not text:
+        text = type(exc).__name__
+    return text[:1000]
+
+
+def _channel_cooldown_key(channel: str) -> str | None:
+    """Khoá cooldown dùng chung của kênh (theo bot/chat hoặc webhook) hoặc None nếu kênh không có/chưa
+    cấu hình. Lỗi tra cứu KHÔNG được chặn việc gửi — cooldown chỉ là tối ưu để khỏi đốt lượt thử."""
+    try:
+        if channel == "telegram":
+            from .channels.telegram import cooldown_key
+            return cooldown_key()
+        if channel in ("slack", "teams"):
+            from .channels.webhook import cooldown_key
+            return cooldown_key(channel)
+    except Exception:
+        logger.exception("Không dựng được khoá cooldown cho kênh %s — bỏ qua cooldown", channel)
+    return None
+
+
+def _settle_failed_attempt(owned: QuerySet, exc: BaseException, channel: str) -> str:
+    """Ghi kết quả 1 lần gửi LỖI cho row mà tiến trình này đang giữ.
+
+    Nếu lỗi là flood control (có `retry_after`) thì ghi cooldown DÙNG CHUNG theo bot/chat trước khi làm
+    gì khác — kể cả khi row đã bị reclaim hay hết lượt, vì 429 là sự thật về kênh, không phải về row
+    (review 2026-10-15, P2: cooldown chỉ sống trong 1 vòng quét thì vòng sau và mọi lần gửi trực tiếp
+    vẫn đâm vào 429 và đốt lượt thử).
+
+    `owned` = queryset đã khoá theo (status="processing", claim_token=<token của MÌNH>): nếu row đã bị
+    reclaim (token đổi) thì cả đọc lẫn ghi đều khớp 0 dòng → trả "lost" và KHÔNG đụng vào kết quả của chủ
+    mới — claim_token vẫn là hàng rào duy nhất chống ghi đè (không thêm cơ chế khoá khác).
+
+    Trả "rescheduled" (lỗi tạm thời, còn lượt → pending + next_attempt_at), "failed" (vĩnh viễn hoặc hết
+    lượt) hoặc "lost".
+    """
+    retry_after = getattr(exc, "retry_after", None)
+    if isinstance(exc, ChannelTransientError) and retry_after:
+        try:
+            cooldown.register(_channel_cooldown_key(channel),
+                              min(int(retry_after), NOTIFY_RETRY_AFTER_CAP_SECS))
+        except Exception:
+            logger.exception("Ghi cooldown kênh %s lỗi — vẫn hẹn gửi lại theo lịch của dòng", channel)
+    row = owned.values("attempts").first()
+    if row is None:
+        return "lost"
+    attempts = row["attempts"]
+    now_ = timezone.now()
+    message = _safe_error_text(exc)
+    transient = isinstance(exc, (ChannelTransientError, SoftTimeLimitExceeded))
+    if transient and attempts < _notify_max_attempts():
+        delay = _retry_delay_secs(attempts, getattr(exc, "retry_after", None))
+        updated = owned.update(
+            status="pending", error=message, updated_at=now_,
+            next_attempt_at=now_ + timedelta(seconds=delay),
+        )
+        return "rescheduled" if updated else "lost"
+    if transient:
+        message = f"{message} — bỏ cuộc sau {attempts} lần gửi"
+    updated = owned.update(status="failed", error=message, next_attempt_at=None, updated_at=now_)
+    return "failed" if updated else "lost"
+
+
+def _expiry_reason(n: AlertNotification, now_) -> str:
+    """Lý do KHÔNG nên gửi row này nữa (rỗng = cứ gửi). Gọi SAU khi đã claim (attempts đã +1).
+
+    * Quá số lần thử — chặn vòng lặp vô hạn khi tiến trình bị SIGKILL giữa chừng nhiều lần (mỗi lần
+      reclaim vẫn tính 1 lượt).
+    * Fire của alert ĐÃ HỒI PHỤC và đã nằm quá lâu — báo "🔴 sự cố" cho thứ đã hết là cảnh báo hết hiệu
+      lực (sau sự cố sập cả stack hàng giờ). Fire của alert còn active thì VẪN gửi (sự cố đang diễn
+      ra); recovery luôn gửi (bỏ nó khiến người trực tưởng sự cố còn đó). Trong cửa sổ hợp lệ giữ
+      nguyên hành vi late-recovery đã duyệt (fire gửi trễ rồi recovery theo sau).
+    """
+    max_attempts = _notify_max_attempts()
+    if n.attempts > max_attempts:
+        return f"Đã vượt {max_attempts} lần gửi — không thử lại nữa"
+    if (n.kind == "fire" and not n.alert.is_active
+            and (now_ - n.sent_at).total_seconds() > _fire_resolved_max_age_secs()):
+        return ("Cảnh báo đã hồi phục từ trước khi gửi được thông báo này — bỏ qua để không báo "
+                "một cảnh báo đã hết hiệu lực")
+    return ""
 
 
 def _send_channel_message(kind: str, channel: str, alert: Alert) -> None:
@@ -1204,31 +1339,77 @@ def _dispatch_notifications(alert: Alert, channels: list[str], kind: str) -> Non
     """
     for channel in channels:
         token = uuid.uuid4().hex
+        now_ = timezone.now()
+        # Kênh đang trong cooldown dùng chung (vừa có lần gửi khác nhận 429): KHÔNG claim, KHÔNG gửi,
+        # KHÔNG tốn lượt thử — hẹn row đúng lúc hết cooldown để sweep nhặt (review 2026-10-15, P2: trước
+        # đây đường gửi trực tiếp bỏ qua hoàn toàn và tiếp tục đâm vào 429).
+        wait = cooldown.remaining_secs(_channel_cooldown_key(channel))
+        if wait > 0:
+            until = now_ + timedelta(seconds=wait)
+            deferred = AlertNotification.objects.filter(
+                alert=alert, channel=channel, kind=kind, status="pending",
+            ).filter(
+                Q(next_attempt_at__isnull=True) | Q(next_attempt_at__lt=until)
+            ).update(next_attempt_at=until, updated_at=now_)
+            if not deferred and not AlertNotification.objects.filter(
+                alert=alert, channel=channel, kind=kind
+            ).exists():
+                AlertNotification.objects.create(  # gọi ngoài luồng chuẩn: chưa có row outbox
+                    alert=alert, channel=channel, kind=kind, status="pending", next_attempt_at=until,
+                )
+            logger.warning("%s notification [%s] hoãn %.0fs: kênh đang trong thời gian chờ flood control",
+                           kind, channel, wait)
+            continue
+        # Chỉ claim row ĐẾN HẠN: row đã được lên lịch gửi lại (next_attempt_at ở tương lai, vd theo
+        # retry_after của Telegram) không được gửi sớm bởi lời gọi trực tiếp này.
         claimed = AlertNotification.objects.filter(
-            alert=alert, channel=channel, kind=kind, status="pending"
-        ).update(status="processing", updated_at=timezone.now(), claim_token=token)
+            alert=alert, channel=channel, kind=kind, status="pending",
+        ).filter(
+            Q(next_attempt_at__isnull=True) | Q(next_attempt_at__lte=now_)
+        ).update(status="processing", updated_at=now_, claim_token=token, attempts=F("attempts") + 1)
         if not claimed and AlertNotification.objects.filter(
             alert=alert, channel=channel, kind=kind
         ).exists():
             # Có row nhưng KHÔNG claim được — 1 tiến trình khác (sweep, hoặc lời gọi khác) đã
-            # hoặc đang xử lý rồi. Không gửi trùng.
+            # hoặc đang xử lý rồi, hoặc đã lên lịch gửi lại. Không gửi trùng.
             continue
+        owned = AlertNotification.objects.filter(
+            alert=alert, channel=channel, kind=kind, status="processing", claim_token=token,
+        )
         try:
             _send_channel_message(kind, channel, alert)
-        except Exception as exc:
-            updated = AlertNotification.objects.filter(
-                alert=alert, channel=channel, kind=kind, status="processing", claim_token=token,
-            ).update(status="failed", error=str(exc), updated_at=timezone.now())
-            if not updated and not claimed:
+        except SoftTimeLimitExceeded as exc:
+            # Tác vụ poll bị cắt đúng lúc đang gọi kênh (A9: 12 dòng `failed` vĩnh viễn trên prod vì
+            # `except Exception` bên dưới nuốt nó). Không phải lỗi của kênh → giữ pending để sweep gửi
+            # lại, rồi raise lại để tác vụ gọi dừng đúng nghĩa. Các kênh còn lại chưa claim sẽ được
+            # sweep nhặt sau `grace_secs`.
+            if claimed:
+                _settle_failed_attempt(owned, exc, channel)
+            else:
                 AlertNotification.objects.create(
-                    alert=alert, channel=channel, kind=kind, status="failed", error=str(exc)
+                    alert=alert, channel=channel, kind=kind, status="pending", attempts=1,
+                    error=_safe_error_text(exc), next_attempt_at=timezone.now(),
                 )
-            elif not updated:
-                logger.warning(
-                    "%s notification [%s] bị reclaim trước khi ghi lỗi xong — bỏ qua, tiến "
-                    "trình reclaim chịu trách nhiệm ghi kết quả cuối", kind, channel,
+            raise
+        except Exception as exc:
+            if claimed:
+                outcome = _settle_failed_attempt(owned, exc, channel)
+                if outcome == "lost":
+                    logger.warning(
+                        "%s notification [%s] bị reclaim trước khi ghi lỗi xong — bỏ qua, tiến "
+                        "trình reclaim chịu trách nhiệm ghi kết quả cuối", kind, channel,
+                    )
+                elif outcome == "rescheduled":
+                    logger.warning("%s notification [%s] lỗi tạm thời, sẽ thử lại: %s",
+                                   kind, channel, _safe_error_text(exc))
+                else:
+                    logger.error("%s notification failed [%s]: %s", kind, channel, _safe_error_text(exc))
+            else:
+                AlertNotification.objects.create(
+                    alert=alert, channel=channel, kind=kind, status="failed", attempts=1,
+                    error=_safe_error_text(exc),
                 )
-            logger.error("%s notification failed [%s]: %s", kind, channel, exc)
+                logger.error("%s notification failed [%s]: %s", kind, channel, _safe_error_text(exc))
             continue
 
         if kind == "fire":
@@ -1247,7 +1428,7 @@ def _dispatch_notifications(alert: Alert, channels: list[str], kind: str) -> Non
         else:
             updated = AlertNotification.objects.filter(
                 alert=alert, channel=channel, kind=kind, status="processing", claim_token=token,
-            ).update(status="sent", updated_at=timezone.now())
+            ).update(status="sent", next_attempt_at=None, updated_at=timezone.now())
             if not updated:
                 if claimed:
                     logger.warning(
@@ -1292,45 +1473,100 @@ def retry_pending_alert_notifications(grace_secs: int = 90, stale_processing_sec
     finalize trễ hơn sẽ thấy `claim_token` không khớp (đã bị ghi đè lúc reclaim) → tự bỏ qua,
     không ghi đè lại kết quả đúng. Xem comment đầy đủ ở `_dispatch_notifications`.
     """
+    t0 = time.monotonic()
     now_ = timezone.now()
     pending_cutoff = now_ - timedelta(seconds=grace_secs)
     stale_cutoff = now_ - timedelta(seconds=stale_processing_secs)
 
-    candidate_ids = list(
-        AlertNotification.objects.filter(
-            Q(status="pending", sent_at__lt=pending_cutoff)
-            | Q(status="processing", updated_at__lt=stale_cutoff)
-        ).values_list("pk", flat=True)
+    # Row pending "đến hạn": (a) chưa từng lên lịch và đã nằm quá grace_secs (worker chết giữa commit và
+    # gửi), hoặc (b) đã lên lịch gửi lại và next_attempt_at <= bây giờ. Row còn đang chờ lịch
+    # (next_attempt_at ở tương lai) KHÔNG được nhặt sớm — đó là chỗ tuân theo retry_after của Telegram.
+    # Row `failed` (kể cả 309 dòng cũ trên prod, đều thuộc alert đã hồi phục) không bao giờ được nhặt.
+    due_pending = Q(status="pending") & (
+        Q(next_attempt_at__isnull=True, sent_at__lt=pending_cutoff) | Q(next_attempt_at__lte=now_)
+    )
+    stale_processing = Q(status="processing", updated_at__lt=stale_cutoff)
+
+    candidates = list(
+        AlertNotification.objects.filter(due_pending | stale_processing)
+        .order_by("sent_at").values_list("pk", "channel")
     )
 
+    budget = _sweep_budget_secs()
+    min_gap = _telegram_min_interval_secs()
+    # Chỉ còn dùng cho "kênh đang sập" (chuỗi lỗi tạm thời liên tiếp) — hết vòng là bỏ. Flood control
+    # (retry_after) KHÔNG nằm ở đây nữa mà ở bảng ChannelCooldown dùng chung giữa các vòng và đường
+    # gửi trực tiếp.
+    held_until: dict[str, float] = {}
+    cooldown_keys: dict[str, str | None] = {}
+    last_attempt: dict[str, float] = {}
+    streak: dict[str, int] = {}
     processed = 0
-    for pk in candidate_ids:
+    for idx, (pk, channel) in enumerate(candidates):
+        if time.monotonic() - t0 >= budget:
+            logger.warning(
+                "Retry notification: hết ngân sách %.0fs, còn %d dòng đến hạn để dành cho lượt sau",
+                budget, len(candidates) - idx,
+            )
+            break
+        if time.monotonic() < held_until.get(channel, 0.0):
+            continue  # kênh đang sập trong vòng này — chưa claim nên không tốn lượt thử của dòng này
+        if channel not in cooldown_keys:
+            cooldown_keys[channel] = _channel_cooldown_key(channel)
+        if cooldown.remaining_secs(cooldown_keys[channel]) > 0:
+            continue  # flood control dùng chung (vòng trước hoặc lần gửi trực tiếp ghi) — không tốn lượt
+        if channel in PACED_CHANNELS and channel in last_attempt:
+            wait = min_gap - (time.monotonic() - last_attempt[channel])
+            if wait > 0:
+                time.sleep(wait)
+
         token = uuid.uuid4().hex
         claimed = AlertNotification.objects.filter(
-            Q(pk=pk) & (
-                Q(status="pending")
-                | Q(status="processing", updated_at__lt=stale_cutoff)
-            )
-        ).update(status="processing", updated_at=timezone.now(), claim_token=token)
+            Q(pk=pk) & (due_pending | stale_processing)
+        ).update(status="processing", updated_at=timezone.now(), claim_token=token,
+                 attempts=F("attempts") + 1)
         if not claimed:
             continue  # bị 1 tiến trình khác claim mất giữa lúc chọn candidate và lúc tới lượt
         n = AlertNotification.objects.select_related("alert").get(pk=pk)
-        try:
-            _send_channel_message(n.kind, n.channel, n.alert)
-        except Exception as exc:
-            updated = AlertNotification.objects.filter(
-                pk=pk, status="processing", claim_token=token
-            ).update(status="failed", error=str(exc), updated_at=timezone.now())
+        owned = AlertNotification.objects.filter(pk=pk, status="processing", claim_token=token)
+
+        reason = _expiry_reason(n, timezone.now())
+        if reason:
+            owned.update(status="failed", error=reason, next_attempt_at=None, updated_at=timezone.now())
             processed += 1
-            if updated:
-                logger.error("Retry %s notification failed [%s]: %s", n.kind, n.channel, exc)
-            else:
-                logger.warning(
-                    "Retry %s notification [%s] bị reclaim trong lúc gửi (chủ mới đã ghi kết "
-                    "quả) — bỏ qua ghi lỗi, không ghi đè", n.kind, n.channel,
-                )
+            logger.warning("Retry %s notification [%s] bỏ qua: %s", n.kind, n.channel, reason)
             continue
 
+        try:
+            _send_channel_message(n.kind, n.channel, n.alert)
+        except SoftTimeLimitExceeded as exc:
+            _settle_failed_attempt(owned, exc, channel)  # giữ pending để vòng sau gửi lại, rồi cho tác vụ dừng
+            raise
+        except Exception as exc:
+            outcome = _settle_failed_attempt(owned, exc, channel)  # 429 → ghi cooldown dùng chung
+            processed += 1
+            last_attempt[channel] = time.monotonic()
+            if isinstance(exc, ChannelTransientError):
+                streak[channel] = streak.get(channel, 0) + 1
+                if not getattr(exc, "retry_after", None) and streak[channel] >= NOTIFY_SWEEP_TRANSIENT_STREAK:
+                    held_until[channel] = float("inf")
+            else:
+                streak[channel] = 0
+            if outcome == "lost":
+                logger.warning(
+                    "Retry %s notification [%s] bị reclaim trong lúc gửi (chủ mới đã ghi kết quả) — "
+                    "bỏ qua ghi lỗi, không ghi đè", n.kind, n.channel,
+                )
+            elif outcome == "rescheduled":
+                logger.warning("Retry %s notification [%s] lỗi tạm thời, hẹn lại: %s",
+                               n.kind, n.channel, _safe_error_text(exc))
+            else:
+                logger.error("Retry %s notification failed [%s]: %s",
+                             n.kind, n.channel, _safe_error_text(exc))
+            continue
+
+        streak[channel] = 0
+        last_attempt[channel] = time.monotonic()
         if n.kind == "fire":
             # _finalize_fire_sent gộp "chuyển sent" + "queue recovery trễ nếu đã resolve" vào
             # chung 1 transaction có khoá Device — xem docstring đầy đủ ở đó (review vòng 2).
@@ -1343,9 +1579,7 @@ def retry_pending_alert_notifications(grace_secs: int = 90, stale_processing_sec
                 )
             continue
 
-        updated = AlertNotification.objects.filter(
-            pk=pk, status="processing", claim_token=token
-        ).update(status="sent", updated_at=timezone.now())
+        updated = owned.update(status="sent", next_attempt_at=None, updated_at=timezone.now())
         processed += 1
         if not updated:
             logger.warning(
