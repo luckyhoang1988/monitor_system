@@ -85,8 +85,15 @@ class Command(BaseCommand):
             )
 
         if opts.get("write"):
+            from apps.collectors.topology_switch_fdb import IncompleteSwitchDataError
             from apps.collectors.topology_writer import discover_switch_links_fdb
-            n = discover_switch_links_fdb(switches)
+            try:
+                n = discover_switch_links_fdb(switches)
+            except IncompleteSwitchDataError as exc:
+                self.stdout.write(self.style.WARNING(
+                    f"\nKHÔNG ghi link: thiếu MAC/FDB của {exc} — suy luận sẽ tạo cạnh ma."
+                ))
+                return
             self.stdout.write(self.style.SUCCESS(f"\nĐã ghi {n} link switch↔switch vào DB."))
         else:
             self.stdout.write(self.style.WARNING(

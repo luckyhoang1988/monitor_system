@@ -730,6 +730,39 @@ vòng. Nhánh `except SoftTimeLimitExceeded` bên ngoài vòng lặp hầu như 
 - Số đo từ log phải kèm cửa sổ thời gian: lúc đo 2026-10-15 log worker chỉ phủ ~27 phút (từ lần recreate) và toàn
   khoẻ, nên số "lượt xấu" của kế hoạch (8 soft-limit, 6 hard-kill, 269,8s) không tái đo được — ghi là số của kế hoạch.
 
+### Bẫy: helper SNMP "tiện" nuốt mọi lỗi → walk thất bại bị đọc thành "bảng rỗng" (1.9, 2026-10-15)
+`snmp_walk_pairs` có `except Exception → []` (log DEBUG). `SoftTimeLimitExceeded` kế thừa `Exception` nên cũng
+thành `[]`, và timeout thật cũng vậy. Nơi nào GHI hoặc SO SÁNH theo "có/không có" mà dùng nó thì "không hỏi được"
+= "không có dữ liệu": ifDescr rỗng → tên cổng giả `port-N` → ghi thành `TopologyLink`; link không thấy → đếm trượt.
+- **Chứng minh bằng thực nghiệm, không tin comment**: script cục bộ phát tín hiệu vào luồng chính giữa lúc
+  `session.walk` (Windows không có SIGUSR1: `signal.signal(SIGINT, handler_ném_SoftTimeLimitExceeded)` +
+  `threading.Timer(1.0, lambda: signal.raise_signal(signal.SIGINT))`, đích IP TEST-NET-1 `192.0.2.1` để request treo).
+  Kết quả: helper trả `[]`, `session.walk` thô nổi lên exception.
+- Quy tắc: nơi ghi dữ liệu dùng `snmp_walk_pairs_strict` — chỉ coi rỗng khi thiết bị TRẢ LỜI error-status
+  (`SnmpDeviceError`) hoặc bảng thật sự không hàng; timeout/lỗi mạng/hết giờ task phải nổi lên. Giữ fallback bảng
+  dự phòng (Q-BRIDGE → BRIDGE-MIB): chỉ ném khi KHÔNG bảng nào có dữ liệu mà có bảng lỗi. Các collector đang chạy ổn
+  (`snmp_walk_pairs`) KHÔNG đổi — đổi helper toàn cục là đổi ngữ nghĩa poll mọi thiết bị.
+- **Trước khi siết, đo 1 lượt chỉ-đọc trên worker** xem có walk nào ném lỗi trong vận hành bình thường không
+  (`ssh monitorsrv "cd … && docker compose exec -T worker python manage.py shell" < probe.py`, `session.walk` thô từng
+  OID, in `loại lỗi + thời gian`, KHÔNG in community). 2026-10-15: 17 switch × ~11 bảng = 0 lỗi, 67,5s.
+- **Đo thời gian từng PHA từ mốc log trước khi chọn cách sửa**: lượt 149,8s hoá ra là walk lặp (FDB 2×, LLDP 2×),
+  không phải 1 switch chậm — "deadline giữa các switch" thuần tuý sẽ cắt đói switch cuối mỗi lượt. Dùng chung kết quả
+  walk bằng `ContextVar` trong `with walk_memo():` (không đổi chữ ký → test mock cũ nguyên), lưu dữ liệu THÔ chứ không
+  lưu kết quả đã lọc theo tham số, lỗi không lưu.
+- Pha cần dữ liệu toàn fleet (switch↔switch FDB) phải all-or-nothing khi hết giờ: chạy dở thì mọi link không thấy
+  bị đếm trượt (3 lượt → stale). Test phải dựng link "sẽ bị đếm trượt nếu pha chạy" — link trùng đúng cạnh mà pha
+  tìm lại được thì được làm mới, không bao giờ đỏ (đột biến lộ ra).
+- **Loại phần tử lỗi khỏi bước suy luận trên TOÀN TẬP là tạo kết quả sai, không phải "bỏ qua cho an toàn"** (review
+  ngoài 2026-10-15, chính tôi viết sai): cạnh trực tiếp = "không switch nào xen giữa" nên bỏ switch trung gian ra
+  khỏi registry biến SW1–SW2–SW3 thành SW1–SW3. Lỗi 1 PHẦN (chỉ 1 cột LLDP timeout) khác lỗi TOÀN PHẦN: đừng gộp bằng
+  "switch này lỗi → loại". Quy tắc: mỗi bước tự lấy dữ liệu của nó; suy luận toàn tập là ALL-OR-NOTHING — thiếu dữ liệu
+  bất kỳ thành viên nào thì bỏ cả pha và giữ nguyên kết quả cũ (không ghi, không đánh stale). Đừng viết "tương đương
+  bản cũ" khi chưa thử ca lỗi MỘT PHẦN; dựng kịch bản đó thành test trước.
+- Đừng suy mốc tuyệt đối từ "tuổi": lúc đo tôi đã ghi nhầm 2 dòng `port-N` thuộc lượt 03:41 (tuổi 52 phút tại lúc
+  probe lúc ~04:05 → 03:13). Lấy `last_seen`/`first_seen` tuyệt đối rồi mới đối chiếu với mốc log.
+- Windows/Git Bash: `grep -c $'\r'` báo mọi file là CRLF (kể cả file LF) — kiểm bằng Python `read_bytes().count(b"\r\n")`.
+  Repo TRỘN LF/CRLF (vd `snmp_client.py`/`tasks.py` CRLF, `topology_*.py` LF) → script vá phải tự nhận và giữ nguyên.
+
 ## 2. Deploy
 ```
 ./deploy.sh            # push origin master + pull/build/restart trên monitorsrv

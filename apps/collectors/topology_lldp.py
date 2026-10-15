@@ -12,9 +12,10 @@ import yaml
 from apps.collectors.snmp_client import (
     create_snmp_session,
     resolve_snmp_backend,
-    snmp_walk_pairs,
+    snmp_walk_pairs_strict,
 )
 from apps.collectors.switch_snmp import SwitchSNMPCollector
+from apps.collectors.topology_walk import memoized
 
 if TYPE_CHECKING:
     from apps.devices.models import Device
@@ -79,7 +80,7 @@ def _walk_column(session, oid: str | None) -> dict[str, str]:
     if not oid:
         return {}
     result: dict[str, str] = {}
-    for full_oid, value in snmp_walk_pairs(session, oid):
+    for full_oid, value in snmp_walk_pairs_strict(session, oid):
         idx = _index_after(full_oid, oid)
         if idx:
             result[idx] = value
@@ -186,31 +187,26 @@ def _resolve_local_port_name(
     return f"port-{local_port_num}"
 
 
-def collect_lldp_neighbors(
-    device: Device,
-    *,
-    ap_only: bool = True,
-    ap_pattern: re.Pattern | None = None,
-    ap_macs: set[str] | None = None,
-) -> list[NeighborRecord]:
-    """Walk LLDP trên 1 switch, trả danh sách neighbor (mặc định chỉ AP)."""
-    os_family = device.os_family or "huawei_vrp"
-    oids = _load_lldp_oids(os_family)
-    if not oids.get("rem_sys_name"):
-        logger.warning("Topology %s: thiếu OID LLDP trong profile %s", device.name, os_family)
-        return []
+def _walk_lldp_tables(
+    device: Device, oids: dict,
+) -> tuple[dict[str, str], dict[int, int], dict[int, str], dict[int, dict[str, str]]]:
+    """Walk các bảng LLDP của 1 switch — dữ liệu THÔ, chưa phân loại AP/switch.
 
+    Walk NGHIÊM NGẶT (`snmp_walk_pairs_strict`): timeout/mất mạng/hết giờ task nổi lên thay vì thành
+    bảng rỗng. ifDescr rỗng làm mọi cổng đặt tên giả `port-N` rồi ghi thành TopologyLink (đã thấy 6
+    dòng như vậy trên prod, dòng mới nhất tạo lúc 2026-10-15 03:13 UTC).
+    """
     backend = resolve_snmp_backend()
     session = create_snmp_session(_snmp_kwargs(device), backend=backend)
 
     if_names = {
         oid.split(".")[-1]: val
-        for oid, val in snmp_walk_pairs(session, oids.get("if_descr", "1.3.6.1.2.1.2.2.1.2"))
+        for oid, val in snmp_walk_pairs_strict(session, oids.get("if_descr", "1.3.6.1.2.1.2.2.1.2"))
     }
 
     base_to_ifidx: dict[int, int] = {}
     bp_oid = oids.get("dot1d_baseport_ifindex", "1.3.6.1.2.1.17.1.4.1.2")
-    for oid, val in snmp_walk_pairs(session, bp_oid):
+    for oid, val in snmp_walk_pairs_strict(session, bp_oid):
         try:
             base_to_ifidx[int(oid.split(".")[-1])] = int(val)
         except (ValueError, TypeError):
@@ -234,6 +230,27 @@ def collect_lldp_neighbors(
         "port_id": _walk_column(session, oids.get("rem_port_id")),
     }
     grouped = _group_rem_rows(rem_columns)
+    return if_names, base_to_ifidx, loc_port_map, grouped
+
+
+def collect_lldp_neighbors(
+    device: Device,
+    *,
+    ap_only: bool = True,
+    ap_pattern: re.Pattern | None = None,
+    ap_macs: set[str] | None = None,
+) -> list[NeighborRecord]:
+    """Walk LLDP trên 1 switch, trả danh sách neighbor (mặc định chỉ AP)."""
+    os_family = device.os_family or "huawei_vrp"
+    oids = _load_lldp_oids(os_family)
+    if not oids.get("rem_sys_name"):
+        logger.warning("Topology %s: thiếu OID LLDP trong profile %s", device.name, os_family)
+        return []
+
+    # Dữ liệu thô dùng chung trong 1 lượt discovery (AP rồi uplink cùng 1 lần walk).
+    if_names, base_to_ifidx, loc_port_map, grouped = memoized(
+        ("lldp", device.pk), lambda: _walk_lldp_tables(device, oids),
+    )
 
     neighbors: list[NeighborRecord] = []
     for local_port_num, row in sorted(grouped.items()):

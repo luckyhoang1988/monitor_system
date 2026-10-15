@@ -17,10 +17,12 @@ import logging
 from collections import defaultdict
 from typing import TYPE_CHECKING
 
+from celery.exceptions import SoftTimeLimitExceeded
+
 from apps.collectors.snmp_client import (
     create_snmp_session,
     resolve_snmp_backend,
-    snmp_walk_pairs,
+    snmp_walk_pairs_strict,
 )
 from apps.collectors.topology_fdb import collect_switch_mac_table
 from apps.collectors.topology_lldp import normalize_mac
@@ -29,6 +31,19 @@ if TYPE_CHECKING:
     from apps.devices.models import Device
 
 logger = logging.getLogger(__name__)
+
+class IncompleteSwitchDataError(Exception):
+    """Thiếu MAC tự thân hoặc FDB của ≥1 switch — không đủ cơ sở suy ra cạnh trực tiếp.
+
+    Suy luận "X nối trực tiếp Y khi không switch nào xen giữa" chỉ đúng khi biết MAC và FDB của MỌI
+    switch: thiếu 1 switch trung gian thì 2 switch hai bên "thấy nhau" và bị nối nhầm (cạnh ma) trong
+    khi 2 cạnh thật biến mất rồi bị đếm trượt. Người gọi phải bỏ cả pha và giữ nguyên link cũ.
+    """
+
+    def __init__(self, names: list[str]) -> None:
+        super().__init__(", ".join(names))
+        self.names = list(names)
+
 
 # BRIDGE-MIB dot1dBaseBridgeAddress (scalar) — MAC gốc của bridge
 OID_DOT1D_BASE_BRIDGE_ADDRESS = "1.3.6.1.2.1.17.1.1"
@@ -53,11 +68,11 @@ def collect_switch_self_macs(device: Device) -> set[str]:
     session = create_snmp_session(_snmp_kwargs(device), backend=backend)
 
     macs: set[str] = set()
-    for _oid, val in snmp_walk_pairs(session, OID_DOT1D_BASE_BRIDGE_ADDRESS):
+    for _oid, val in snmp_walk_pairs_strict(session, OID_DOT1D_BASE_BRIDGE_ADDRESS):
         mac = normalize_mac(val)
         if mac:
             macs.add(mac)
-    for _oid, val in snmp_walk_pairs(session, OID_IF_PHYS_ADDRESS):
+    for _oid, val in snmp_walk_pairs_strict(session, OID_IF_PHYS_ADDRESS):
         mac = normalize_mac(val)
         # bỏ MAC rỗng/00:00:.. (interface ảo không có MAC vật lý)
         if mac and mac != "00:00:00:00:00:00":
@@ -65,15 +80,33 @@ def collect_switch_self_macs(device: Device) -> set[str]:
     return macs
 
 
-def build_switch_mac_registry(switches: list[Device]) -> dict[str, int]:
-    """Gộp MAC → device_id cho toàn fleet (gọi 1 lần mỗi vòng discovery)."""
+def build_switch_mac_registry(
+    switches: list[Device],
+    *,
+    missing: list[str] | None = None,
+) -> dict[str, int]:
+    """Gộp MAC → device_id cho toàn fleet (gọi 1 lần mỗi vòng discovery).
+
+    `missing` (tuỳ chọn): nhận tên switch KHÔNG thu được MAC (lỗi walk hoặc rỗng) rồi dừng ngay
+    (fail-fast — mỗi walk hỏng tốn tới 30s, người gọi sẽ bỏ cả pha). Không truyền thì bỏ qua switch
+    đó và đi tiếp như trước.
+    """
     registry: dict[str, int] = {}
     for sw in switches:
         try:
             self_macs = collect_switch_self_macs(sw)
+        except SoftTimeLimitExceeded:
+            raise
         except Exception as exc:  # noqa: BLE001 — SNMP lỗi không được fail cả run
             logger.warning("Topology switch-MAC %s: lỗi thu MAC: %s", sw.name, exc)
+            if missing is not None:
+                missing.append(sw.name)
+                break
             continue
+        if missing is not None and not self_macs:
+            logger.warning("Topology switch-MAC %s: không có MAC nào", sw.name)
+            missing.append(sw.name)
+            break
         for mac in self_macs:
             # MAC trùng giữa 2 switch (hiếm) → giữ chủ đầu tiên, ghi cảnh báo
             if mac in registry and registry[mac] != sw.id:
@@ -96,26 +129,40 @@ def collect_switch_fdb_by_port(device: Device) -> dict[str, set[str]]:
 def discover_switch_adjacency(
     switches: list[Device],
     registry: dict[str, int] | None = None,
+    *,
+    missing: list[str] | None = None,
 ) -> list[tuple[int, str, int, str]]:
     """Trả các cặp switch nối trực tiếp: (dev_a, port_a, dev_b, port_b).
 
-    Cặp vô hướng (mỗi cặp xuất hiện 1 lần). Switch có FDB rỗng bất thường bị bỏ qua
-    vòng này (preserve-on-empty) — không tạo/stale nhầm.
+    Cặp vô hướng (mỗi cặp xuất hiện 1 lần). Mặc định switch có FDB rỗng/lỗi bị bỏ qua và phần còn
+    lại vẫn được suy luận. `missing` (tuỳ chọn) đổi sang chế độ all-or-nothing: nhận tên switch
+    thiếu FDB rồi dừng ngay, kết quả trả về chưa đủ tin cậy — người gọi phải bỏ nó (xem
+    `IncompleteSwitchDataError`).
     """
     switches = list(switches)
     if registry is None:
-        registry = build_switch_mac_registry(switches)
+        registry = build_switch_mac_registry(switches, missing=missing)
+        if missing:
+            return []
 
     # seen[sw_id][port] = set(device_id switch khác thấy trên cổng đó)
     seen: dict[int, dict[str, set[int]]] = {}
     for sw in switches:
         try:
             fdb = collect_switch_fdb_by_port(sw)
+        except SoftTimeLimitExceeded:
+            raise
         except Exception as exc:  # noqa: BLE001
             logger.warning("Topology switch-FDB %s: lỗi walk FDB: %s", sw.name, exc)
+            if missing is not None:
+                missing.append(sw.name)
+                break
             continue
         if not fdb:
             logger.info("Topology switch-FDB %s: FDB rỗng — bỏ qua vòng này", sw.name)
+            if missing is not None:
+                missing.append(sw.name)
+                break
             continue
         per_port: dict[str, set[int]] = {}
         for port, macs in fdb.items():

@@ -336,6 +336,12 @@ def poll_all_hyperv() -> None:
 
 TOPOLOGY_DISCOVER_SOFT_LIMIT = 120
 TOPOLOGY_DISCOVER_HARD_LIMIT = 150
+# Không BẮT ĐẦU switch/pha mới khi đã tốn (soft − margin) — dừng bằng đồng hồ, không đợi exception.
+# Đo prod 2026-10-15 (17 switch): 7/7 lượt trong log chạy 128–150s (lượt 03:41: 80,3s quét từng
+# switch + 4,7s MAC tự thân + 64,6s FDB lần 2). Walk mỗi bảng 1 lần = 67,5s (đo trực tiếp).
+# 30s = 1 walk hỏng thật (timeout 10s × 3 lần thử) nên switch đang chạy dở lúc quá hạn vẫn kịp xong
+# trước soft limit.
+TOPOLOGY_DISCOVER_START_MARGIN = 30
 
 
 @shared_task(
@@ -346,10 +352,23 @@ def discover_topology_links() -> None:
     """Walk LLDP trên mọi switch SNMP → upsert TopologyLink (chu kỳ 30 phút)."""
     from apps.collectors.topology_writer import discover_all_switches
 
-    stats = discover_all_switches()
+    started = _monotonic()
+    try:
+        stats = discover_all_switches(
+            deadline_secs=TOPOLOGY_DISCOVER_SOFT_LIMIT - TOPOLOGY_DISCOVER_START_MARGIN,
+        )
+    except SoftTimeLimitExceeded:
+        # Link đã ghi giữ nguyên (mỗi link upsert riêng, pha stale chạy sau cùng) — lượt sau làm lại.
+        logger.warning(
+            "Topology discovery dừng vì hết soft limit %ds sau %.1fs — lượt sau quét lại",
+            TOPOLOGY_DISCOVER_SOFT_LIMIT, _monotonic() - started,
+        )
+        return
     logger.info(
-        "Topology discovery done: switches=%d links=%d confirmed=%d errors=%d",
+        "Topology discovery done: switches=%d links=%d confirmed=%d errors=%d "
+        "skipped=%d switch_fdb_skipped=%d elapsed=%.1fs",
         stats["switches"], stats["links"], stats["confirmed"], stats["errors"],
+        stats.get("skipped", 0), stats.get("switch_fdb_skipped", 0), _monotonic() - started,
     )
 
 

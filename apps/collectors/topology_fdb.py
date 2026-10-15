@@ -11,12 +11,15 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from celery.exceptions import SoftTimeLimitExceeded
+
 from apps.collectors.snmp_client import (
     create_snmp_session,
     resolve_snmp_backend,
-    snmp_walk_pairs,
+    snmp_walk_pairs_strict,
 )
 from apps.collectors.topology_lldp import normalize_mac
+from apps.collectors.topology_walk import memoized
 
 if TYPE_CHECKING:
     from apps.devices.models import Device
@@ -267,10 +270,22 @@ def _resolve_port_name(
 
 
 def _walk_fdb_port_map(session) -> dict[tuple[int | None, str], int]:
-    """Trả {(vlan, mac): dot1dBasePort}."""
+    """Trả {(vlan, mac): dot1dBasePort}.
+
+    Thử Q-BRIDGE rồi BRIDGE-MIB. Một bảng lỗi (timeout) không chặn bảng kia, nhưng nếu KHÔNG bảng nào
+    cho dữ liệu mà có bảng lỗi thì ném lỗi đó — "không hỏi được" không được báo thành "FDB rỗng".
+    """
     result: dict[tuple[int | None, str], int] = {}
+    failure: Exception | None = None
     for oid_prefix in (OID_DOT1Q_FDB_PORT, OID_DOT1D_FDB_PORT):
-        rows = snmp_walk_pairs(session, oid_prefix)
+        try:
+            rows = snmp_walk_pairs_strict(session, oid_prefix)
+        except SoftTimeLimitExceeded:
+            raise
+        except Exception as exc:  # noqa: BLE001 — thử bảng còn lại, ném lại ở cuối nếu cả hai hỏng
+            failure = failure or exc
+            logger.debug("FDB walk lỗi prefix=%s: %s", oid_prefix, exc)
+            continue
         if not rows:
             continue
         for full_oid, val in rows:
@@ -288,7 +303,33 @@ def _walk_fdb_port_map(session) -> dict[tuple[int | None, str], int]:
                 result[key] = base_port
         if result:
             break
+    if not result and failure is not None:
+        raise failure
     return result
+
+
+def _walk_fdb_tables(
+    device: Device,
+) -> tuple[dict[str, str], dict[int, int], dict[tuple[int | None, str], int]]:
+    """Walk ifDescr + dot1dBasePort→ifIndex + bảng FDB của 1 switch (THÔ, chưa lọc AP/uplink).
+
+    Walk NGHIÊM NGẶT: lỗi nổi lên, không đổi thành bảng rỗng (ifDescr rỗng → tên cổng giả `port-N`).
+    """
+    backend = resolve_snmp_backend()
+    session = create_snmp_session(_snmp_kwargs(device), backend=backend)
+
+    if_names = {
+        oid.split(".")[-1]: val
+        for oid, val in snmp_walk_pairs_strict(session, OID_IF_DESCR)
+    }
+    base_to_ifidx: dict[int, int] = {}
+    for oid, val in snmp_walk_pairs_strict(session, OID_DOT1D_BASEPORT_IFINDEX):
+        try:
+            base_to_ifidx[int(oid.split(".")[-1])] = int(val)
+        except (ValueError, TypeError):
+            continue
+
+    return if_names, base_to_ifidx, _walk_fdb_port_map(session)
 
 
 def collect_switch_mac_table(
@@ -298,21 +339,10 @@ def collect_switch_mac_table(
     ap_only: bool = False,
 ) -> list[FdbMacEntry]:
     """Walk FDB switch. Nếu ap_macs cho trước, chỉ trả MAC khớp AP (hoặc ap_only=True)."""
-    backend = resolve_snmp_backend()
-    session = create_snmp_session(_snmp_kwargs(device), backend=backend)
-
-    if_names = {
-        oid.split(".")[-1]: val
-        for oid, val in snmp_walk_pairs(session, OID_IF_DESCR)
-    }
-    base_to_ifidx: dict[int, int] = {}
-    for oid, val in snmp_walk_pairs(session, OID_DOT1D_BASEPORT_IFINDEX):
-        try:
-            base_to_ifidx[int(oid.split(".")[-1])] = int(val)
-        except (ValueError, TypeError):
-            continue
-
-    fdb_map = _walk_fdb_port_map(session)
+    # Dữ liệu thô dùng chung trong 1 lượt discovery (dò AP rồi dựng cạnh switch↔switch).
+    if_names, base_to_ifidx, fdb_map = memoized(
+        ("fdb", device.pk), lambda: _walk_fdb_tables(device),
+    )
     entries: list[FdbMacEntry] = []
     seen_mac_port: set[tuple[str, str]] = set()
 

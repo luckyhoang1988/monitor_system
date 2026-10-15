@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import TYPE_CHECKING
 
+from celery.exceptions import SoftTimeLimitExceeded
 from django.utils import timezone
 
 from apps.collectors.topology_fdb import collect_fdb_ap_mappings
 from apps.collectors.topology_lldp import collect_lldp_neighbors, normalize_mac
+from apps.collectors.topology_walk import walk_memo
 from apps.devices.topology_match import (
     get_default_ac_device,
     load_ac_ap_snapshot,
@@ -24,6 +27,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 STALE_MISS_THRESHOLD = 3
+
+
+def _monotonic() -> float:
+    """Đồng hồ cho deadline — tách riêng để test thay bằng đồng hồ giả."""
+    return time.monotonic()
 
 
 def _resolve_interface(device: Device, port_name: str):
@@ -113,8 +121,13 @@ def discover_switch_links_fdb(switches: list[Device]) -> int:
 
     Orient parent (gần core)→child bằng BFS để admin/đồ thị đọc tự nhiên; graph builder
     vẫn tự reorient theo BFS nên hướng lưu không bắt buộc.
+
+    ALL-OR-NOTHING: thiếu MAC tự thân hoặc FDB của bất kỳ switch nào → ném `IncompleteSwitchDataError`,
+    KHÔNG ghi và KHÔNG đánh stale gì (link cũ giữ nguyên). Suy luận cạnh trực tiếp cần biết mọi
+    switch trung gian; bỏ sót 1 switch tạo cạnh ma giữa 2 switch hai bên.
     """
     from apps.collectors.topology_switch_fdb import (
+        IncompleteSwitchDataError,
         build_switch_mac_registry,
         discover_switch_adjacency,
     )
@@ -123,8 +136,13 @@ def discover_switch_links_fdb(switches: list[Device]) -> int:
 
     switches = list(switches)
     by_id = {sw.id: sw for sw in switches}
-    registry = build_switch_mac_registry(switches)
-    pairs = discover_switch_adjacency(switches, registry)
+    missing: list[str] = []
+    registry = build_switch_mac_registry(switches, missing=missing)
+    if missing:
+        raise IncompleteSwitchDataError(missing)
+    pairs = discover_switch_adjacency(switches, registry, missing=missing)
+    if missing:
+        raise IncompleteSwitchDataError(missing)
 
     # BFS từ core để chọn parent (đầu nông hơn).
     adjacency: dict[int, set[int]] = {}
@@ -298,9 +316,24 @@ def upsert_switch_topology(device: Device, ac_device=None) -> tuple[int, int]:
     return link_count, confirmed
 
 
-def discover_all_switches() -> dict[str, int]:
-    """Chạy discovery trên mọi switch SNMP enabled."""
+def discover_all_switches(deadline_secs: float | None = None) -> dict[str, int]:
+    """Chạy discovery trên mọi switch SNMP enabled.
+
+    `deadline_secs`: ngân sách (giây, tính từ lúc vào hàm) để BẮT ĐẦU việc mới — kiểm trước mỗi
+    switch và trước pha switch↔switch. Quá hạn thì dừng sạch: switch chưa quét giữ nguyên link
+    (không đếm trượt), pha switch↔switch bị bỏ qua nguyên khối (không đánh stale). Dừng bằng đồng
+    hồ chứ không dựa vào SoftTimeLimitExceeded: exception đó chỉ bắn một lần và dễ bị nuốt
+    (đo prod 2026-10-15: lượt chạy 149,8s, soft limit 120s bị nuốt).
+
+    Một lượt dùng chung kết quả walk: bảng FDB/LLDP của mỗi switch chỉ walk 1 lần.
+    """
+    from apps.collectors.topology_switch_fdb import IncompleteSwitchDataError
     from apps.devices.models import Device
+
+    started = _monotonic()
+
+    def out_of_time() -> bool:
+        return deadline_secs is not None and _monotonic() - started >= deadline_secs
 
     switches = Device.objects.filter(
         device_type="switch",
@@ -313,29 +346,69 @@ def discover_all_switches() -> dict[str, int]:
     total_confirmed = 0
     switch_links = 0
     errors = 0
+    skipped: list[str] = []
+    switch_fdb_skipped = 0
 
-    switch_list = list(switches)
-    for sw in switch_list:
-        try:
-            n, c = upsert_switch_topology(sw, ac)
-            total_links += n
-            total_confirmed += c
-            switch_links += discover_switch_uplinks(sw, device_index)
-        except Exception as exc:
-            errors += 1
-            logger.warning("Topology discovery failed %s: %s", sw.name, exc)
+    # Switch lần poll trước lỗi (last_seen=None) quét SAU CÙNG: nếu lượt bị cắt thì cắt đúng switch
+    # đang hỏng, không phải switch khoẻ (sort ổn định → giữ thứ tự mặc định trong từng nhóm).
+    switch_list = sorted(switches, key=lambda sw: sw.last_seen is None)
 
-    # Phát hiện cạnh switch↔switch qua FDB (1 lần/run — cần MAC toàn fleet).
-    try:
-        switch_links += discover_switch_links_fdb(switch_list)
-    except Exception as exc:
-        errors += 1
-        logger.warning("Topology switch-FDB discovery failed: %s", exc)
+    with walk_memo():
+        for i, sw in enumerate(switch_list):
+            if out_of_time():
+                skipped = [s.name for s in switch_list[i:]]
+                break
+            try:
+                n, c = upsert_switch_topology(sw, ac)
+                total_links += n
+                total_confirmed += c
+                switch_links += discover_switch_uplinks(sw, device_index)
+            except SoftTimeLimitExceeded:
+                raise
+            except Exception as exc:
+                errors += 1
+                logger.warning("Topology discovery failed %s: %s", sw.name, exc)
+
+        # Phát hiện cạnh switch↔switch qua FDB (1 lần/run — cần MAC toàn fleet). Cần dữ liệu đủ
+        # cho cả fleet nên không chạy dở: hết giờ thì bỏ qua nguyên pha, link giữ nguyên.
+        if skipped:
+            switch_fdb_skipped = 1
+            logger.warning(
+                "Topology discovery dừng sớm theo deadline %.0fs: đã quét %d/%d switch, bỏ qua: %s",
+                deadline_secs or 0, len(switch_list) - len(skipped), len(switch_list),
+                ", ".join(skipped),
+            )
+        elif out_of_time():
+            switch_fdb_skipped = 1
+            logger.warning(
+                "Topology switch-FDB bỏ qua vòng này: hết ngân sách %.0fs sau khi quét %d switch",
+                deadline_secs or 0, len(switch_list),
+            )
+        else:
+            # KHÔNG loại switch đã lỗi ở pha 1 khỏi pha này: lỗi 1 phần (vd chỉ cột LLDP) vẫn cho
+            # MAC/FDB đọc được, còn thiếu thật thì pha tự bỏ nguyên khối (IncompleteSwitchDataError).
+            try:
+                switch_links += discover_switch_links_fdb(switch_list)
+            except SoftTimeLimitExceeded:
+                raise
+            except IncompleteSwitchDataError as exc:
+                switch_fdb_skipped = 1
+                logger.warning(
+                    "Topology switch-FDB bỏ qua vòng này: thiếu MAC/FDB của %s — không đủ cơ sở "
+                    "suy ra cạnh trực tiếp (thiếu switch trung gian sẽ tạo cạnh ma); link giữ "
+                    "nguyên, không đánh stale",
+                    exc,
+                )
+            except Exception as exc:
+                errors += 1
+                logger.warning("Topology switch-FDB discovery failed: %s", exc)
 
     return {
-        "switches": switches.count(),
+        "switches": len(switch_list),
         "links": total_links,
         "confirmed": total_confirmed,
         "switch_links": switch_links,
         "errors": errors,
+        "skipped": len(skipped),
+        "switch_fdb_skipped": switch_fdb_skipped,
     }

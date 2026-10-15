@@ -18,6 +18,15 @@ class SnmpResult:
     value: str
 
 
+class SnmpDeviceError(ConnectionError):
+    """Thiết bị TRẢ LỜI request bằng error-status (noSuchName/genErr/...) — khác lỗi đường truyền.
+
+    Kế thừa ConnectionError nên mọi `except ConnectionError` cũ vẫn bắt được. Tách riêng để
+    `snmp_walk_pairs_strict` coi "thiết bị nói bảng này không có" là rỗng hợp lệ, còn timeout/mất
+    mạng thì phải nổi lên.
+    """
+
+
 def _safe_close(dispatcher) -> None:
     """Đóng SnmpDispatcher mà không để lỗi cleanup làm hỏng kết quả/che lỗi gốc.
 
@@ -74,7 +83,7 @@ class PySnmpSession:
             if err_ind:
                 raise ConnectionError(str(err_ind))
             if err_status:
-                raise ConnectionError(f"{err_status.prettyPrint()} at {err_index}")
+                raise SnmpDeviceError(f"{err_status.prettyPrint()} at {err_index}")
             if not var_binds:
                 raise ConnectionError("Không nhận được dữ liệu SNMP.")
             var_bind = var_binds[0]
@@ -120,7 +129,7 @@ class PySnmpSession:
                 if err_ind:
                     raise ConnectionError(str(err_ind))
                 if err_status:
-                    raise ConnectionError(f"{err_status.prettyPrint()} at {err_index}")
+                    raise SnmpDeviceError(f"{err_status.prettyPrint()} at {err_index}")
                 if not var_binds:
                     break
                 done = False
@@ -163,7 +172,7 @@ class PySnmpSession:
                 if err_ind:
                     raise ConnectionError(str(err_ind))
                 if err_status:
-                    raise ConnectionError(f"{err_status.prettyPrint()} at {err_index}")
+                    raise SnmpDeviceError(f"{err_status.prettyPrint()} at {err_index}")
                 if not var_binds:
                     break
                 var_bind = var_binds[0]
@@ -229,6 +238,24 @@ def snmp_walk_pairs(session: Any, oid_prefix: str) -> list[tuple[str, str]]:
     except Exception as exc:
         logger.debug("snmp walk failed prefix=%s: %s", oid_prefix, exc)
         return []
+
+
+def snmp_walk_pairs_strict(session: Any, oid_prefix: str) -> list[tuple[str, str]]:
+    """Như `snmp_walk_pairs` nhưng walk THẤT BẠI không bị đổi thành "bảng rỗng".
+
+    `snmp_walk_pairs` nuốt mọi Exception rồi trả `[]` — kể cả timeout và `SoftTimeLimitExceeded`
+    (kế thừa Exception). Với topology, "không hỏi được" bị đọc thành "không có dữ liệu": ifDescr
+    rỗng đặt mọi cổng tên giả `port-N`, soft limit bị nuốt thì task chạy tiếp tới hard-kill.
+
+    Chỉ coi là rỗng khi THIẾT BỊ TRẢ LỜI rằng bảng không có/không hỗ trợ (`SnmpDeviceError`) hoặc
+    bảng thật sự không có hàng. Timeout, lỗi mạng, hết giờ của task nổi lên cho nơi gọi.
+    """
+    try:
+        results = session.walk(oid_prefix)
+    except SnmpDeviceError as exc:
+        logger.debug("snmp walk: thiết bị báo error-status prefix=%s: %s", oid_prefix, exc)
+        return []
+    return [(r.oid, r.value) for r in results]
 
 
 def probe_snmp_v2c(
