@@ -673,6 +673,25 @@ thành mất thông báo thật: prod 309/1.843 dòng, 15/38 fire riêng ngày 2
 - Tình trạng thông báo cũ `failed`: đo xem alert tương ứng còn active không TRƯỚC khi quyết định phát lại —
   cả 309 dòng prod thuộc alert đã hồi phục nên không phát lại gì cả.
 
+### Bẫy: vòng lặp theo phần tử (rule/thiết bị/host) không cô lập lỗi (1.8, 2026-10-15)
+`for rule in rules: ...` không có `try` trong thân → 1 phần tử ném exception là cả vòng dừng, mọi phần tử sau bị
+bỏ qua IM LẶNG, lặp lại mỗi chu kỳ (`check_device_alerts`: 1 getter lỗi che cả rule offline/RAID phía sau).
+- Bọc `try` Ở TRONG vòng lặp, quanh từng phần tử (tách thân thành hàm riêng cho dễ test); log bằng
+  `logger.exception` kèm định danh phần tử (tên rule, id, thiết bị) — không chỉ `str(exc)`.
+- **`except SoftTimeLimitExceeded: raise` PHẢI đứng TRƯỚC `except Exception`** (nó kế thừa `Exception`); nếu không
+  vòng lặp nuốt tín hiệu hết giờ và task chạy tới hard-kill. Test bảo vệ này xanh cả trên code cũ → chứng minh
+  bằng đột biến (bỏ nhánh raise → đúng test đỏ), không tin test xanh.
+- Test hồi quy: đặt rule hỏng ĐỨNG TRƯỚC rule lành theo `Meta.ordering` (cùng severity, tên `A-…` < `B-…`), phủ cả
+  đường fire lẫn resolve, không chỉ getter. Dùng exception Python thuần — lỗi DB trong test (transaction bọc
+  sẵn) làm hỏng cả transaction và các rule sau lỗi vì lý do khác.
+- Công cụ cục bộ (Windows): `python -I` bỏ qua `PYTHONIOENCODING` → in tiếng Việt ra `cp1252` lỗi
+  `UnicodeEncodeError`; dùng `python -X utf8 -I`. Script sửa file CRLF: đọc/ghi `newline=""` và chuẩn hoá `\n`
+  rồi trả lại `\r\n`, nếu không diff bị nhiễu toàn file. Thêm `assert` đếm số chỗ sẽ đổi (đã bắt được 1 giả
+  định sai về số `continue`) và `git diff -w --stat` để thấy diff logic thật sau khi dedent.
+- Log container KHÔNG phải nguồn đo tần suất lịch sử: compose không xoay log, container bị tạo lại mỗi deploy
+  (cửa sổ đọc được chỉ ~10 phút sau lần deploy). "0 lần trong log" ≠ "chưa từng xảy ra" — kiểm
+  `docker compose logs --timestamps` xem cửa sổ phủ bao lâu rồi mới kết luận.
+
 ## 2. Deploy
 ```
 ./deploy.sh            # push origin master + pull/build/restart trên monitorsrv

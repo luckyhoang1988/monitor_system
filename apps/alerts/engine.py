@@ -802,68 +802,88 @@ def check_device_alerts(device: Device, since) -> None:
         device_type__in=[device.device_type, "all"]
     )
     for rule in rules:
-        getter = METRIC_GETTERS.get(rule.metric)
-        if not getter:
-            continue
+        # Cô lập lỗi THEO TỪNG RULE (hạng mục 1.8, 2026-10-15): trước đây 1 getter/_fire_alert/
+        # _resolve_alert ném exception là cả vòng này dừng — mọi rule phía sau của thiết bị (kể cả
+        # rule offline/RAID) không được xét trong chu kỳ đó, lặp lại mỗi vòng, và nơi gọi chỉ log 1
+        # dòng không có traceback. Nay rule hỏng bị log kèm traceback rồi bỏ qua, rule còn lại chạy.
+        try:
+            _evaluate_rule(device, rule, since)
+        except SoftTimeLimitExceeded:
+            # Kế thừa `Exception` (celery.exceptions) nên `except Exception` bên dưới sẽ nuốt nó và
+            # task poll không bao giờ dừng đúng hạn (cùng họ bug A7/A9) → phải bắt riêng và raise lại.
+            raise
+        except Exception:
+            logger.exception(
+                "Alert rule '%s' (id=%s, metric=%s) lỗi khi đánh giá cho %s — bỏ qua rule này, "
+                "các rule còn lại của thiết bị vẫn được xét",
+                rule.name, rule.pk, rule.metric, device.name,
+            )
 
-        has_active = Alert.objects.filter(device=device, rule=rule, is_active=True).exists()
 
-        # duration_min: if set, require condition to be sustained for the whole window.
-        if rule.duration_min and rule.duration_min > 0:
-            window_since = timezone.now() - timedelta(minutes=int(rule.duration_min))
-            if rule.metric in SUSTAINABLE_METRICS:
-                value = _sustained_cpu_mem(device, rule, window_since)
-            elif rule.metric == "if_status":
-                # if_status semantics: 1 if all uplinks up, 0 if any down
-                value = _sustained_if_status(device, window_since)
-            elif rule.metric in ("uplink_in_mbps_max", "uplink_out_mbps_max"):
-                value = _sustained_uplink_traffic_max(device, rule, window_since)
-            elif rule.metric in ("vm_count_running", "vm_repl_unhealthy"):
-                value = _sustained_vm_metric(device, rule, window_since)
-            elif rule.metric == "device_online":
-                value = _sustained_device_online(device, window_since)
-            elif rule.metric == "wifi_client_count":
-                value = _sustained_wifi_client_count(device, rule, window_since)
-            elif rule.metric == "wifi_ap_offline":
-                value = _sustained_wifi_ap_offline_count(device, rule, window_since)
-            elif rule.metric in _HOST_PERF_FIELD_MAP:
-                value = _sustained_host_perf(device, rule, window_since)
-            elif rule.metric in _ILO_FIELD_MAP:
-                value = _sustained_ilo(device, rule, window_since)
-            else:
-                value = getter(device, since)
+def _evaluate_rule(device: Device, rule: AlertRule, since) -> None:
+    """Đánh giá 1 rule cho 1 thiết bị: đọc giá trị rồi quyết định fire / resolve / giữ nguyên."""
+    getter = METRIC_GETTERS.get(rule.metric)
+    if not getter:
+        return
 
-            # ⚠️ 2026-09-28: các hàm `_sustained_*` dùng `_sustained_verdict` (mọi metric TRỪ
-            # device_online/if_status — 2 metric đó tự trả 0.0/1.0 rõ ràng) trả về `None` bất
-            # cứ khi nào điều kiện KHÔNG còn đúng suốt window — nhưng đó CHÍNH LÀ lúc metric đã
-            # hồi phục. Trước đây `value is None` → `continue` thẳng, không bao giờ tới nhánh
-            # "resolve" bên dưới → alert đã fire (duration_min>0) KHÔNG BAO GIỜ tự resolve được,
-            # kẹt `is_active=True` vĩnh viễn dù metric đã về ngưỡng bình thường từ lâu (verify
-            # runtime prod: 11/13 alert active thuộc nhóm rule này đã hồi phục thật từ nhiều
-            # ngày/tháng trước nhưng chưa từng resolve — xem memory `alert-sustained-never-resolve.md`).
-            # Fix: khi sustained=None mà đang có alert active, fallback đọc giá trị TỨC THỜI
-            # (không sustain, đúng hàm `getter` dùng cho nhánh duration_min=0) để xét resolve qua
-            # hysteresis — resolve KHÔNG cần sustain (giống cách device_online/if_status đã làm
-            # đúng từ đầu: chỉ sustain lúc FIRE để lọc nhiễu, resolve thì tức thời ngay khi có bằng
-            # chứng hồi phục mới nhất). Không đổi bán kính "fire" (vẫn phải sustain đủ window).
-            if value is None:
-                if has_active:
-                    instant = getter(device, since)
-                    if instant is not None and _decide_transition(rule, instant, has_active) == "resolve":
-                        _resolve_alert(device, rule)
-                continue
+    has_active = Alert.objects.filter(device=device, rule=rule, is_active=True).exists()
+
+    # duration_min: if set, require condition to be sustained for the whole window.
+    if rule.duration_min and rule.duration_min > 0:
+        window_since = timezone.now() - timedelta(minutes=int(rule.duration_min))
+        if rule.metric in SUSTAINABLE_METRICS:
+            value = _sustained_cpu_mem(device, rule, window_since)
+        elif rule.metric == "if_status":
+            # if_status semantics: 1 if all uplinks up, 0 if any down
+            value = _sustained_if_status(device, window_since)
+        elif rule.metric in ("uplink_in_mbps_max", "uplink_out_mbps_max"):
+            value = _sustained_uplink_traffic_max(device, rule, window_since)
+        elif rule.metric in ("vm_count_running", "vm_repl_unhealthy"):
+            value = _sustained_vm_metric(device, rule, window_since)
+        elif rule.metric == "device_online":
+            value = _sustained_device_online(device, window_since)
+        elif rule.metric == "wifi_client_count":
+            value = _sustained_wifi_client_count(device, rule, window_since)
+        elif rule.metric == "wifi_ap_offline":
+            value = _sustained_wifi_ap_offline_count(device, rule, window_since)
+        elif rule.metric in _HOST_PERF_FIELD_MAP:
+            value = _sustained_host_perf(device, rule, window_since)
+        elif rule.metric in _ILO_FIELD_MAP:
+            value = _sustained_ilo(device, rule, window_since)
         else:
             value = getter(device, since)
 
+        # ⚠️ 2026-09-28: các hàm `_sustained_*` dùng `_sustained_verdict` (mọi metric TRỪ
+        # device_online/if_status — 2 metric đó tự trả 0.0/1.0 rõ ràng) trả về `None` bất
+        # cứ khi nào điều kiện KHÔNG còn đúng suốt window — nhưng đó CHÍNH LÀ lúc metric đã
+        # hồi phục. Trước đây `value is None` → `continue` thẳng, không bao giờ tới nhánh
+        # "resolve" bên dưới → alert đã fire (duration_min>0) KHÔNG BAO GIỜ tự resolve được,
+        # kẹt `is_active=True` vĩnh viễn dù metric đã về ngưỡng bình thường từ lâu (verify
+        # runtime prod: 11/13 alert active thuộc nhóm rule này đã hồi phục thật từ nhiều
+        # ngày/tháng trước nhưng chưa từng resolve — xem memory `alert-sustained-never-resolve.md`).
+        # Fix: khi sustained=None mà đang có alert active, fallback đọc giá trị TỨC THỜI
+        # (không sustain, đúng hàm `getter` dùng cho nhánh duration_min=0) để xét resolve qua
+        # hysteresis — resolve KHÔNG cần sustain (giống cách device_online/if_status đã làm
+        # đúng từ đầu: chỉ sustain lúc FIRE để lọc nhiễu, resolve thì tức thời ngay khi có bằng
+        # chứng hồi phục mới nhất). Không đổi bán kính "fire" (vẫn phải sustain đủ window).
         if value is None:
-            continue
+            if has_active:
+                instant = getter(device, since)
+                if instant is not None and _decide_transition(rule, instant, has_active) == "resolve":
+                    _resolve_alert(device, rule)
+            return
+    else:
+        value = getter(device, since)
 
-        action = _decide_transition(rule, value, has_active)
-        if action == "fire":
-            _fire_alert(device, rule, value)
-        elif action == "resolve":
-            _resolve_alert(device, rule)
-        # "hold" (trong vùng đệm hysteresis) / "none" (không có alert active): không làm gì
+    if value is None:
+        return
+
+    action = _decide_transition(rule, value, has_active)
+    if action == "fire":
+        _fire_alert(device, rule, value)
+    elif action == "resolve":
+        _resolve_alert(device, rule)
+    # "hold" (trong vùng đệm hysteresis) / "none" (không có alert active): không làm gì
 
 
 def _persist_incident_snapshot(device: Device) -> None:
