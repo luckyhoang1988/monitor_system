@@ -1,5 +1,9 @@
 """Celery tasks — polling định kỳ và lưu metrics vào DB."""
 import logging
+import time
+from collections.abc import Iterable
+from datetime import UTC, datetime
+
 from celery import shared_task
 from celery.exceptions import SoftTimeLimitExceeded
 from django.utils import timezone
@@ -89,7 +93,8 @@ def _poll_device_once(device_id: int) -> None:
         try:
             save_metrics(device, data)
         except SoftTimeLimitExceeded:
-            # Giữ ngữ nghĩa cũ (nuốt, xem 1.7) nhưng không báo ERROR giả: thiết bị đã trả lời xong.
+            # Nuốt có chủ đích, không báo ERROR giả: thiết bị đã trả lời xong. Batch (hyperv/iLO)
+            # KHÔNG dựa vào exception này để dừng — nó tự dừng theo deadline (xem poll_all_hyperv).
             logger.warning("Device %s: ghi metrics bị cắt bởi soft_time_limit", device.name)
         except Exception:
             logger.exception(
@@ -219,18 +224,58 @@ def poll_all_ping_devices() -> None:
 # 2026-09-28: thêm host thứ 3 (Hyprver03) + Hyperv-02 đang có sự cố RAID/HpSAMD thật
 # (xem memory hyperv02-winrm-instability.md, ssacli/cage đĩa 2 lỏng) khiến 1 lệnh WinRM
 # trên Hyperv-02 có thể tự treo tới hết timeout socket riêng (60-70s) DÙ đã hết soft
-# time_limit — SoftTimeLimitExceeded là 1 exception Python (SystemExit) chỉ raise được
-# khi interpreter quay lại bytecode; nếu đang kẹt trong 1 lệnh blocking dài hơn khoảng
-# (hard-soft) còn lại thì Celery buộc SIGKILL cả task (log "ERROR/MainProcess Hard time
-# limit exceeded") — không "Polled X"/"succeeded" nào được ghi, mọi host trong vòng đó
-# (kể cả Hyperv-01/Hyprver03 đang khoẻ) mất trắng 1 chu kỳ → last_seen rớt quá grace →
-# Offline giả. Verify runtime: 09:35-10:11 hard-kill liên tục ~10 lần/36 phút. Fix: nới
-# rộng hẳn (không chỉ tăng nhẹ) + tăng POLL_HYPERV_INTERVAL_SECS đi kèm (300s, xem
-# config/settings/base.py) để có margin thật cho 3 host + 1 host đang bệnh, tránh vá lại
-# đúng bẫy này khi fleet tăng tiếp. Trước khi thêm host HyperV thứ 4+ — đo lại timing thật
-# rồi mới quyết định giữ nguyên hay tách kiến trúc (dispatch mỗi host 1 task riêng).
+# time_limit — Celery SIGKILL cả task khi quá hard limit (log "ERROR/MainProcess Hard time
+# limit exceeded"): không "Polled X"/"succeeded" nào được ghi, host chưa poll mất trắng 1
+# chu kỳ. Verify runtime: 09:35-10:11 hard-kill liên tục ~10 lần/36 phút. Fix 2026-09-28:
+# nới rộng hẳn (không chỉ tăng nhẹ) + tăng POLL_HYPERV_INTERVAL_SECS đi kèm (300s, xem
+# config/settings/base.py) để có margin thật cho 3 host + 1 host đang bệnh. Trước khi thêm
+# host HyperV thứ 4+ — đo lại timing thật rồi mới quyết định giữ nguyên hay tách kiến trúc
+# (dispatch mỗi host 1 task riêng).
+# ⚠️ Cơ chế hard-kill còn lại (1.7, 2026-10-15; đã chạy `__mro__`): SoftTimeLimitExceeded kế
+# thừa `Exception`, KHÔNG phải SystemExit — nên bị `except Exception` nuốt (trong collect() của
+# _poll_device_once, trong inline alert eval, và trong chính vòng lặp này) và batch CHẠY TIẾP
+# sau soft limit cho tới hard-kill (prod 10,5 ngày: 8 soft-limit → 6 hard-kill, batch tới 269,8s).
+# Vì vậy batch KHÔNG dựa vào exception để dừng: vòng lặp tự kiểm deadline bằng đồng hồ trước
+# mỗi host (xem POLL_HYPERV_BATCH_START_MARGIN) và host lần trước lỗi được poll cuối.
 POLL_HYPERV_BATCH_SOFT_LIMIT = 250
 POLL_HYPERV_BATCH_HARD_LIMIT = 270
+# Không BẮT ĐẦU host mới khi đồng hồ đã quá (soft − margin). Đo prod 2026-10-15 (5 lượt liên
+# tiếp, 3 host khoẻ): 16–19s/host, batch 51,4–52,1s → 60s ≈ 3× một host khoẻ. Host đã bắt đầu
+# trước deadline mà treo thì vẫn chịu soft limit (host đó coi như lỗi lần này, như trước).
+POLL_HYPERV_BATCH_START_MARGIN = 60
+
+
+def _monotonic() -> float:
+    """Đồng hồ cho deadline của batch — tách hàm để test điều khiển được, không patch time toàn cục."""
+    return time.monotonic()
+
+
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+
+
+def _order_hosts_healthy_first(
+    rows: Iterable[tuple[int, str, bool, datetime | None]],
+) -> list[tuple[int, str]]:
+    """Thứ tự host trong 1 batch: host lần trước poll THÀNH CÔNG đứng trước, host lần trước lỗi cuối.
+
+    rows = (pk, name, failed_last_time, last_ok_at). Host bệnh (treo tới hết timeout) dồn xuống cuối
+    để nếu batch bị cắt thì cắt đúng host đó, không cắt host khoẻ. Trong mỗi nhóm, host LÂU CHƯA poll
+    thành công nhất đứng trước (host bị deadline bỏ qua ở vòng trước không bị bỏ đói), rồi theo pk
+    cho ổn định. KHÔNG dùng `-last_ok_seen` thuần: host bệnh vừa thành công 1 lần có last_ok_seen mới
+    nhất → luôn đứng đầu, treo 250s, các host khoẻ phía sau bị bỏ đói liên tục.
+    """
+    ordered = sorted(rows, key=lambda r: (r[2], r[3] or _EPOCH, r[0]))
+    return [(pk, name) for pk, name, _failed, _ok_at in ordered]
+
+
+def _warn_batch_cut(
+    task: str, soft_limit: int, margin: int, done: int, remaining: list[str], elapsed: float,
+) -> None:
+    logger.warning(
+        "%s dừng sớm theo deadline %ds (soft_limit %ds − margin %ds) sau %d host, bỏ qua %d host "
+        "chưa bắt đầu: %s — chờ chu kỳ sau (elapsed=%.1fs)",
+        task, soft_limit - margin, soft_limit, margin, done, len(remaining), ", ".join(remaining), elapsed,
+    )
 
 
 @shared_task(
@@ -240,33 +285,44 @@ POLL_HYPERV_BATCH_HARD_LIMIT = 270
 def poll_all_hyperv() -> None:
     from django.conf import settings
     from apps.devices.models import Device
-    device_ids = list(Device.objects.filter(
-        device_type="hyperv",
-        enabled=True,
-    ).values_list('pk', flat=True))
+    rows = Device.objects.filter(device_type="hyperv", enabled=True).values_list(
+        "pk", "name", "last_seen", "last_ok_seen",
+    )
+    # last_seen=None ⇔ lần poll trước lỗi (xem _poll_device_once: poll lỗi luôn xoá last_seen).
+    hosts = _order_hosts_healthy_first(
+        (pk, name, last_seen is None, last_ok_seen) for pk, name, last_seen, last_ok_seen in rows
+    )
     # Chạy inline để tránh mất task poll_device trong môi trường Celery/Windows không ổn định.
     success = 0
     failed = 0
-    t0 = timezone.now()
+    started = _monotonic()
+    deadline = started + POLL_HYPERV_BATCH_SOFT_LIMIT - POLL_HYPERV_BATCH_START_MARGIN
     try:
-        for pk in device_ids:
+        for index, (pk, _name) in enumerate(hosts):
+            if _monotonic() >= deadline:
+                _warn_batch_cut(
+                    "poll_all_hyperv", POLL_HYPERV_BATCH_SOFT_LIMIT, POLL_HYPERV_BATCH_START_MARGIN,
+                    success + failed, [n for _pk, n in hosts[index:]], _monotonic() - started,
+                )
+                break
             try:
                 _poll_device_once(pk)
                 success += 1
+            except SoftTimeLimitExceeded:
+                raise  # kế thừa Exception — phải đứng TRƯỚC `except Exception`, nếu không batch chạy tiếp
             except Exception as exc:
                 failed += 1
                 logger.warning("Inline HyperV poll failed for device %s: %s", pk, exc)
     except SoftTimeLimitExceeded:
-        elapsed = (timezone.now() - t0).total_seconds()
         logger.warning(
             "poll_all_hyperv vượt soft_time_limit %ds sau %d/%d host (elapsed=%.1fs) — "
             "dừng batch, host còn lại chờ chu kỳ sau",
-            POLL_HYPERV_BATCH_SOFT_LIMIT, success + failed, len(device_ids), elapsed,
+            POLL_HYPERV_BATCH_SOFT_LIMIT, success + failed, len(hosts), _monotonic() - started,
         )
         return
-    elapsed = (timezone.now() - t0).total_seconds()
+    elapsed = _monotonic() - started
     logger.info("Polled %d/%d hyperv hosts inline (failed=%d, elapsed=%.1fs)",
-                success, len(device_ids), failed, elapsed)
+                success, len(hosts), failed, elapsed)
     # Get-Counter burst (~10-12s/host) thêm tải đáng kể — tự cảnh báo nếu tick áp sát
     # interval, tránh lặp sự cố "poll queue snowball" (memory poll-queue-snowball-slow-device.md).
     interval = getattr(settings, "POLL_HYPERV_INTERVAL_SECS", 120)
@@ -304,6 +360,9 @@ def discover_topology_links() -> None:
 # tăng nếu fleet iLO mở rộng (theo đúng bài học poll_all_hyperv — không ngoại suy tuyến tính).
 POLL_ILO_BATCH_SOFT_LIMIT = 60
 POLL_ILO_BATCH_HARD_LIMIT = 70
+# Không BẮT ĐẦU host mới khi đồng hồ đã quá (soft − margin) — cùng cơ chế poll_all_hyperv (1.7).
+# Đo prod 2026-10-15 (5 lượt liên tiếp, 3 iLO khoẻ): ~10s/host, batch 30,2–30,4s → 20s = 2× một host.
+POLL_ILO_BATCH_START_MARGIN = 20
 
 
 def _set_ilo_error(pk: int, message: str) -> None:
@@ -340,16 +399,29 @@ def poll_all_ilo() -> None:
     # .exclude(ilo_ip_address="") sinh SQL "NOT (x = NULL AND x IS NOT NULL)" luôn NULL cho
     # mọi row -> loại bỏ hết kể cả row có IP hợp lệ (verify runtime 2026-09-28, dính bug này
     # ở đúng bước probe trước khi code — xem CLAUDE.md/deploy skill).
-    device_ids = list(
+    rows = (
         Device.objects.filter(device_type="hyperv", enabled=True)
         .exclude(ilo_ip_address__isnull=True)
-        .values_list("pk", flat=True)
+        .values_list("pk", "name", "ilo_last_error")
+    )
+    # Host lần poll iLO trước lỗi (ilo_last_error còn) đứng cuối. Device không lưu mốc "iLO thành công
+    # gần nhất" nên trong mỗi nhóm giữ thứ tự pk — chấp nhận: fleet 3 host, deadline chỉ chạm khi
+    # 1 iLO treo, mà iLO treo thì đã bị đẩy xuống cuối bởi ilo_last_error.
+    hosts = _order_hosts_healthy_first(
+        (pk, name, bool(ilo_last_error), None) for pk, name, ilo_last_error in rows
     )
     success = 0
     failed = 0
-    t0 = timezone.now()
+    started = _monotonic()
+    deadline = started + POLL_ILO_BATCH_SOFT_LIMIT - POLL_ILO_BATCH_START_MARGIN
     try:
-        for pk in device_ids:
+        for index, (pk, _name) in enumerate(hosts):
+            if _monotonic() >= deadline:
+                _warn_batch_cut(
+                    "poll_all_ilo", POLL_ILO_BATCH_SOFT_LIMIT, POLL_ILO_BATCH_START_MARGIN,
+                    success + failed, [n for _pk, n in hosts[index:]], _monotonic() - started,
+                )
+                break
             try:
                 device = Device.objects.get(pk=pk)
                 client = IloRedfishClient(device)
@@ -363,17 +435,20 @@ def poll_all_ilo() -> None:
                 success += 1
                 if device.ilo_last_error or device.ilo_last_error_at:
                     _set_ilo_error(pk, "")
+            except SoftTimeLimitExceeded:
+                # Hết giờ của batch KHÔNG phải lỗi của iLO: không ghi lên Device (UI sẽ hiện "Mất kết nối")
+                # và không đi tiếp — kế thừa Exception nên phải đứng TRƯỚC `except Exception`.
+                raise
             except Exception as exc:
                 failed += 1
                 _set_ilo_error(pk, f"Lỗi xử lý: {type(exc).__name__}")
                 logger.warning("iLO poll lỗi device id=%s: %s", pk, exc, exc_info=True)
     except SoftTimeLimitExceeded:
-        elapsed = (timezone.now() - t0).total_seconds()
         logger.warning(
             "poll_all_ilo vượt soft_time_limit %ds sau %d/%d host (elapsed=%.1fs) — "
             "dừng batch, host còn lại chờ chu kỳ sau",
-            POLL_ILO_BATCH_SOFT_LIMIT, success + failed, len(device_ids), elapsed,
+            POLL_ILO_BATCH_SOFT_LIMIT, success + failed, len(hosts), _monotonic() - started,
         )
         return
-    elapsed = (timezone.now() - t0).total_seconds()
-    logger.info("Polled %d/%d iLO hosts (failed=%d, elapsed=%.1fs)", success, len(device_ids), failed, elapsed)
+    elapsed = _monotonic() - started
+    logger.info("Polled %d/%d iLO hosts (failed=%d, elapsed=%.1fs)", success, len(hosts), failed, elapsed)

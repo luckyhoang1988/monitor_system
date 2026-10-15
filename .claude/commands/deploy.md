@@ -710,6 +710,26 @@ chuỗi quá dài, nghẽn) không được suy ra thành "thiết bị chết".
 - Kế hoạch/tài liệu cũ có thể sai về hiện trạng ("các hàm VM đã cắt sẵn" — thực tế `vm_name` không cắt): đọc code
   từng trường, không tin ghi chú.
 
+### Bẫy: batch tự chạy nhiều host dựa vào `SoftTimeLimitExceeded` để dừng (1.7, 2026-10-15)
+`poll_all_hyperv`/`poll_all_ilo` chạy inline N host trong 1 task. `SoftTimeLimitExceeded` kế thừa `Exception`
+(chạy `SoftTimeLimitExceeded.__mro__` để chắc, đừng tin comment) và chỉ bắn MỘT lần: bị nuốt ở bất kỳ
+`except Exception` nào (collect, inline alert eval, chính vòng lặp batch) là batch chạy tiếp tới hard-kill, mất cả
+vòng. Nhánh `except SoftTimeLimitExceeded` bên ngoài vòng lặp hầu như không bao giờ chạy tới.
+- **Dừng bằng đồng hồ, không bằng exception**: `deadline = bắt đầu + soft_limit − margin`, kiểm trước MỖI phần tử,
+  quá hạn → log nêu TÊN phần tử bị bỏ qua + `break`. Kiểm bằng đồng hồ cũng bắt được ca soft limit đã bị nuốt (quay
+  lại vòng lặp là thấy đã quá hạn). margin ≥ vài lần thời lượng 1 phần tử khoẻ — ĐO trên prod trước (hyperv 16–19s/host
+  → 60s; iLO ~10s/host → 20s), không ước lượng.
+- Vẫn đặt `except SoftTimeLimitExceeded: raise` TRƯỚC `except Exception` trong vòng lặp (lưới phía sau), và đừng
+  ghi hết giờ của batch thành lỗi của phần tử (iLO từng ghi "Lỗi xử lý: SoftTimeLimitExceeded" lên UI).
+- **Thứ tự phần tử quyết định ai bị cắt**: phần tử lần trước lỗi đứng CUỐI. Đừng `order_by("-last_ok_seen")` thuần:
+  host bệnh vừa thành công 1 lần có mốc mới nhất → đứng đầu, treo, và bỏ đói các host khoẻ phía sau. Khoá dùng:
+  `(failed_last_time, last_ok tăng dần, pk)` — host bị bỏ qua vòng trước (mốc cũ) được poll sớm ở vòng sau.
+- Test với đồng hồ giả: patch hàm `_monotonic()` của module (không patch `time.monotonic` toàn cục — Celery/DB driver
+  dùng nó), cho mỗi lần poll giả "tốn" N giây. Phải có test đối chứng "chạy bình thường vẫn poll đủ host" để không cắt
+  nhầm, và test ca soft limit bị nuốt BÊN TRONG phần tử (poll trả về bình thường nhưng đồng hồ đã quá hạn).
+- Số đo từ log phải kèm cửa sổ thời gian: lúc đo 2026-10-15 log worker chỉ phủ ~27 phút (từ lần recreate) và toàn
+  khoẻ, nên số "lượt xấu" của kế hoạch (8 soft-limit, 6 hard-kill, 269,8s) không tái đo được — ghi là số của kế hoạch.
+
 ## 2. Deploy
 ```
 ./deploy.sh            # push origin master + pull/build/restart trên monitorsrv
