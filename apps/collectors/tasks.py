@@ -76,11 +76,26 @@ def _poll_device_once(device_id: int) -> None:
         if require_icmp:
             data.extra["ping_ok"] = bool(icmp_ok)
             data.extra["ping_rtt_ms"] = rtt
-        save_metrics(device, data)
         device.os_family = data.os_family
         snmp_valid = _has_valid_data(device, data)
     except Exception as exc:
         logger.warning("Poll collect failed %s (%s): %s", device.name, device.ip_address, exc)
+
+    # Ghi metrics là việc của HỆ THỐNG, KHÔNG phải bằng chứng thiết bị có trả lời hay không (1.5,
+    # 2026-10-15). Trước đây `save_metrics` nằm chung try với `collect()`: lỗi ghi (vd DataError vì
+    # ifAlias dài hơn cột, DB nghẽn) giữ snmp_valid=False → last_seen=None → badge Off + alert
+    # device_online giả dù SNMP khoẻ. Nay lỗi ghi chỉ mất điểm dữ liệu của vòng này, online giữ nguyên.
+    if data is not None:
+        try:
+            save_metrics(device, data)
+        except SoftTimeLimitExceeded:
+            # Giữ ngữ nghĩa cũ (nuốt, xem 1.7) nhưng không báo ERROR giả: thiết bị đã trả lời xong.
+            logger.warning("Device %s: ghi metrics bị cắt bởi soft_time_limit", device.name)
+        except Exception:
+            logger.exception(
+                "Device %s: ghi metrics thất bại — giữ nguyên trạng thái online của lần poll này",
+                device.name,
+            )
 
     # Online = kết hợp. Với thiết bị mạng: CẢ ping VÀ SNMP-thật (AND).
     online = (snmp_valid and bool(icmp_ok)) if require_icmp else snmp_valid

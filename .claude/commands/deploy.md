@@ -692,6 +692,24 @@ bỏ qua IM LẶNG, lặp lại mỗi chu kỳ (`check_device_alerts`: 1 getter 
   (cửa sổ đọc được chỉ ~10 phút sau lần deploy). "0 lần trong log" ≠ "chưa từng xảy ra" — kiểm
   `docker compose logs --timestamps` xem cửa sổ phủ bao lâu rồi mới kết luận.
 
+### Bẫy: "thiết bị trả lời" bị trộn với "hệ thống ghi được" (1.5, 2026-10-15)
+Trạng thái online là bằng chứng về THIẾT BỊ (ICMP + dữ liệu thu thập hợp lệ). Lỗi của CHÍNH MÌNH (ghi DB/Redis,
+chuỗi quá dài, nghẽn) không được suy ra thành "thiết bị chết".
+- Mỗi bước có nguồn lỗi khác nhau phải có `try` riêng: thu thập → quyết định online; ghi → chỉ log. Log phải nói
+  đúng bản chất ("ghi metrics thất bại"), không mượn nhãn "Poll collect failed".
+- **Postgres từ chối chuỗi quá dài (`DataError`), không tự cắt**, và 1 giá trị hỏng làm hỏng cả `bulk_create`/
+  transaction của vòng ghi. Dữ liệu do thiết bị/người vận hành đặt (ifAlias, tên VM) phải cắt theo `max_length`
+  của model (`_fit(Model, "field", value)`, không gõ số cứng).
+- ⚠️ **Cắt TRƯỚC khi tính khoá tra cứu.** Nếu khoá là `_iface_key(name)` mà chỉ cắt lúc tạo bản ghi, lần poll sau
+  tên chưa cắt không khớp tên đã lưu → coi là "mới" → tạo lại → `IntegrityError` (`unique_together`) lặp mãi.
+  Chuẩn hoá dữ liệu vào ngay đầu hàm ghi để mọi bước sau dùng chung 1 giá trị. Cắt cũng có thể tạo trùng khoá
+  trong cùng lượt → loại trùng trước `bulk_create`.
+- **Đo độ dài thực tế trước khi kết luận mức độ**: walk `ifAlias`/`ifDescr` trên worker (script qua stdin:
+  `ssh monitorsrv "cd … && docker compose exec -T worker python manage.py shell" < script.py`, in độ dài chứ
+  không in giá trị). Đo 2026-10-15: dài nhất 50/28 ký tự → lỗ hổng tiềm ẩn, ghi đúng như vậy.
+- Kế hoạch/tài liệu cũ có thể sai về hiện trạng ("các hàm VM đã cắt sẵn" — thực tế `vm_name` không cắt): đọc code
+  từng trường, không tin ghi chú.
+
 ## 2. Deploy
 ```
 ./deploy.sh            # push origin master + pull/build/restart trên monitorsrv

@@ -42,6 +42,25 @@ TRUNK_DESC_KEYWORDS = (
 _EXTRA_SKIP_KEYS = ("vms", "volumes", "wifi_aps", "wifi_clients")
 
 
+def _fit(model, field: str, value) -> str:
+    """Cắt chuỗi cho vừa `max_length` của cột — Postgres TỪ CHỐI (DataError) chứ không tự cắt, và
+    1 giá trị quá dài làm hỏng cả bulk_create/transaction của vòng ghi (1.5, 2026-10-15)."""
+    return str(value or "")[: model._meta.get_field(field).max_length]
+
+
+def _clamp_interface_text(data: NormalizedData) -> None:
+    """Chuẩn hoá tên/mô tả interface cho vừa cột TRƯỚC mọi bước khác.
+
+    Phải làm ở đầu `save_metrics` (không phải lúc tạo `Interface(...)`): khoá tra cứu là
+    `_iface_key(name)` và `unique_together=(device, name)`. Nếu chỉ cắt lúc ghi mà vẫn tra cứu bằng
+    tên chưa cắt thì mỗi poll sẽ coi interface là "mới" và cố tạo lại → IntegrityError lặp mãi.
+    Mô tả (ifAlias) do người vận hành gõ trên thiết bị nên độ dài không do mình kiểm soát.
+    """
+    for iface in data.interfaces:
+        iface.name = _fit(Interface, "name", iface.name)
+        iface.description = _fit(Interface, "description", iface.description)
+
+
 def save_metrics(device: Device, data: NormalizedData) -> None:
     """Ghi metrics 1 vòng poll.
 
@@ -49,6 +68,7 @@ def save_metrics(device: Device, data: NormalizedData) -> None:
       Postgres chỉ ghi evidence khi đổi trạng thái quan trọng. Redis lỗi → fallback DB.
     - Mode "db" (mặc định): ghi raw như cũ.
     """
+    _clamp_interface_text(data)
     if metrics_cache.is_cache_mode():
         if _save_metrics_cache(device, data):
             return
@@ -327,9 +347,16 @@ def _sync_interface_inventory(device: Device, data: NormalizedData) -> dict[str,
     existing_ifaces = {_iface_key(i.name): i for i in Interface.objects.filter(device=device)}
     new_ifaces = []
     update_ifaces = []
+    seen_new_keys: set[str] = set()
 
     for iface_data in data.interfaces:
         key = _iface_key(iface_data.name)
+        if key not in existing_ifaces:
+            # Hai tên khác nhau chỉ khác phần đuôi sau khi cắt (hoặc ifDescr trùng) cùng key → chỉ
+            # tạo 1 dòng, nếu không bulk_create vi phạm unique_together và hỏng cả lần ghi.
+            if key in seen_new_keys:
+                continue
+            seen_new_keys.add(key)
         if key in existing_ifaces:
             iface = existing_ifaces[key]
             next_is_uplink = _is_trunk_interface(device, iface_data)
@@ -525,8 +552,8 @@ def _save_vm_stats(device: Device, data: NormalizedData) -> None:
             vms_to_create.append(VMStats(
                 device=device,
                 timestamp=data.timestamp,
-                vm_name=vm.get("name", ""),
-                state=vm.get("state", ""),
+                vm_name=_fit(VMStats, "vm_name", vm.get("name")),
+                state=_fit(VMStats, "state", vm.get("state")),
                 cpu_percent=float(vm.get("cpu_percent") or 0),
                 mem_assigned_mb=int(vm.get("mem_mb") or 0),
                 repl_health=(vm.get("repl_health") or "")[:50],
