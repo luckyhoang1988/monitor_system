@@ -433,6 +433,23 @@ class TestResolvePerChannelRecoveryDecision:
         ).exists()
 
 
+def _wait_until_a_backend_is_waiting_for_a_lock(give_up: threading.Event, deadline_secs: float = 10.0) -> bool:
+    """True khi có backend Postgres (khác connection này) đang chờ khoá; False nếu `give_up` đã được set
+    (bên chạy đã xong mà chưa từng bị chặn) hoặc hết hạn chót. Quan sát trạng thái thật qua pg_stat_activity."""
+    deadline = time.monotonic() + deadline_secs
+    while time.monotonic() < deadline and not give_up.is_set():
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT count(*) FROM pg_stat_activity "
+                "WHERE datname = current_database() AND pid <> pg_backend_pid() "
+                "AND wait_event_type = 'Lock'"
+            )
+            if cursor.fetchone()[0]:
+                return True
+        time.sleep(0.02)   # chu kỳ hỏi lại, không phải ngưỡng quyết định
+    return False
+
+
 @pytest.mark.django_db(transaction=True)
 class TestSelectForUpdateRealPostgresLock:
     """Verify select_for_update() KHOÁ THẬT trên Postgres — mọi test khác trong file này chạy
@@ -463,7 +480,7 @@ class TestSelectForUpdateRealPostgresLock:
         thread_a_holds_lock = threading.Event()
         release_thread_a = threading.Event()
         errors = []
-        timings = {}
+        b_done = threading.Event()
 
         real_queue_late_recovery = engine._queue_late_recovery_if_resolved
 
@@ -495,35 +512,34 @@ class TestSelectForUpdateRealPostgresLock:
                 if not thread_a_holds_lock.wait(timeout=5):
                     errors.append("thread A không vào transaction kịp")
                     return
-                start = time.monotonic()
                 engine._resolve_alert(device, rule)
-                timings["b_elapsed"] = time.monotonic() - start
             except Exception as exc:  # pragma: no cover
                 errors.append(exc)
             finally:
+                b_done.set()
                 connection.close()
 
         t_a = threading.Thread(target=run_thread_a)
         t_b = threading.Thread(target=run_thread_b)
         t_a.start()
         t_b.start()
-        # Cho thread B đủ thời gian THỰC SỰ đi vào select_for_update() và bị chặn (không phải
-        # chỉ chưa kịp chạy tới đó) trước khi nhả khoá — nếu không, phép đo thời gian chờ vô nghĩa.
-        time.sleep(0.5)
+        # Đồng bộ bằng SỰ KIỆN, không bằng đồng hồ: hỏi chính Postgres xem có backend nào đang CHỜ KHOÁ
+        # (`wait_event_type = 'Lock'`) — đó là bằng chứng trực tiếp rằng thread B đã vào select_for_update()
+        # và bị thread A chặn. Dừng sớm nếu B đã chạy xong mà chưa từng bị chặn (khoá không có tác dụng).
+        # Vòng chờ chỉ có hạn chót rộng (10s) để không treo; không có ngưỡng thời gian nào quyết định kết quả.
+        blocked = _wait_until_a_backend_is_waiting_for_a_lock(give_up=b_done)
+        b_finished_while_a_held_the_lock = b_done.is_set()
         release_thread_a.set()
-        t_a.join(timeout=5)
-        t_b.join(timeout=5)
+        t_a.join(timeout=10)
+        t_b.join(timeout=10)
 
         assert not errors, f"Lỗi trong thread: {errors}"
-        assert "b_elapsed" in timings, "thread B không hoàn tất"
-        # Nếu select_for_update() KHÔNG khoá thật (vd code quên khoá, hoặc chạy nhầm trên backend
-        # bỏ qua lock), thread B sẽ chạy gần như ngay lập tức (~0s) thay vì phải đợi thread A nhả
-        # khoá — ngưỡng 0.4s (< 0.5s đã sleep) đủ biên để không flaky nhưng vẫn bắt rõ trường hợp
-        # "không khoá thật".
-        assert timings["b_elapsed"] >= 0.4, (
-            f"_resolve_alert chỉ mất {timings['b_elapsed']:.3f}s để chạy xong — có vẻ KHÔNG bị "
-            "chặn bởi khoá Device của _finalize_fire_sent (select_for_update không khoá thật?)"
+        assert not b_finished_while_a_held_the_lock, (
+            "_resolve_alert chạy xong trong lúc _finalize_fire_sent còn giữ khoá Device — "
+            "select_for_update không khoá thật?"
         )
+        assert blocked, "không thấy backend nào chờ khoá Device trong thời hạn chờ — thread B không bị chặn"
+        assert b_done.is_set(), "thread B không hoàn tất sau khi thread A nhả khoá"
 
         # Đúng hành vi race đã fix (round 2): _finalize_fire_sent chạy TRƯỚC (giữ khoá) nên
         # _queue_late_recovery_if_resolved đọc is_active=True (thread B chưa commit) → chưa tạo
