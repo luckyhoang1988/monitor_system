@@ -22,7 +22,7 @@ from apps.devices.topology_switch_match import (
 )
 
 if TYPE_CHECKING:
-    from apps.devices.models import Device
+    from apps.devices.models import Device, TopologyLink
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +32,23 @@ STALE_MISS_THRESHOLD = 3
 def _monotonic() -> float:
     """Đồng hồ cho deadline — tách riêng để test thay bằng đồng hồ giả."""
     return time.monotonic()
+
+
+def _count_miss(link: TopologyLink) -> None:
+    """Đếm 1 lượt không thấy link; chạm STALE_MISS_THRESHOLD thì đánh stale.
+
+    Link ĐÃ stale thì dừng đếm và không ghi nữa. Không đường đọc nào dùng `miss_count` ngoài ngưỡng
+    stale, còn cột là PositiveSmallIntegerField (smallint, tối đa 32767): cộng mãi (≈39/ngày đo trên
+    prod) thì tới 32768 mỗi lượt `save()` ném DataError và phần còn lại của switch đó bị bỏ qua. Link
+    thấy lại được `_upsert_*` ghi `miss_count=0, is_stale=False` nên dừng đếm không cản hồi phục.
+    """
+    misses = link.miss_count or 0
+    if link.is_stale and misses >= STALE_MISS_THRESHOLD:
+        return
+    link.miss_count = min(misses + 1, STALE_MISS_THRESHOLD)
+    if link.miss_count >= STALE_MISS_THRESHOLD:
+        link.is_stale = True
+    link.save(update_fields=["miss_count", "is_stale"])
 
 
 def _resolve_interface(device: Device, port_name: str):
@@ -186,10 +203,7 @@ def discover_switch_links_fdb(switches: list[Device]) -> int:
     for link in stale_qs:
         if (link.local_device_id, link.local_port) in seen_keys:
             continue
-        link.miss_count = (link.miss_count or 0) + 1
-        if link.miss_count >= STALE_MISS_THRESHOLD:
-            link.is_stale = True
-        link.save(update_fields=["miss_count", "is_stale"])
+        _count_miss(link)
 
     logger.info("Topology switch-FDB: %d cạnh switch↔switch", count)
     return count
@@ -230,10 +244,7 @@ def discover_switch_uplinks(
     ).exclude(local_port__in=seen_ports).exclude(match_method="manual")
 
     for link in stale_qs:
-        link.miss_count = (link.miss_count or 0) + 1
-        if link.miss_count >= STALE_MISS_THRESHOLD:
-            link.is_stale = True
-        link.save(update_fields=["miss_count", "is_stale"])
+        _count_miss(link)
 
     if count:
         logger.info("Topology %s: %d switch uplink(s) via LLDP", device.name, count)
@@ -303,10 +314,7 @@ def upsert_switch_topology(device: Device, ac_device=None) -> tuple[int, int]:
     ).exclude(local_port__in=seen_ports).exclude(match_method="manual")
 
     for link in stale_qs:
-        link.miss_count = (link.miss_count or 0) + 1
-        if link.miss_count >= STALE_MISS_THRESHOLD:
-            link.is_stale = True
-        link.save(update_fields=["miss_count", "is_stale"])
+        _count_miss(link)
 
     link_count = len(neighbors) if neighbors else len(seen_ports)
     logger.info(

@@ -808,6 +808,10 @@ Flapping-suppress (`_fire_alert`) tạo Alert nhưng không tạo thông báo; v
 - **Phân biệt với 1.2**: alert có dòng fire nhưng tất cả `failed` KHÔNG thuộc nhóm này; nhắc lại ở đó chỉ tái hiện vòng lặp gửi thất bại. Retention tương lai không được xoá dòng thông báo của alert còn active.
 - **Mẹo test**: `triggered_at` là `auto_now_add` nên không đặt được lúc create → lùi bằng `Alert.objects.update(triggered_at=F("triggered_at") - timedelta(...))` (giữ khoảng cách tương đối giữa các lần fire); tên rule trùng rule migration seed ("Thiết bị offline") ném IntegrityError và rule seed tự gửi vào mock — dùng tên khác + `AlertRule.objects.exclude(pk=...).delete()` khi cần cô lập; recovery trễ do `_finalize_fire_sent` queue cần sweep lần 2 mới gửi. Test song song: rào chắn đặt ĐẦU hàm kiểm tra + timeout (có khoá thì bên kia chờ ở khoá nên rào hết giờ rồi chạy tuần tự); đột biến bỏ khoá phải làm test đỏ — nếu không, test không đo gì.
 
+### Bẫy: bộ đếm cộng dồn vào cột số nguyên hẹp không có trần (`miss_count`, 2026-10-15)
+`PositiveSmallIntegerField` = smallint, tối đa 32767; `save()` không kiểm Python-side nên tràn chỉ lộ ra lúc ghi (`DataError: smallint out of range`) và thường bị chặn theo từng thiết bị → lỗi âm thầm, chỉ thấy là 1 phần dữ liệu không cập nhật. Quy tắc: mọi cột bộ đếm được `+= 1` định kỳ phải (a) có trần hoặc dừng đếm khi đã quyết định xong (stale), (b) không ghi lại khi không đổi, và (c) logic đếm nằm ở 1 hàm — ở đây từng chép nguyên 3 chỗ nên sửa 1 chỗ là bỏ sót 2 chỗ (đột biến "vòng i quay lại mã cũ" kiểm điều đó). Đo trước: `max(cột)` + tốc độ tăng (số đếm / ngày kể từ lần cuối thấy) để biết còn bao lâu, đừng gọi là sự cố khi mới tiềm ẩn.
+- **Mẹo test**: dựng 1 "vòng" bằng dữ liệu mạng RỖNG (monkeypatch hàm lấy dữ liệu về `[]`/`{}`) để mọi link đều "không còn thấy"; parametrize theo từng vòng để test chạy đúng 3 hàm; đếm UPDATE bằng `CaptureQueriesContext` thay vì suy ra từ giá trị.
+
 ## 2. Deploy
 ```
 ./deploy.sh            # push origin master + pull/build/restart trên monitorsrv
