@@ -54,7 +54,38 @@ Quy trình chuẩn (đã dùng để bắt bug 504 phiên đầu):
   (cisco_business/cisco_ios không expose LLDP, hoặc walk ra partial table). Fix: trả `[]`.
   Quy tắc chung: hàm "filter X" mà caller coi output là "danh sách X" thì nhánh rỗng phải trả `[]`.
   Soi link giả: AP link `is_stale=False` có MAC **không** thuộc snapshot AC = giả (xem CLAUDE.md).
+- **Pha "đánh stale" chỉ được áp cho dữ liệu của nguồn ĐÃ chạy lượt này — và mọi nguồn khả dụng phải chạy.**
+  `upsert_switch_topology` từng chỉ chạy FDB khi LLDP không thấy AP nào và stale lọc `protocol=protocol_used`:
+  link tạo bằng nguồn không chạy lượt này đứng yên mãi (không làm mới, không stale) → AP đã rút/đổi switch
+  vẫn hiện ở switch cũ, switch có LLDP một phần thì AP còn lại không bao giờ được map. Ngược lại, nếu nguồn
+  KHÔNG chạy được (AC chưa có danh sách AP để đối chiếu FDB) thì KHÔNG được đếm trượt link của nguồn đó:
+  "không hỏi được" ≠ "không còn". Quy tắc: stale = link thuộc `sources` đã chạy mà không thấy lượt này; nguồn lỗi
+  (ném exception) ⇒ bỏ cả pha, không đánh stale gì. Dò prod: link auto `is_stale=False` có `last_seen` cũ hơn
+  chu kỳ discovery nhiều lần = dấu hiệu link đứng yên (đo 2026-10-21: 0 ca).
+- **Collector ghi vào bảng có `unique_together` mà API/admin cũng ghi tay vào → mọi đường ghi tự động phải bỏ qua dòng
+  do người ghi.** `TopologyLink` unique `(device, port)`: `update_or_create` của discovery đè `match_method="manual"`
+  thành "mac"/"lldp"/"name" nên link rời danh sách thủ công rồi bị đánh stale như link tự động (review ngoài
+  2026-10-21; tái hiện ở CẢ 4 đường ghi — LLDP AP, FDB AP, LLDP uplink, FDB switch↔switch — không chỉ nhánh mới).
+  Khi thêm đường ghi tự động mới, thêm test "link thủ công cùng khoá không bị đè".
+  ⚠️ **Lọc sớm bằng ảnh chụp (`_manual_ports`/`manual_keys`) KHÔNG đủ: kiểm tra phải nằm trong CÙNG transaction với lần ghi.**
+  Ảnh chụp đọc trước khi chờ mạng (walk FDB hàng chục giây) cũ ngay khi admin lưu giữa chừng — review ngoài lần 3
+  2026-10-21 tái hiện bằng 2 connection Postgres. Mọi đường ghi (discovery + API) đi qua `_write_link`: dòng đã có →
+  `SELECT … FOR UPDATE`; chưa có → INSERT, bên thua unique `(device, port)` nhận `IntegrityError` rồi ĐỌC LẠI và áp quy
+  tắc. **KHÔNG dùng `update_or_create` để ghi mà phải tôn trọng bản của người khác**: nhánh IntegrityError của nó tự UPDATE
+  bản của bên thắng (đè đúng thứ vừa được tạo). Tương tự, `save(update_fields=…)` trên bản nạp từ trước (như `_count_miss`)
+  phải thành `UPDATE … WHERE NOT manual` để điều kiện nằm trong chính câu lệnh ghi. Test race: 2 thread + `transaction=True`,
+  đồng bộ bằng `pg_stat_activity.wait_event_type='Lock'` (không đồng hồ), cả 2 thứ tự khoá × (dòng có sẵn / chưa có); thêm
+  test tất định đơn-connection bằng cách cho chính hàm chờ mạng (patch) gọi hàm ghi của API trước khi discovery ghi.
+- **Hai pha trong cùng 1 `try` của vòng lặp theo thiết bị: lỗi pha sau-thêm-vào làm mất pha kia.** Sau khi cho FDB chạy
+  cả với switch có LLDP, walk FDB hỏng làm `discover_switch_uplinks` bị bỏ qua dù LLDP đã đọc xong. Tách bằng loại
+  exception riêng cho đúng pha mới (`ApFdbWalkError`), KHÔNG tách mù mọi lỗi: lỗi của chính nguồn dùng chung giữa
+  2 pha (bảng LLDP) thì thử lại pha sau chỉ nhân đôi timeout trên thiết bị chết (margin deadline chỉ tính 1 walk hỏng).
+  Hỏi "pha sau có cần dữ liệu mà pha trước vừa thất bại không?" rồi mới quyết định tách.
+- **Loại một tập khỏi VẼ phải loại trước khi GÁN QUYỀN SỞ HỮU, không phải sau.** `build_topology_graph` gán
+  `ap_owner` (1 AP chỉ thuộc 1 switch) rồi mới bỏ qua AP của CORE khi vẽ; CORE xếp đầu theo tên nên thắng quyền
+  sở hữu rồi không được vẽ → AP biến mất khỏi switch access thật. Lọc ở truy vấn đầu vào.
 - **Cache-first metrics (`METRICS_WRITE_MODE=cache`)**: khi bỏ ghi raw phải chuyển **cả 3 nguồn đọc** sang cache cùng lúc — alert engine, tính Mbps (prev counter), dashboard/chart raw-tier. Bỏ sót 1 → getter trả None (alert im lặng KHÔNG lỗi rõ) / Mbps=0 / chart trống. Redis lỗi phải **fallback ghi DB** (không mất alert). Sustained/latest getter phải giữ nguyên hysteresis + sentinel mem=0. Xem CLAUDE.md "Cache-first metrics". Bật/tắt qua cờ env, mặc định `db` → rollback nhanh.
+  ⚠️ **"3 nguồn" không phải danh sách đầy đủ — khi một bảng ngừng được ghi, `grep -rn TênModel apps` MỌI nơi đọc.** Dính thật (phát hiện 2026-10-21): `WifiApStats` không còn được ghi từ khi bật cache-mode (2026-07-02) nhưng 4 hàm của **topology** vẫn đọc bảng đó → trang topology + discovery chạy trên snapshot đóng băng 111 ngày (DB 22 AP vs Redis 23 AP; AP mới không bao giờ được map, AP offline không hiện đỏ). Đo bằng: `WifiApStats.objects.filter(device=ac).order_by('-timestamp').first()` trên prod (tuổi dòng cuối) so với `metrics_cache.get_latest(ac.pk)["wifi_aps"]`. Code topology đi qua `load_ac_ap_rows` ([apps/devices/topology_match.py](../../apps/devices/topology_match.py)) — không truy vấn `WifiApStats` trực tiếp; thêm tính năng đọc AP mới thì dùng hàm đó. Test đường cache-mode bằng `settings.METRICS_WRITE_MODE="cache"` + `patch("apps.metrics.cache.get_latest")` (không cần Redis thật). Test chỉ phủ DB-mode là lý do lỗi này lọt qua.
 - **Không hard-code** IP/password/community. Type hints bắt buộc cho collector/adapter.
 - **WinRM `run_ps` (HyperV collector) giới hạn dòng lệnh ~8191 ký tự** (base64-encode UTF-16LE
   script rồi truyền qua cmd.exe). `PS_SCRIPT` trong `apps/collectors/hyperv.py` thêm counter/logic mới

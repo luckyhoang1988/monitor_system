@@ -9,7 +9,7 @@ from django.utils import timezone
 from apps.collectors.topology_lldp import normalize_mac
 from apps.devices.models import Device, TopologyLink
 from apps.devices.topology_hierarchy import build_switch_uplink_edges, find_core_device
-from apps.metrics.models import WifiApStats
+from apps.devices.topology_match import load_ac_ap_rows
 
 ORPHAN_GROUP_ID = "group-orphan"
 
@@ -41,60 +41,51 @@ def _short_label(name: str, max_len: int = 22) -> str:
     return n if len(n) <= max_len else n[: max_len - 1] + "…"
 
 
-def _latest_ap_snapshot(ac: Device) -> dict[str, dict]:
-    latest_ts = (
-        WifiApStats.objects.filter(device=ac)
-        .order_by("-timestamp")
-        .values_list("timestamp", flat=True)
-        .first()
-    )
-    if not latest_ts:
-        return {}
-
+def _snapshot_from_rows(rows: list[dict]) -> dict[str, dict]:
+    """Index AP theo MAC chuẩn hoá và `name:<tên casefold>` (AP không có MAC trên AC)."""
     result: dict[str, dict] = {}
-    for ap in WifiApStats.objects.filter(device=ac, timestamp=latest_ts):
-        mac = normalize_mac(ap.ap_mac)
+    for ap in rows:
+        mac = ap["ap_mac"]
         entry = {
-            "ap_name": ap.ap_name,
-            "ap_mac": mac or ap.ap_mac,
-            "ap_ip": ap.ap_ip or "",
-            "is_online": ap.is_online,
-            "client_count": ap.client_count,
-            "run_state": ap.run_state,
+            "ap_name": ap["ap_name"],
+            "ap_mac": mac,
+            "ap_ip": ap["ap_ip"],
+            "is_online": ap["is_online"],
+            "client_count": ap["client_count"],
+            "run_state": ap["run_state"],
         }
         if mac:
             result[mac] = entry
-        name_key = (ap.ap_name or "").strip().casefold()
+        name_key = ap["ap_name"].strip().casefold()
         if name_key:
             result.setdefault(f"name:{name_key}", entry)
     return result
 
 
-def list_ac_aps(ac: Device | None) -> list[dict]:
-    """Danh sách AP ở snapshot mới nhất của AC (name/mac/ip/online/client_count).
+def _aps_from_rows(rows: list[dict]) -> list[dict]:
+    return [
+        {
+            "name": ap["ap_name"],
+            "mac": ap["ap_mac"],
+            "ip": ap["ap_ip"],
+            "online": ap["is_online"],
+            "client_count": ap["client_count"],
+        }
+        for ap in rows
+    ]
 
-    Dùng chung giữa build_topology_graph (orphan/đếm) và API chọn AP thủ công.
+
+def _latest_ap_snapshot(ac: Device) -> dict[str, dict]:
+    return _snapshot_from_rows(load_ac_ap_rows(ac))
+
+
+def list_ac_aps(ac: Device | None) -> list[dict]:
+    """Danh sách AP hiện tại của AC (name/mac/ip/online/client_count).
+
+    Dùng chung giữa build_topology_graph (orphan/đếm) và API chọn AP thủ công. Nguồn dữ liệu xem
+    `load_ac_ap_rows` (cache-mode đọc Redis, KHÔNG đọc bảng WifiApStats đóng băng).
     """
-    if not ac:
-        return []
-    latest_ts = (
-        WifiApStats.objects.filter(device=ac)
-        .order_by("-timestamp")
-        .values_list("timestamp", flat=True)
-        .first()
-    )
-    if not latest_ts:
-        return []
-    out: list[dict] = []
-    for ap in WifiApStats.objects.filter(device=ac, timestamp=latest_ts):
-        out.append({
-            "name": ap.ap_name,
-            "mac": normalize_mac(ap.ap_mac),
-            "ip": ap.ap_ip or "",
-            "online": ap.is_online,
-            "client_count": ap.client_count,
-        })
-    return out
+    return _aps_from_rows(load_ac_ap_rows(ac))
 
 
 def build_topology_graph(
@@ -109,13 +100,25 @@ def build_topology_graph(
             .first()
         )
 
-    ap_by_mac = _latest_ap_snapshot(ac) if ac else {}
-    all_aps_on_ac: list[dict] = list_ac_aps(ac)
+    # Đọc snapshot AP 1 lần cho cả đồ thị (trước đây 2 lần truy vấn DB riêng cho cùng dữ liệu).
+    ap_rows = load_ac_ap_rows(ac)
+    ap_by_mac = _snapshot_from_rows(ap_rows)
+    all_aps_on_ac: list[dict] = _aps_from_rows(ap_rows)
+
+    core = find_core_device()
+    core_id = core.id if core else None
 
     ap_links_qs = TopologyLink.objects.filter(
         is_stale=False,
         link_kind="ap",
     ).select_related("local_device", "local_interface")
+
+    # AP link trên CORE không vẽ (CORE học MAC mọi AP qua downlink nên link AP ở đó là nhiễu). Phải
+    # loại ở truy vấn, TRƯỚC bước gán quyền sở hữu `ap_owner`: CORE xếp đầu theo tên nên nếu link
+    # của nó được tính vào ap_owner thì chiếm AP rồi không được vẽ → AP biến mất khỏi switch access
+    # thật và rơi vào "Chưa map".
+    if core_id:
+        ap_links_qs = ap_links_qs.exclude(local_device_id=core_id)
 
     if switch_filter:
         ap_links_qs = ap_links_qs.filter(local_device_id=switch_filter)
@@ -125,9 +128,6 @@ def build_topology_graph(
     access_switch_ids: set[int] = {link.local_device_id for link in ap_links}
     if switch_filter:
         access_switch_ids.add(switch_filter)
-
-    core = find_core_device()
-    core_id = core.id if core else None
 
     # 1 AP (theo node-id/MAC) chỉ thuộc 1 switch — link đầu tiên theo thứ tự sắp xếp
     # "sở hữu" AP; link trùng từ switch khác (vd MAC flood qua uplink) bị bỏ qua.
@@ -201,8 +201,6 @@ def build_topology_graph(
     for link in ap_links:
         sw = link.local_device
         if switch_filter and sw.id != switch_filter:
-            continue
-        if core_id and sw.id == core_id:
             continue
         sw_nid = _switch_node_id(sw.id)
         mac, ap_info, ap_name, ap_nid = _ap_identity(link, ap_by_mac)

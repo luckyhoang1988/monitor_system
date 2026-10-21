@@ -108,6 +108,52 @@ class TestTopologyViews:
         assert uplinks[0]["data"]["target"] == f"sw-{sw.pk}"
         assert uplinks[0]["data"]["inferred"] is True
 
+    def test_ap_link_on_core_does_not_steal_ap_from_access_switch(self, logged_in_client):
+        """Link AP trên CORE không vẽ; nó cũng không được chiếm quyền sở hữu AP.
+
+        CORE xếp đầu theo tên nên nếu link của nó vào ap_owner thì AP bị gán cho CORE rồi không được
+        vẽ → AP biến mất khỏi switch access thật và rơi vào "Chưa map".
+        """
+        ac = DeviceFactory(device_type="wlan_controller", name="AC")
+        core = CiscoSNMPDeviceFactory(name="CORE")
+        access = CiscoSNMPDeviceFactory(name="X1_SW1_Access")
+        mac = "aa:bb:cc:dd:ee:01"
+        WifiApStats.objects.create(
+            device=ac, timestamp=timezone.now(), ap_name="AP-1", ap_mac=mac,
+            is_online=True, client_count=3,
+        )
+        for dev, port in ((core, "Gi0/0/9"), (access, "Gi0/0/3")):
+            TopologyLink.objects.create(
+                local_device=dev, local_port=port, link_kind="ap", remote_ap_mac=mac,
+                remote_ap_name="AP-1", match_method="mac", is_confirmed=True,
+            )
+
+        data = logged_in_client.get(reverse("dashboard:topology_data") + f"?ac={ac.pk}").json()
+
+        ap_nodes = [n["data"] for n in data["nodes"] if n["data"].get("type") == "ap"]
+        assert [(n["switch_name"], n.get("orphan")) for n in ap_nodes] == [("X1_SW1_Access", None)]
+        assert data["meta"]["ap_mapped"] == 1
+        assert data["meta"]["ap_unmapped"] == 0
+        core_node = next(n["data"] for n in data["nodes"] if n["data"]["type"] == "core")
+        assert core_node["ap_count"] == 0
+
+    def test_ap_linked_only_to_core_stays_unmapped(self, logged_in_client):
+        """Hành vi giữ nguyên: AP chỉ có link trên CORE vẫn không vẽ dưới CORE (hiện ở Chưa map)."""
+        ac = DeviceFactory(device_type="wlan_controller", name="AC")
+        core = CiscoSNMPDeviceFactory(name="CORE")
+        mac = "aa:bb:cc:dd:ee:02"
+        WifiApStats.objects.create(
+            device=ac, timestamp=timezone.now(), ap_name="AP-2", ap_mac=mac, is_online=True,
+        )
+        TopologyLink.objects.create(
+            local_device=core, local_port="Gi0/0/9", link_kind="ap", remote_ap_mac=mac,
+            remote_ap_name="AP-2", match_method="mac", is_confirmed=True,
+        )
+        data = logged_in_client.get(reverse("dashboard:topology_data") + f"?ac={ac.pk}").json()
+        assert data["meta"]["ap_unmapped"] == 1
+        assert not [e for e in data["edges"] if e["data"].get("source") == f"sw-{core.pk}"
+                    and e["data"].get("type") == "ap"]
+
     def test_topology_orphan_ap(self, logged_in_client):
         ac = DeviceFactory(device_type="wlan_controller", name="AC-ORPHAN")
         ts = timezone.now()
