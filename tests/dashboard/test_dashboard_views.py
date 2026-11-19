@@ -29,7 +29,6 @@ class TestDashboardViews:
     def test_dashboard_index_view(self, logged_in_client):
         switch = CiscoSNMPDeviceFactory(name="sw-1", device_type="switch")
         router = CiscoSNMPDeviceFactory(name="rt-1", device_type="router")
-        firewall = HuaweiSNMPDeviceFactory(name="fw-1", device_type="firewall")
         hyperv = HyperVDeviceFactory(name="hv-1", device_type="hyperv")
 
         response = logged_in_client.get(reverse("dashboard:index"))
@@ -37,20 +36,36 @@ class TestDashboardViews:
         content = response.content.decode("utf-8")
         assert "sw-1" in content
         assert "rt-1" in content
-        assert "fw-1" in content
         assert "hv-1" in content
+
+    def test_dashboard_index_has_no_firewall_panel_or_stat_card(self, logged_in_client):
+        # Panel + thẻ thống kê Firewall đã bị gỡ khỏi dashboard (yêu cầu người vận hành).
+        # Trang chi tiết `firewall_detail` vẫn còn; firewall đang offline vẫn phải hiện ở
+        # khối "Thiết bị đang Offline" và được đếm vào card Offline (không mất giám sát).
+        fw = HuaweiSNMPDeviceFactory(name="fw-1", device_type="firewall")
+
+        response = logged_in_client.get(reverse("dashboard:index"))
+        assert response.status_code == 200
+        content = response.content.decode("utf-8")
+        assert "Chưa có firewall." not in content
+        assert reverse("dashboard:firewall_detail", args=[fw.pk]) not in content
+        assert "firewalls" not in response.context
+        assert "firewalls_off" not in response.context
+        stats = {s["type"]: s for s in response.context["device_type_stats"]}
+        assert "firewall" not in stats
+        assert 'data-stat-type="firewall"' not in content
+        # thiết bị firewall offline vẫn được báo + đếm
+        assert "fw-1" in content
+        assert response.context["offline_count"] == 1
 
     def test_dashboard_index_shows_per_type_stats(self, logged_in_client):
         CiscoSNMPDeviceFactory.create_batch(3, device_type="switch")
         CiscoSNMPDeviceFactory.create_batch(2, device_type="router")
-        HuaweiSNMPDeviceFactory(name="fw-only", device_type="firewall")
-
         response = logged_in_client.get(reverse("dashboard:index"))
         assert response.status_code == 200
         stats = {s["type"]: s for s in response.context["device_type_stats"]}
         assert stats["switch"]["total"] == 3
         assert stats["router"]["total"] == 2
-        assert stats["firewall"]["total"] == 1
         assert stats["hyperv"]["total"] == 0
 
     def test_dashboard_index_shows_all_device_panels(self, logged_in_client):
@@ -59,7 +74,6 @@ class TestDashboardViews:
         content = response.content.decode("utf-8")
         assert "Switch" in content
         assert "Router" in content
-        assert "Firewall" in content
         assert "NAS" in content
         assert "HyperV" in content
         assert "panel-count" in content

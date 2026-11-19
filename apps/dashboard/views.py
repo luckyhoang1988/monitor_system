@@ -45,7 +45,6 @@ GROUP_LABELS = {
 DEVICE_TYPE_META = [
     ("switch", "Switch", "bi-hdd-network", "text-primary", "#2563eb"),
     ("router", "Router", "bi-router", "text-warning", "#d97706"),
-    ("firewall", "Firewall", "bi-shield-fill-check", "text-danger", "#dc2626"),
     ("nas", "NAS", "bi-hdd-stack", "text-success", "#16a34a"),
     ("hyperv", "HyperV Host", "bi-server", "text-info", "#0891b2"),
     ("wlan_controller", "WLAN AC", "bi-broadcast-pin", "text-primary", "#6366f1"),
@@ -160,7 +159,6 @@ def index(request):
     by_type = counts["by_type"]
     switches  = by_type["switch"]
     routers   = by_type["router"]
-    firewalls = by_type["firewall"]
     nas_list  = by_type["nas"]
     hyperv    = by_type["hyperv"]  # ilo_summary đã gắn trong _dashboard_counts
     wlan_controllers = by_type["wlan_controller"]
@@ -175,13 +173,11 @@ def index(request):
     context = {
         "switches":       switches,
         "routers":        routers,
-        "firewalls":      firewalls,
         "nas_devices":    nas_list,
         "hyperv_hosts":   hyperv,
         "wlan_controllers": wlan_controllers,
         "switches_off":   _offline(switches),
         "routers_off":    _offline(routers),
-        "firewalls_off":  _offline(firewalls),
         "nas_off":        _offline(nas_list),
         "hyperv_off":     _offline(hyperv),
         "wlan_off":       _offline(wlan_controllers),

@@ -385,58 +385,6 @@
       </div>
     </div>
 
-    <!-- Firewall -->
-    <div class="col-xl-6">
-      <div class="card panel-card accent-red h-100">
-        <div class="panel-header">
-          <span class="panel-title">
-            <span class="icon-chip"><i class="bi bi-shield-fill-check"></i></span>
-            Firewall <span class="panel-count">{{ firewalls|length }}</span>
-            {% if firewalls_off %}<span class="panel-offline-dot" title="{{ firewalls_off }} offline"></span>{% endif %}
-          </span>
-          <a href="{% url 'devices:add' %}" class="panel-add" title="Thêm thiết bị"><i class="bi bi-plus-lg"></i></a>
-        </div>
-        <div class="device-scroll">
-          {% if firewalls %}
-          <table class="table table-hover table-compact mb-0">
-            <thead class="table-light">
-              <tr>
-                <th class="ps-2">Tên</th>
-                <th>IP</th>
-                <th>Vendor</th>
-                <th>TT</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {% for fw in firewalls %}
-              <tr data-device-id="{{ fw.pk }}" class="js-device-row">
-                <td class="ps-2 fw-semibold" title="{{ fw.name }}">{{ fw.name }}</td>
-                <td class="text-muted font-monospace">{{ fw.ip_address }}</td>
-                <td>{{ fw.get_vendor_display }}</td>
-                <td class="js-status-cell">
-                  {% if fw.is_online %}
-                    <span class="badge badge-online status-dot rounded-pill px-2">On</span>
-                  {% else %}
-                    <span class="badge badge-offline status-dot rounded-pill px-2">Off</span>
-                  {% endif %}
-                </td>
-                <td>
-                  <a href="{% url 'dashboard:firewall_detail' fw.pk %}" class="btn btn-sm btn-outline-secondary row-action p-0">
-                    <i class="bi bi-graph-up"></i>
-                  </a>
-                </td>
-              </tr>
-              {% endfor %}
-            </tbody>
-          </table>
-          {% else %}
-            <div class="text-center text-muted py-3 small">Chưa có firewall.</div>
-          {% endif %}
-        </div>
-      </div>
-    </div>
-
     <!-- NAS -->
     <div class="col-xl-6">
       <div class="card panel-card accent-green h-100">
