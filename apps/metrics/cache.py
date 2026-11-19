@@ -162,5 +162,56 @@ def get_sys_series(device_id: int, since: "datetime | None" = None) -> "list[dic
     return _get_series(_SYS_SERIES_KEY % device_id, since)
 
 
+# Sentinel: KHÔNG hỏi được Redis (mất kết nối/lỗi) — khác "hỏi được và Redis không giữ mẫu nào" (danh sách rỗng).
+UNREADABLE = object()
+
+
+def _sample_stamps(items) -> list[float]:
+    """Epoch giây của từng mẫu JSON trong `items` (giữ thứ tự); bỏ qua mẫu hỏng / thiếu `ts`."""
+    stamps: list[float] = []
+    for item in items:
+        try:
+            stamps.append(float(json.loads(item)["ts"]))
+        except (ValueError, TypeError, KeyError):
+            continue
+    return stamps
+
+
+def recent_sys_ts(device_id: int, count: int = 5) -> list[float] | object:
+    """Thời điểm (epoch giây) của `count` mẫu sys MỚI NHẤT mà Redis đang giữ cho thiết bị, theo thứ tự lưu (mới → cũ).
+
+    `[]` = khoá không tồn tại / không đọc được mẫu nào (Redis không giữ mẫu nào, vd vừa mất dữ liệu); `UNREADABLE` =
+    không hỏi được Redis. Writer dùng để kiểm chứng Redis còn giữ mẫu đã nhận trước đó (xem `writer._mark_metrics_seen`)."""
+    client = _get_client()
+    if client is None:
+        return UNREADABLE
+    try:
+        raw = client.lrange(_SYS_SERIES_KEY % device_id, 0, max(int(count), 1) - 1)
+    except Exception as exc:
+        logger.warning("metrics cache recent_sys_ts(dev=%s) failed: %s", device_id, exc)
+        return UNREADABLE
+    return _sample_stamps(raw)
+
+
+def recent_if_ts(interface_ids, count: int = 5) -> dict[int, list[float]] | object:
+    """Như `recent_sys_ts` nhưng cho if-series của NHIỀU cổng (1 pipeline): {id cổng: [epoch giây mới → cũ]}; cổng không có
+    khoá / không có mẫu đọc được ⇒ danh sách rỗng; `UNREADABLE` khi không hỏi được Redis. Không có cổng nào ⇒ {} (không cần Redis)."""
+    ids = list(interface_ids)
+    if not ids:
+        return {}
+    client = _get_client()
+    if client is None:
+        return UNREADABLE
+    try:
+        pipe = client.pipeline(transaction=False)
+        for iid in ids:
+            pipe.lrange(_IF_SERIES_KEY % iid, 0, max(int(count), 1) - 1)
+        results = pipe.execute()
+    except Exception as exc:
+        logger.warning("metrics cache recent_if_ts(%d cổng) failed: %s", len(ids), exc)
+        return UNREADABLE
+    return {iid: _sample_stamps(raw) for iid, raw in zip(ids, results)}
+
+
 def get_if_series(interface_id: int, since: "datetime | None" = None) -> "list[dict]":
     return _get_series(_IF_SERIES_KEY % interface_id, since)

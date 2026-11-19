@@ -48,12 +48,16 @@ def _purge_metrics(start, end) -> int:
     """
     from apps.metrics.models import (
         InterfaceStats, SystemHealth, VMStats, WifiApStats, WifiClientStats,
+        HardwareHealth, VolumeStats,
         SystemHealthHourly, SystemHealthDaily,
         InterfaceStatsHourly, InterfaceStatsDaily,
     )
     total = 0
-    # Raw time-series — đồng bộ với cleanup_old_metrics (gồm cả bảng Wifi).
-    for model in (InterfaceStats, SystemHealth, VMStats, WifiApStats, WifiClientStats):
+    # Raw time-series — PHẢI đồng bộ với cleanup_old_metrics (apps/metrics/tasks.py): gồm bảng Wifi, iLO
+    # (HardwareHealth) và VolumeStats. Từng thiếu 2 bảng cuối (review ngoài 2026-11-19) nên xoá tay theo khoảng
+    # ngày để lại dữ liệu cũ; test `test_purge_table_list_matches_scheduled_cleanup` khoá lại việc lệch này.
+    for model in (InterfaceStats, SystemHealth, VMStats, WifiApStats, WifiClientStats,
+                  HardwareHealth, VolumeStats):
         total += model.objects.filter(timestamp__gte=start, timestamp__lt=end).delete()[0]
     for model in (SystemHealthHourly, InterfaceStatsHourly):
         total += model.objects.filter(hour__gte=start, hour__lt=end).delete()[0]

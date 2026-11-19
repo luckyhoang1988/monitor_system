@@ -52,6 +52,10 @@ DEVICE_TYPE_META = [
 ]
 
 
+# Số alert active tối đa liệt kê ở panel "Active Alerts" (số đếm trên thẻ vẫn là tổng thật).
+ACTIVE_ALERTS_DISPLAY_LIMIT = 20
+
+
 def _dashboard_counts(all_devices):
     """device_type_stats + offline_count + active_alerts — dùng CHUNG cho index()
     (render) và alerts_summary() (AJAX cập nhật realtime, không reload). Để 1 nguồn
@@ -136,9 +140,15 @@ def _dashboard_counts(all_devices):
         if d.ilo_summary["color"] in ("danger", "warning")
     ]
 
-    active_alerts = list(Alert.objects.filter(is_active=True)
+    # Danh sách hiển thị bị cắt ở 20 để panel không dài vô hạn, nhưng SỐ ĐẾM phải là tổng thật: trước đây
+    # `alert_count = len(active_alerts)` nên thẻ "Cảnh báo" dừng ở 20 dù có nhiều alert active hơn.
+    active_alerts_qs = Alert.objects.filter(is_active=True)
+    active_alerts = list(active_alerts_qs
                          .select_related("device", "rule")
-                         .order_by("-triggered_at")[:20])
+                         .order_by("-triggered_at")[:ACTIVE_ALERTS_DISPLAY_LIMIT])
+    # Ít hơn giới hạn nghĩa là danh sách đã đủ — khỏi tốn thêm 1 query COUNT.
+    alert_count = (len(active_alerts) if len(active_alerts) < ACTIVE_ALERTS_DISPLAY_LIMIT
+                   else active_alerts_qs.count())
     return {
         "by_type": by_type,
         "device_type_stats": device_type_stats,
@@ -146,7 +156,7 @@ def _dashboard_counts(all_devices):
         "offline_notice_rows": offline_notice_rows,
         "ilo_notice_rows": ilo_notice_rows,
         "active_alerts": active_alerts,
-        "alert_count": len(active_alerts),
+        "alert_count": alert_count,
     }
 
 

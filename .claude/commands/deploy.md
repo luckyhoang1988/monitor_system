@@ -876,6 +876,123 @@ Hướng A giữ 1 alert/(thiết bị, rule) cho rule `if_status`: cổng thứ
 - **Đóng alert kiểu cũ khi đổi mô hình**: `closed_reason="superseded"`, không AlertNotification, late-recovery bỏ qua (đã bỏ qua mọi `closed_reason`); chỉ làm SAU khi phạm vi xác định (phạm vi rỗng thì không đụng gì); sau đó cùng lượt đánh giá lại từng đối tượng bằng dữ liệu hiện tại + điều kiện sustain nên chỉ đối tượng thực sự lỗi mới nổ alert mới. Đo số alert cũ đang active TRƯỚC deploy (prod 2026-10-16: 0).
 - **Công cụ**: script vá/đổi test dùng `re` với `^` — `src[m.end():]` coi vị trí 0 của lát cắt là đầu dòng nên khớp nhầm phần còn lại của dòng `def`; cắt từ đầu dòng kế (`src.index("\n", m.end()) + 1`). Bài học cũ vẫn đúng: viết script vá bằng heredoc làm mất `\n`/escape — viết file bằng Write/Edit rồi chạy.
 
+### Bẫy: "sustained" chỉ xét GIÁ TRỊ mà không xét ĐỘ PHỦ thời gian; cache-first chỉ có đường lui phía GHI (review ngoài Codex, 2026-11-19)
+`_sustained_verdict` kiểm "min/max các mẫu vượt ngưỡng" nhưng không kiểm các mẫu có phủ cửa sổ không: 1 mẫu CPU 99% vừa
+xuất hiện (thiết bị mới, Redis flush, hết khoảng mất poll) đủ cho `duration_min=10` nổ ngay — ngược hợp đồng "Redis restart →
+alert trễ tối đa duration_min". Tái hiện bằng test trước khi sửa, không tin mô tả.
+- **"Điều kiện đúng trên mọi mẫu" ≠ "điều kiện đúng suốt cửa sổ"**: bắt buộc kiểm độ phủ (`_window_samples`: có MẪU BIÊN ≤ đầu cửa
+  sổ, mẫu mới nhất còn mới, không khoảng trống lớn giữa 2 mẫu). Dung sai theo NHỊP POLL THẬT CỦA CHÍNH THIẾT BỊ (`_expected_poll_secs`:
+  hyperv→`POLL_HYPERV_INTERVAL_SECS`, `protocol=ping`→`POLL_PING_…`, còn lại→`POLL_NETWORK_…`, iLO→`POLL_ILO_…`; KHÔNG `max()` các nhịp
+  — nhịp ping chậm làm lỏng rule SNMP), KHÔNG theo `Device.collect_interval` (mặc định 300 cho mọi thiết bị, không điều
+  khiển beat) và KHÔNG dùng 1 hằng 135s cho mọi thiết bị — HyperV poll 300s sẽ bị bỏ đói (test `test_a_300s_cadence_host_...`).
+  Hàm nhận timestamp từ CHÍNH truy vấn đã có (không thêm query — vài test khẳng định số query cố định).
+- **Dung sai đầu cửa sổ KHÔNG được lớn hơn cửa sổ — dùng MẪU BIÊN, đừng dùng "slack"** (review lần 2, 2026-11-19): `start_slack=1,5×poll`
+  (HyperV 450s > rule 5 phút; rule mạng 2 phút 135s > 120s) vẫn nhận 1 mẫu vừa xuất hiện. Chặn slack < cửa sổ KHÔNG đủ: rule 5 phút với poll
+  300s sẽ không bao giờ nổ vì mẫu trước nằm ngoài `timestamp>=đầu cửa sổ`. Cách đúng = truy vấn lùi trước đầu cửa sổ 1 dung sai khoảng
+  trống (`_sustain_since`), lấy mẫu cuối cùng ≤ đầu cửa sổ làm mẫu biên (trạng thái đang giữ lúc cửa sổ bắt đầu, giá trị CỦA NÓ cũng được
+  xét, mẫu cũ hơn bị bỏ), thiếu mẫu biên ⇒ chưa đủ bằng chứng. Hệ quả: nổ trễ tối đa 1 chu kỳ poll. Test cả 2 chiều: mẫu đơn lẻ không nổ
+  VÀ trạng thái ổn định (mẫu biên + mẫu mới) vẫn nổ — nếu chỉ test chiều đầu, bản "chặn slack" hỏng vẫn xanh. Dữ liệu test cho nhịp 90s phải có mẫu
+  ở -380s với cửa sổ 5 phút; nhịp 300s phải có mẫu trước đầu cửa sổ.
+- **Test fixture sustained phải phủ cửa sổ**: test dựng 3 mẫu trải 4 phút rồi hỏi cửa sổ 30 phút "sustained" là test sai ngữ nghĩa;
+  khi đổi hợp đồng, chỉnh DỮ LIỆU cho khớp cửa sổ, đừng nới điều kiện. Chạy test cho cả 7 nhóm getter (CPU/mem, host-perf, VM,
+  WiFi client, WiFi AP, uplink traffic, iLO) × 2 mode — đột biến "không truyền stamps" ở từng nhóm lộ 5 nhóm chưa có test.
+- **Đường lui phải đối xứng GHI ↔ ĐỌC**: writer có `_save_metrics_db` khi Redis lỗi nhưng getter alert, chart, timeline, export chỉ
+  đọc Redis ⇒ alert CPU/mem im lặng, chart 0 điểm trong lúc Redis lỗi. Khi thêm đường lui phía ghi, `grep` MỌI nơi đọc nguồn đó.
+- **Phân biệt "nguồn TRỐNG" với "nguồn có dữ liệu nhưng cũ"** bằng sentinel (`_CACHE_MISS`), đừng gộp thành `None`: chỉ nguồn
+  trống mới rơi về nguồn dự phòng. Nếu snapshot Redis cũ (thiết bị ngừng poll) cũng đọc DB thì dòng BẰNG CHỨNG cũ trong DB (ghi
+  lúc alert nổ/đổi trạng thái) làm alert nổ/giữ sai. Test cả 3 trạng thái: trống → DB; có dữ liệu → bỏ qua DB dù DB có dòng
+  vượt ngưỡng; có nhưng cũ → KHÔNG nhặt DB. (Hạn chế "chart chỉ vẽ phần Redis" đã đóng ở review lần 4: chart/export GHÉP Redis + DB — xem mục ngay dưới.)
+  ⚠️ **Bản sentinel đầu CHƯA ĐỦ (review lần 2)**: (1) "DB có dòng" ≠ "DB có mẫu": dòng BẰNG CHỨNG ghi lúc alert nổ/đổi trạng thái là
+  bản sao của mẫu cũ — Redis mất dữ liệu thì đọc nó làm "CPU hiện tại" làm alert đã hồi phục nổ lại. Đánh dấu ở NƠI GHI
+  (`extra["_evidence"]=True`, không migration) và loại ở MỌI nơi đọc (`_regular_health`); phân biệt bằng dấu, đừng đoán bằng độ mới.
+  (2) "Redis có dữ liệu" ≠ "Redis còn được ghi": ghi lỗi nhưng đọc được thì snapshot cũ vẫn trả về và che mẫu DB mới hơn. Quy tắc: **mẫu
+  mới hơn thắng**; sustained phải GHÉP 2 nguồn theo thời điểm (cửa sổ vắt qua lúc chuyển nguồn có nửa ở mỗi nơi), dedupe mẫu cách nhau <1s.
+  Test ca ghi-lỗi-đọc-được bằng `monkeypatch` `set_latest`/`push_series` → False (không cần Redis hỏng thật).
+  (3) Đường lui đọc DB làm tăng tải: đo số truy vấn thêm mỗi lần đánh giá (đo 2026-11-19: +1/rule ở cache-mode) rồi mới deploy.
+- **Đường lui đọc DB phải giữ BẰNG CHỨNG HỒI PHỤC (review lần 3, 2026-11-19)**: dấu `_evidence` chỉ loại dòng bằng chứng; mẫu poll THƯỜNG
+  ghi vào DB lúc Redis ghi lỗi vẫn là mẫu thật. Redis lỗi → 99% vào DB → ALERT → Redis phục hồi, 10% → hồi phục → Redis mất snapshot
+  lần nữa ⇒ getter nhặt lại mẫu 99% cũ và nổ lại. Mẫu 10% mất theo Redis nhưng quyết định hồi phục đã được ghi durable ở
+  `Alert.resolved_at`: mẫu DB ≤ lúc alert NÀY hồi phục thật là mẫu đã bị vượt qua (`_recovery_floor`/`_superseded`/`_drop_superseded`,
+  ContextVar đặt bởi `_evaluate_rule`). Quy tắc: bằng chứng phải ĐÚNG phạm vi (rule + thiết bị + cổng, chỉ `closed_reason=""`; đóng vì tắt
+  rule/đổi phạm vi KHÔNG phải hồi phục), áp ở MỌI nhánh đọc DB đường lui (đột biến từng nhánh để chắc không sót), chỉ ở cache-mode và chỉ cho
+  mẫu lấy từ DB (không đụng mẫu Redis). Test cả 2 chiều: mẫu cũ hơn lúc hồi phục bị bỏ VÀ mẫu mới hơn vẫn dùng được; mỗi họ getter có câu
+  đối chứng "chưa có bằng chứng thì đọc được" để biết dữ liệu dựng đúng. Truy vấn bằng chứng phải LƯỜI (chỉ khi có mẫu DB thường cần so)
+  để cache-mode bình thường không tốn thêm truy vấn. ⚠️ Còn hở ở lần 3: mẫu DB cũ CHƯA TỪNG làm alert nổ (không có `resolved_at`) —
+  đã đóng ở review lần 4 bằng dấu bền riêng `Device.metrics_seen_at` (mục ngay dưới), KHÔNG dùng `last_ok_seen`.
+- **Gộp nguồn rồi mới tổng hợp, KHÔNG tổng hợp rồi mới gộp (review lần 3)**: if-series Redis đẩy TỪNG cổng (pipeline không transaction) nên 1
+  lần poll có thể có cổng A ở Redis, cổng B chỉ ở DB. Tính max theo thời điểm riêng cho từng nguồn rồi ghép "nguồn trước thắng" làm
+  50 Mbps của DB bị che bởi 5 Mbps của Redis. Ghép THEO TỪNG CỔNG (`_merge_samples` mỗi interface) rồi lấy max theo lần poll
+  (`_max_per_poll`, gộp điểm cách nhau <1s). Hỏi trước khi ghép: đơn vị ghi của nguồn là gì (1 dict/lần poll = nguyên tử, không cần;
+  1 key/thực thể = có thể ghi dở dang). Test cả thứ tự cổng (đột biến "lấy giá trị cuối thay vì max" sống sót nếu cổng cao luôn đứng sau).
+- **Mốc hồi phục chỉ phủ mẫu ĐÃ TỪNG làm alert nổ — mẫu DB đường lui CHƯA TỪNG nổ cần DẤU BỀN do đường ghi tạo ra (review lần 4,
+  2026-11-19)**: Redis lỗi → 99% vào DB (chưa đủ cửa sổ nên chưa alert nào) → Redis phục hồi, nhận 10% → Redis mất dữ liệu ⇒ getter đọc lại
+  chuỗi 99% cũ và nổ; `_recovery_floor` bất lực vì chưa có `Alert.resolved_at`. Quy tắc chung: khi nguồn chủ có thể MẤT còn nguồn dự phòng
+  giữ bản cũ, mỗi lần nguồn chủ NHẬN dữ liệu mới phải để lại 1 dấu ở nơi KHÔNG mất cùng nó (DB), reader coi bản dự phòng cũ hơn dấu là cũ.
+  Dấu đúng nghĩa: (1) do CHÍNH đường ghi tạo ra, đúng nhánh nguồn chủ thành công (`writer._mark_metrics_seen` sau `_save_metrics_cache`
+  trả True; đường lui/DB-mode KHÔNG ghi) — đừng suy từ tín hiệu gián tiếp: `Device.last_ok_seen` do poll task đặt cả khi `save_metrics` lỗi
+  (1.5) và harness gọi `save_metrics` trực tiếp không đặt nó; (2) CHỈ TĂNG (`UPDATE … WHERE dấu IS NULL OR dấu < ts`) và gán luôn lên đối
+  tượng trong bộ nhớ; (3) lỗi ghi dấu chỉ WARNING, không được làm hỏng đường ghi chính (test ép `update` ném lỗi, mẫu vẫn vào Redis);
+  (4) reader ĐỌC DẤU TỪ DB, lười + nhớ trong 1 lần đánh giá, không tin `device.metrics_seen_at` trong bộ nhớ (worker nạp Device trước khi
+  poll xong); (5) có dung sai bù làm tròn float epoch ↔ microsecond (`_SEEN_TOLERANCE_SECS=1.0`); (6) chuỗi ghép có "đuôi" DB cũ hơn dấu
+  mà Redis không giữ mẫu mới nhất ⇒ KHÔNG đủ bằng chứng (trả rỗng), không phải "chuỗi đủ dài" — áp ở MỌI họ sustained (đột biến từng họ:
+  S09–S16) và ở trạng thái cổng; uplink kiểm đuôi trên TOÀN thiết bị (1 cổng thiếu mẫu ở lần poll mới nhất không phải bằng chứng mất mẫu).
+  Đỉnh TỨC THỜI "max trong cửa sổ ngắn" cố ý không dùng dấu (mọi mẫu thật trong cửa sổ đều hợp lệ). Migration `devices/0024` (dấu `metrics_seen_at`) + `devices/0025` (dấu `metrics_lost_upto`, lần 5) đều chỉ
+  `ADD COLUMN … NULL` (đổi catalog, bảng ≈23 dòng); chi phí +1 UPDATE/thiết bị/poll vào Redis — CHƯA đo trên prod (đĩa quay).
+  Sau deploy: dấu NULL cho tới poll thành công đầu tiên (hành vi cũ trong khoảng đó); `grep "không ghi được metrics_seen_at"` phải = 0; `grep "Redis không còn giữ mẫu đã nhận"` = số lần phát hiện mất mẫu (0 khi Redis chưa mất dữ liệu; LẶP ở vận hành bình thường = phát hiện giả ⇒ rule sustained của thiết bị đó đang bị chặn, dò ngay).
+  ⚠️ **Dấu chỉ bảo vệ ĐUÔI chuỗi — lỗ hổng "mẫu Redis đã nhận rồi MẤT nằm GIỮA" (tự dò 2026-11-19; Codex nêu lại ở review lần 5; ĐÃ SỬA bằng dấu thứ hai `metrics_lost_upto` — phần mô tả dưới đây là hiện trạng TRƯỚC khi sửa)**: mẫu Redis đã nhận rồi MẤT nằm GIỮA 2 đoạn mẫu còn thấy, trong
+  khoảng trống ≤ dung sai (~3 chu kỳ poll), bị đọc như "poll lỡ một vòng" ⇒ chuỗi liền mạch ⇒ nổ sai. Hai biến thể đều tái hiện (rule CPU
+  `duration_min=4`, mẫu 10% ở −220s nằm TRONG cửa sổ): lỗi kép (DB 99,99 → Redis nhận 10 → mất dữ liệu → ghi lỗi lại → DB 99,99) và lỗi đơn
+  (DB 99,99 → Redis nhận 10 → mất dữ liệu → Redis nhận 99,99); đối chứng không mất dữ liệu thì không nổ. Chặn "lỗi kép" bằng dấu (dấu không
+  khớp mẫu nào ở cả 2 nguồn mà nằm giữa chuỗi ⇒ bỏ mẫu cũ hơn dấu) KHÔNG đủ cho "lỗi đơn" (dấu = mẫu cuối còn trong Redis): cần thêm chỗ nối
+  Redis↔DB phải liền mạch chặt, hoặc dấu thứ hai "Redis liên tục từ lúc nào". Bài học: sau khi sửa một lớp, tự dò lớp kế bên bằng probe có
+  ĐỐI CHỨNG (cùng kịch bản, không mất dữ liệu) rồi mới tuyên bố đã khép kín; và đừng đề xuất cách chặn khi mới thử 1 biến thể.
+  **Cách sửa đã làm (review lần 5)**: dấu THỨ HAI `Device.metrics_lost_upto` do WRITER ghi ngay lúc thấy Redis KHÔNG CÒN giữ mẫu của dấu —
+  kiểm chứng TRƯỚC khi dấu tiến lên (`writer._mark_metrics_seen`: sys-series + if-series của các cổng có mẫu ở lần poll trước; không kiểm
+  chứng được ⇒ coi là mất, an toàn), cả ở nhánh ghi đường lui (`_note_redis_loss`, "lỗi kép": chỉ khi ĐỌC được Redis và thấy mất); engine
+  `_after_loss` bỏ mọi mẫu ≤ mốc ở `_merge_series` + uplink sustained. Quy tắc chung: bằng chứng "liền mạch" cần 2 dấu bền — "mẫu mới nhất
+  đã nhận" (bảo vệ đuôi) và "mẫu cuối cùng đã nhận rồi mất" (bảo vệ giữa) — và dấu thứ hai chỉ phát hiện được tại ĐƯỜNG GHI (nơi duy nhất
+  thấy lúc mất xảy ra), không phải ở engine. Đã cân nhắc và KHÔNG chọn: bỏ mẫu DB cũ hơn dấu khi dấu không khớp mẫu nào (chỉ chặn lỗi kép)
+  và "chỗ nối Redis↔DB phải liền mạch chặt" (chỉ chặn mẫu mất nằm đúng chỗ nối; heuristic theo khoảng cách, không phải bằng chứng). Chi tiết
+  + giới hạn + chi phí: CLAUDE.md entry review lần 5. Bài học quy trình: lúc dò ra hố này tôi khuyến nghị CHƯA sửa vì điều kiện hẹp, Codex nêu
+  lại ngay vòng sau — khi đã biết cách sửa ĐÚNG (có bằng chứng probe cho cả 2 biến thể) và hố là thật thì sửa luôn, đừng để thành 1 vòng review
+  nữa. Phát hiện kèm: phát hiện mất mẫu cũng phải kiểm cả chuỗi KHOÁ RIÊNG theo thực thể (if-series) chứ không chỉ chuỗi cấp thiết bị — nếu
+  không, chuỗi cổng vẫn nối qua cái lỗ khi chỉ if-series mất; nhưng chỉ kiểm thực thể ĐÃ có mẫu ở lần trước (cổng mới ≠ mất mẫu).
+- **Chart/export ở cache-mode: GHÉP nguồn theo thời điểm + theo thực thể, đừng chọn 1 nguồn theo cờ (review lần 4, P2)**: "Redis có mẫu
+  ⇒ chỉ vẽ Redis" che mẫu DB mới hơn khi Redis ghi lỗi mà đọc được (writer rơi về ghi DB); cờ "Redis có dữ liệu" tính CHUNG mọi cổng làm
+  cổng chỉ có dữ liệu DB bị bỏ khi 1 cổng khác có cache. `_merge_by_ts` (sort theo `ts`, mẫu cách nhau <1s là cùng 1 lần poll — dòng bằng
+  chứng trùng mẫu Redis không nhân đôi), `_db_sys_samples`/`_db_if_samples` đổi dòng DB về dạng mẫu Redis (kể cả cột host-perf theo
+  short-key) rồi ghép TỪNG cổng. Mọi nơi đọc phải đi qua cùng helper (chart thiết bị, chart cổng, status timeline, export hệ thống,
+  export cổng) — đột biến C06–C10 bỏ DB ở từng nơi. Test cũ khẳng định hợp đồng cũ ("Redis khoẻ ⇒ chỉ vẽ Redis") phải ĐỔI tên + kỳ vọng và
+  NÓI THẲNG với người review, không âm thầm sửa. Chi phí: +1 truy vấn DB/request (thiết bị) hoặc +1 cho MỌI cổng (cổng).
+- **Đột biến/suite khi agent khác (Codex review) dùng CHUNG cây thư mục + DB test + Redis**: script đột biến sửa file THẬT rồi khôi phục
+  nên người khác đọc/chạy đúng lúc đó thấy mã bị sửa; hai phiên pytest cùng tên DB test (`test_<DB_NAME>`) và cùng Redis DB (fixture
+  `cache_mode` xoá khoá `m:*`) giẫm lên nhau (lượt hàng loạt 2026-11-19: 2 đột biến báo `error` thay vì `failed`, chạy riêng lại đỏ đúng —
+  nghi va chạm, CHƯA chứng minh; chạy lại cả bộ trên bản sao cô lập: 61/61 bị bắt, 2 ca đó `failed` đúng). Tách lần chạy của mình: `DB_NAME=<tên riêng> CACHE_REDIS_URL=…/7 REALTIME_REDIS_URL=…/8`; đột biến ưu tiên
+  trên bản sao (`git worktree`) khi có tiến trình khác đang đọc cây; xem `Get-CimInstance Win32_Process` có pytest/python khác không. Thư mục
+  lạ `tests/_review_*` (quyền hạn chế, KHÔNG đọc được, nghi do Codex tạo): dùng `--ignore-glob="tests/_review_*"`, KHÔNG xoá.
+- **Đột biến theo PHẠM VI HÀM** (script tìm hàm bằng regex `^def NAME(`, thay đúng 1 chuỗi trong thân, assert khớp đúng 1 lần,
+  luôn khôi phục trong `finally`): bắt được lỗ hổng test mà test xanh không lộ — vd test "khoảng trống" thực ra chết ở kiểm tra
+  đầu cửa sổ vì mẫu 660s nằm NGOÀI cửa sổ 600s nên chưa từng cô lập được kiểm tra khoảng trống; nhánh iLO và HyperV cùng ra 300s nên
+  phải ghi đè setting (iLO 900, HyperV 300) mới phân biệt được.
+
+### Bẫy: `csv.writer(HttpResponse)` + charset `utf-8-sig` ⇒ BOM ở đầu MỌI dòng (đo 2026-11-19)
+`HttpResponse.write` mã hoá từng lần ghi bằng charset của response; `csv.writer` gọi `write` mỗi dòng nên codec `utf-8-sig` chèn BOM
+mỗi lần (4 dòng → 4 BOM trên code gốc). Excel hiện ký tự rác ở ô đầu mỗi dòng. Dựng file trong `io.StringIO` rồi `response.write`
+MỘT lần. Đo bằng BYTES thô (`response.content.count(b"\xef\xbb\xbf")`), không bằng `.decode("utf-8-sig")` (decode che mất BOM
+thừa ở các dòng sau — phải để test tự lộ nó). Kiểm Content-Type cũ vẫn giữ nguyên (test hiện có khẳng định `charset=utf-8-sig`).
+
+### Bẫy: DRF `ModelViewSet` cho thực thể có VÒNG ĐỜI; SNMPv3 chọn được trong UI nhưng backend không làm được (2026-11-19)
+- `AlertViewSet(ModelViewSet)` + serializer để `is_active` ghi được ⇒ admin `PATCH is_active=false` trả 200 và đóng alert mà không
+  qua `_resolve_alert` (không RECOVERED, không outbox, không khoá Device); `DELETE` xoá cả lịch sử thông báo (CASCADE). Thực thể có
+  vòng đời do engine điều khiển ⇒ `ReadOnlyModelViewSet` + serializer `read_only_fields`. Test bằng `PATCH`/`PUT`/`POST`/`DELETE`
+  thật (kỳ vọng 405) và kiểm DB không đổi, không chỉ kiểm serializer.
+- Serializer thiếu field BẮT BUỘC của model (`Device.protocol` không default) ⇒ POST thành công và lưu chuỗi rỗng. ModelSerializer chỉ
+  validate field nằm trong `fields`.
+- **Mọi lựa chọn trong UI phải có backend làm được**: `Device.SNMP_VERSIONS` có v3 nhưng `requirements/base.txt` chỉ có pysnmp
+  (easysnmp bị comment, Dockerfile không cài libsnmp) và `create_snmp_session` ném `RuntimeError` với v3 ⇒ thiết bị lưu được rồi
+  mọi poll lỗi. Chặn ở form + serializer qua 1 hàm (`snmp_v3_supported`). Cùng họ với bẫy "vendor/enum không có nhánh backing" ở trên.
+  Test form v3 hợp lệ phải patch `resolve_snmp_backend` — môi trường test/dev không có easysnmp nên kết quả phụ thuộc máy.
+
 ## 2. Deploy
 ```
 ./deploy.sh            # push origin master + pull/build/restart trên monitorsrv

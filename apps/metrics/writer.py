@@ -3,11 +3,14 @@ import logging
 from datetime import datetime
 from django.conf import settings
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 from apps.collectors.base import NormalizedData, InterfaceData
 from apps.devices.models import Device, Interface
 from . import cache as metrics_cache
-from .models import InterfaceStats, SystemHealth, VMStats, VolumeStats, WifiApStats, WifiClientStats
+from .models import (
+    EVIDENCE_KEY, InterfaceStats, SystemHealth, VMStats, VolumeStats, WifiApStats, WifiClientStats,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -70,10 +73,123 @@ def save_metrics(device: Device, data: NormalizedData) -> None:
     """
     _clamp_interface_text(data)
     if metrics_cache.is_cache_mode():
+        expected_ifaces = _previous_interface_ids(device)
         if _save_metrics_cache(device, data):
+            _mark_metrics_seen(device, data.timestamp, expected_ifaces)
             return
+        _note_redis_loss(device, data.timestamp, expected_ifaces)
         logger.warning("Device %s: ghi cache thất bại → fallback ghi DB", device.name)
     _save_metrics_db(device, data)
+
+
+# Dung sai (giây) khi so thời điểm mẫu: cùng lấy từ `NormalizedData.timestamp` nên bằng nhau trong trường hợp bình thường;
+# chỉ bù làm tròn float epoch ↔ microsecond.
+_CONTINUITY_TOLERANCE_SECS = 1.0
+# Số mẫu sys mới nhất đọc để tìm "mẫu liền trước" — dư vài mẫu để 2 lần poll đến lệch thứ tự không gây báo mất mẫu giả.
+_CONTINUITY_PROBE_SAMPLES = 5
+
+
+def _previous_interface_ids(device: Device) -> list[int]:
+    """Cổng có mẫu ở lần poll TRƯỚC (theo snapshot Redis, đọc TRƯỚC khi nó bị ghi đè): if-series của chúng phải còn mẫu liền
+    trước. Chuỗi trạng thái cổng/uplink đọc if-series (khoá RIÊNG từng cổng) nên mất if-series mà sys-series còn nguyên cũng
+    là mất mẫu. Chỉ cổng ĐÃ có mẫu lần trước mới kiểm chứng — cổng mới xuất hiện không phải mất mẫu. Chưa có dấu
+    `metrics_seen_at` thì chưa có gì để mất. Không bao giờ ném: bước phụ này không được làm hỏng việc ghi mẫu."""
+    if device.metrics_seen_at is None:
+        return []
+    try:
+        interfaces = (metrics_cache.get_latest(device.id) or {}).get("interfaces") or {}
+        return [int(key) for key in interfaces]
+    except Exception:
+        logger.warning("Device %s: không đọc được danh sách cổng của lần poll trước", device.name, exc_info=True)
+        return []
+
+
+def _holds_a_sample_since(stamps: list[float], new_ts, seen) -> bool:
+    """`stamps` (các mẫu mới nhất của 1 chuỗi Redis) có mẫu LIỀN TRƯỚC mẫu vừa ghi mà không cũ hơn dấu `seen` không?
+    Mẫu vừa ghi (có thể đã nằm trong danh sách) bị bỏ."""
+    previous = [t for t in stamps if t < new_ts.timestamp() - _CONTINUITY_TOLERANCE_SECS]
+    return bool(previous) and max(previous) >= seen.timestamp() - _CONTINUITY_TOLERANCE_SECS
+
+
+def _redis_holds_previous_sample(device: Device, new_ts, expected_if_ids=()) -> bool | None:
+    """Redis còn giữ mẫu mà dấu `metrics_seen_at` trỏ tới (hoặc mẫu mới hơn nó) không — ở sys-series VÀ ở if-series của mọi cổng
+    trong `expected_if_ids`? None = không hỏi được Redis.
+
+    Chỉ gọi khi `device.metrics_seen_at < new_ts`. Redis mất dữ liệu (khoá biến mất) hoặc khôi phục từ bản cũ (mất đúng mẫu
+    mới nhất đã nhận) đều ra False. Sys-series mất ⇒ False ngay, không cần đọc if-series."""
+    seen = device.metrics_seen_at
+    stamps = metrics_cache.recent_sys_ts(device.id, _CONTINUITY_PROBE_SAMPLES)
+    if stamps is metrics_cache.UNREADABLE:
+        return None
+    if not _holds_a_sample_since(stamps, new_ts, seen):
+        return False
+    if not expected_if_ids:
+        return True
+    by_iface = metrics_cache.recent_if_ts(expected_if_ids, _CONTINUITY_PROBE_SAMPLES)
+    if by_iface is metrics_cache.UNREADABLE:
+        return None
+    return all(_holds_a_sample_since(by_iface.get(iid, []), new_ts, seen) for iid in expected_if_ids)
+
+
+def _record_lost_upto(device: Device, upto) -> None:
+    """Ghi BỀN `Device.metrics_lost_upto` = `upto` — thời điểm của mẫu cuối cùng Redis đã nhận rồi mất (chỉ tăng).
+
+    Engine không nối chuỗi sustained qua mốc này (xem `engine._after_loss`). Lỗi ghi chỉ mất lớp bảo vệ này, không làm hỏng
+    poll."""
+    try:
+        Device.objects.filter(pk=device.pk).filter(
+            Q(metrics_lost_upto__isnull=True) | Q(metrics_lost_upto__lt=upto)
+        ).update(metrics_lost_upto=upto)
+        if device.metrics_lost_upto is None or device.metrics_lost_upto < upto:
+            device.metrics_lost_upto = upto
+            logger.warning("Device %s: Redis không còn giữ mẫu đã nhận lúc %s — chuỗi sustained không được nối qua mốc này",
+                           device.name, upto)
+    except Exception:
+        logger.warning("Device %s: không ghi được metrics_lost_upto", device.name, exc_info=True)
+
+
+def _note_redis_loss(device: Device, ts, expected_if_ids=()) -> None:
+    """Nhánh ghi đường lui (Redis nhận mẫu thất bại): nếu ĐỌC được Redis và thấy nó đã mất mẫu đã nhận trước đó thì vẫn ghi mốc
+    mất mẫu — mẫu mới vào DB mà dấu `metrics_seen_at` đứng yên nên engine không có cách nào khác để biết (kịch bản "lỗi
+    kép": Redis nhận 10% → mất dữ liệu → ghi lỗi lại → 99% vào DB). Không hỏi được Redis thì chưa kết luận gì."""
+    prior = device.metrics_seen_at
+    if prior is None or not prior < ts:
+        return
+    try:
+        if _redis_holds_previous_sample(device, ts, expected_if_ids) is False:
+            _record_lost_upto(device, prior)
+    except Exception:
+        logger.warning("Device %s: không kiểm chứng được Redis còn giữ mẫu cũ", device.name, exc_info=True)
+
+
+def _mark_metrics_seen(device: Device, ts, expected_if_ids=()) -> None:
+    """Ghi BỀN mốc của mẫu vừa đưa vào Redis: `Device.metrics_seen_at` (chỉ tăng).
+
+    Mẫu mới nằm ở Redis; nếu Redis mất dữ liệu thì mẫu lẫn dấu hiệu của nó cùng mất, còn dòng DB cũ (ghi lúc Redis lỗi)
+    vẫn nằm đó và engine đọc lại như "giá trị hiện tại" — kể cả khi chưa có alert nào hồi phục để làm mốc (review ngoài
+    2026-11-19 lần 4, P1). Mốc này cho engine biết dòng DB nào đã bị mẫu mới hơn vượt qua. Chỉ ghi ở nhánh Redis THÀNH
+    CÔNG: nhánh ghi đường lui đã có chính dòng DB làm bằng chứng. Lỗi ghi mốc không được làm hỏng poll (mẫu đã nằm ở
+    Redis) — chỉ mất lớp bảo vệ này cho lần poll đó.
+
+    Review ngoài lần 5, P1: dấu chỉ trỏ tới mẫu MỚI NHẤT nên chỉ bảo vệ đuôi chuỗi — mẫu cũ hơn đã nhận rồi mất nằm giữa
+    lịch sử DB cũ và mẫu Redis mới thì không còn dấu vết nào. Nên TRƯỚC khi dấu nhảy qua mẫu cũ, kiểm chứng Redis còn giữ mẫu
+    đó; không còn (hoặc không kiểm chứng được) ⇒ ghi `metrics_lost_upto` = dấu cũ. Thứ tự quan trọng: ghi mốc mất mẫu TRƯỚC khi
+    dấu tiến lên, nếu không chết giữa chừng làm mất luôn dấu vết."""
+    prior = device.metrics_seen_at
+    if prior is not None and prior < ts:
+        try:
+            if _redis_holds_previous_sample(device, ts, expected_if_ids) is not True:
+                _record_lost_upto(device, prior)
+        except Exception:
+            logger.warning("Device %s: không kiểm chứng được Redis còn giữ mẫu cũ", device.name, exc_info=True)
+    try:
+        Device.objects.filter(pk=device.pk).filter(
+            Q(metrics_seen_at__isnull=True) | Q(metrics_seen_at__lt=ts)
+        ).update(metrics_seen_at=ts)
+        if device.metrics_seen_at is None or device.metrics_seen_at < ts:
+            device.metrics_seen_at = ts
+    except Exception:
+        logger.warning("Device %s: không ghi được metrics_seen_at", device.name, exc_info=True)
 
 
 def _save_metrics_db(device: Device, data: NormalizedData) -> None:
@@ -245,7 +361,7 @@ def _persist_change_events(device: Device, data: NormalizedData, prev: dict, cha
     if not (changed_ifaces or vm_changed):
         return
     with transaction.atomic():
-        _save_system_health(device, data)
+        _save_system_health(device, data, evidence=True)
         if changed_ifaces:
             InterfaceStats.objects.bulk_create([
                 InterfaceStats(
@@ -269,9 +385,12 @@ def _persist_change_events(device: Device, data: NormalizedData, prev: dict, cha
     )
 
 
-def _save_system_health(device: Device, data: NormalizedData) -> None:
+def _save_system_health(device: Device, data: NormalizedData, *, evidence: bool = False) -> None:
+    """`evidence=True`: dòng bằng chứng/ngữ cảnh ở cache-mode (xem `EVIDENCE_KEY`) — không phải mẫu poll thường."""
     # Lưu extra vendor-specific (bỏ các key list lớn đã xử lý riêng).
     extra = {k: v for k, v in data.extra.items() if k not in _EXTRA_SKIP_KEYS}
+    if evidence:
+        extra[EVIDENCE_KEY] = True
     SystemHealth.objects.create(
         device=device,
         timestamp=data.timestamp,

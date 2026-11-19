@@ -89,6 +89,10 @@ class DeviceForm(forms.ModelForm):
             self.add_error("snmp_community", "SNMP Community là bắt buộc với SNMP v1/v2c.")
 
         if snmp_version == "v3":
+            # Backend pysnmp chỉ làm được v1/v2c — lưu thiết bị v3 thì mọi lần poll đều lỗi (review 2026-11-19).
+            from apps.collectors.snmp_client import SNMP_V3_UNSUPPORTED_MESSAGE, snmp_v3_supported
+            if not snmp_v3_supported():
+                self.add_error("snmp_version", SNMP_V3_UNSUPPORTED_MESSAGE)
             if not v3_user:
                 self.add_error("snmpv3_username", "SNMPv3 Username là bắt buộc.")
             if v3_auth_proto and not v3_auth_pass:

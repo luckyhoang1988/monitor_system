@@ -243,7 +243,10 @@ class TestSustainedQueryCount:
     def test_sustained_vm_metric_constant_queries(self, db, django_assert_num_queries):
         device = HyperVDeviceFactory()
         rule = AlertRule(metric="vm_count_running", condition="gt", threshold=1.0)
-        window = now() - timedelta(minutes=30)
+        # Cửa sổ phải được dữ liệu PHỦ (review 2026-11-19, F02/lần 2 P2-3): phải có MẪU BIÊN (snapshot cũ hơn đầu
+        # cửa sổ) — snapshot đầu tiên cách đây 4 phút, cửa sổ 3,5 phút; test này kiểm số query cố định, không
+        # phải ngữ nghĩa sustain.
+        window = now() - timedelta(minutes=3, seconds=30)
 
         self._make_vm_snapshots(device, 3)
         with django_assert_num_queries(2):
@@ -262,8 +265,10 @@ class TestSustainedQueryCount:
         iface = Interface.objects.create(device=device, if_index=1,
                                          name="Gi0/1", is_uplink=True)
         rule = AlertRule(metric="uplink_in_mbps_max", condition="gt", threshold=0.0)
-        window = now() - timedelta(minutes=30)
-        base = now() - timedelta(minutes=10)
+        # Mẫu trải 5 phút gần nhất (mỗi phút 1 mẫu), mẫu đầu cách đây 5 phút là MẪU BIÊN của cửa sổ 4,5 phút —
+        # phải được dữ liệu phủ (review 2026-11-19, F02/lần 2 P2-3).
+        window = now() - timedelta(minutes=4, seconds=30)
+        base = now() - timedelta(minutes=5)
         for i in range(6):
             InterfaceStats.objects.create(interface=iface,
                                           timestamp=base + timedelta(minutes=i),

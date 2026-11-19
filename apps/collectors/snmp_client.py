@@ -199,6 +199,21 @@ def resolve_snmp_backend() -> str:
         return "pysnmp"
 
 
+SNMP_V3_UNSUPPORTED_MESSAGE = (
+    "SNMPv3 chưa dùng được trên bản triển khai này: backend pysnmp của hệ thống chỉ hỗ trợ SNMP v1/v2c, "
+    "còn SNMPv3 cần easysnmp (libsnmp native) mà image không cài. Dùng SNMP v2c, hoặc cài easysnmp "
+    "trước khi chọn v3."
+)
+
+
+def snmp_v3_supported(backend: str | None = None) -> bool:
+    """True khi backend SNMP đang dùng thật sự làm được SNMPv3.
+
+    `PySnmpSession` chỉ nói v1/v2c (xem `create_snmp_session`), nên chỉ easysnmp mới có v3. Form/API dùng hàm
+    này để KHÔNG lưu thiết bị v3 mà mọi lần poll đều ném RuntimeError (review ngoài 2026-11-19, F06)."""
+    return (backend or resolve_snmp_backend()) == "easysnmp"
+
+
 def create_snmp_session(snmp_kwargs: dict[str, Any], backend: str | None = None) -> Any:
     """Tạo SNMP session — easysnmp Session hoặc PySnmpSession (v1/v2c only).
 

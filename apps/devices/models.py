@@ -75,6 +75,18 @@ class Device(models.Model):
     # vốn bị null mỗi lần poll trượt để đồng bộ badge). Dùng làm mốc grace cho cảnh
     # báo offline → tránh báo giả khi chỉ 1 vòng poll bị trượt (ICMP rớt gói, SNMP chậm).
     last_ok_seen     = models.DateTimeField(null=True, blank=True, verbose_name="Lần poll OK gần nhất")
+    # Mốc của mẫu metrics MỚI NHẤT mà writer đã đưa vào Redis (cache-mode, METRICS_WRITE_MODE=cache) — dấu BỀN duy nhất cho
+    # biết "đã có mẫu mới hơn mọi dòng DB đường lui": Redis mất dữ liệu thì cả mẫu lẫn dấu hiệu của nó cùng mất, còn dòng
+    # DB cũ (ghi lúc Redis lỗi) vẫn nằm đó và bị engine đọc lại như "giá trị hiện tại" (review ngoài 2026-11-19 lần 4, P1).
+    # Chỉ ghi bởi `apps.metrics.writer.save_metrics`, chỉ tăng; không đưa vào form/admin.
+    metrics_seen_at  = models.DateTimeField(null=True, blank=True, editable=False,
+                                            verbose_name="Mẫu metrics mới nhất đã vào cache")
+    # Thời điểm của mẫu CUỐI CÙNG mà Redis đã nhận rồi MẤT (flush/restart/RDB cũ) — writer ghi BỀN ngay lúc thấy Redis không còn
+    # giữ mẫu của `metrics_seen_at` (review ngoài 2026-11-19 lần 5, P1). Dấu `metrics_seen_at` chỉ bảo vệ ĐUÔI chuỗi; mẫu đã mất
+    # mà nằm GIỮA lịch sử DB cũ và mẫu Redis mới bị đọc như "poll lỡ một vòng" nên engine nối chuỗi qua cái lỗ đó. Engine không
+    # bao giờ nối chuỗi sustained qua mốc này (mọi mẫu ≤ mốc bị bỏ). Chỉ ghi bởi `apps.metrics.writer`, chỉ tăng; không đưa vào form/admin.
+    metrics_lost_upto = models.DateTimeField(null=True, blank=True, editable=False,
+                                             verbose_name="Mẫu metrics muộn nhất Redis đã nhận rồi mất")
     created_at       = models.DateTimeField(auto_now_add=True)
 
     class Meta:

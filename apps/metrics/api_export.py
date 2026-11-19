@@ -1,5 +1,6 @@
 """API xuất dữ liệu Metrics ra CSV và Excel."""
 import csv
+import io
 from django.http import HttpResponse
 from django.utils import timezone
 from rest_framework.decorators import api_view, permission_classes
@@ -9,7 +10,8 @@ from apps.metrics.models import (
     SystemHealth, SystemHealthHourly, SystemHealthDaily,
     InterfaceStats, InterfaceStatsHourly, InterfaceStatsDaily
 )
-from apps.metrics.api import _parse_range
+from apps.metrics import cache as metrics_cache
+from apps.metrics.api import _db_if_samples, _db_sys_samples, _merge_by_ts, _parse_range
 import openpyxl
 from openpyxl.utils import get_column_letter
 
@@ -70,11 +72,24 @@ def _get_system_export_data(device, source, since):
         for r in qs:
             rows.append([timezone.localtime(r.hour).strftime("%Y-%m-%d %H:00"), r.cpu_avg, r.mem_avg, r.cpu_max, r.mem_max])
     else:
+        # Cache-mode: DB không còn raw (chỉ dòng bằng chứng + mẫu đường lui) nên đọc ring-buffer Redis — cùng nguồn với
+        # chart — GHÉP với DB theo thời điểm: Redis ghi lỗi mà đọc được thì mẫu mới ở DB, Redis trống thì DB là nguồn duy
+        # nhất (review 2026-11-19, F04 + lần 4 P2).
+        if metrics_cache.is_cache_mode():
+            redis_series = [s for s in metrics_cache.get_sys_series(device.id, since) if s.get("ts") is not None]
+            for s in _merge_by_ts(redis_series, _db_sys_samples(device, since)):
+                rows.append([_fmt_epoch(s["ts"]), s.get("cpu"), s.get("mem")])
+            return headers, rows
         qs = SystemHealth.objects.filter(device=device, timestamp__gte=since).order_by("timestamp")
         for r in qs:
             rows.append([timezone.localtime(r.timestamp).strftime("%Y-%m-%d %H:%M:%S"), r.cpu_percent, r.mem_percent])
-            
+
     return headers, rows
+
+
+def _fmt_epoch(ts: float) -> str:
+    """Epoch (giây, UTC) từ ring-buffer Redis → chuỗi giờ local, cùng định dạng với nhánh DB."""
+    return timezone.localtime(metrics_cache.epoch_to_dt(ts)).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _get_interface_export_data(device, source, since):
@@ -96,6 +111,18 @@ def _get_interface_export_data(device, source, since):
                 rows.append([iface.name, timezone.localtime(r.hour).strftime("%Y-%m-%d %H:00"), r.in_mbps_avg, r.out_mbps_avg, r.in_mbps_max, r.out_mbps_max, r.in_errors, r.out_errors])
     else:
         headers.extend(["In Errors", "Out Errors"])
+        # Cache-mode: if-series Redis GHÉP với InterfaceStats THEO TỪNG CỔNG (review 2026-11-19, F04 + lần 4 P2).
+        if metrics_cache.is_cache_mode():
+            interfaces = list(interfaces)
+            db_by_iface = _db_if_samples([i.id for i in interfaces], since)
+            return headers, [
+                [iface.name, _fmt_epoch(s["ts"]), s.get("in_mbps"), s.get("out_mbps"),
+                 s.get("in_errors"), s.get("out_errors")]
+                for iface in interfaces
+                for s in _merge_by_ts(
+                    [r for r in metrics_cache.get_if_series(iface.id, since) if r.get("ts") is not None],
+                    db_by_iface.get(iface.id, []))
+            ]
         for iface in interfaces:
             qs = InterfaceStats.objects.filter(interface=iface, timestamp__gte=since).order_by("timestamp")
             for r in qs:
@@ -108,10 +135,14 @@ def _export_csv(headers, rows, filename):
     response = HttpResponse(content_type='text/csv; charset=utf-8-sig')
     response['Content-Disposition'] = f'attachment; filename="{filename}.csv"'
 
-    writer = csv.writer(response)
+    # Dựng cả file trong bộ đệm rồi ghi MỘT lần: `csv.writer(response)` gọi `response.write` từng dòng và Django
+    # mã hoá mỗi lần bằng `utf-8-sig` → BOM bị chèn vào đầu MỌI dòng (Excel hiện ký tự rác ở ô đầu mỗi dòng).
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
     writer.writerow(headers)
     for row in rows:
         writer.writerow(row)
+    response.write(buffer.getvalue())
     return response
 
 

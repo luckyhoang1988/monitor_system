@@ -60,6 +60,41 @@ class TestPurgeMetrics:
         assert SystemHealth.objects.count() == 1  # ngoài khoảng giữ lại
         assert SystemHealth.objects.first().timestamp == out_range
 
+    def test_purge_covers_every_table_the_scheduled_cleanup_covers(self, logged_in_client):
+        """Review ngoài 2026-11-19 (F05): `_purge_metrics` bỏ sót HardwareHealth (iLO) và VolumeStats
+        trong khi `cleanup_old_metrics` có cả hai — xoá tay theo khoảng ngày để lại dữ liệu cũ."""
+        from apps.metrics.models import HardwareHealth, VolumeStats
+
+        device = CiscoSNMPDeviceFactory()
+        tz = ZoneInfo("Asia/Ho_Chi_Minh")
+        in_range = datetime(2026, 1, 15, 12, 0, tzinfo=tz)
+        out_range = datetime(2026, 2, 15, 12, 0, tzinfo=tz)
+        for dt in (in_range, out_range):
+            HardwareHealth.objects.create(device=device, timestamp=dt)
+            VolumeStats.objects.create(device=device, timestamp=dt, volume_name="d:")
+
+        resp = logged_in_client.post(reverse("alerts:storage"),
+                                     {"from_date": "2026-01-01", "to_date": "2026-01-31"})
+
+        assert resp.status_code in (302, 301)
+        assert [h.timestamp for h in HardwareHealth.objects.all()] == [out_range]
+        assert [v.timestamp for v in VolumeStats.objects.all()] == [out_range]
+
+    def test_purge_table_list_matches_scheduled_cleanup(self):
+        """Khoá drift: 2 danh sách bảng (xoá tay vs task định kỳ) phải bao phủ cùng các model."""
+        import inspect
+        import re
+
+        from apps.alerts import views as alert_views
+        from apps.metrics import tasks as metric_tasks
+
+        def models_used(src: str) -> set[str]:
+            return set(re.findall(r"\b([A-Z]\w+(?:Stats|Health|Hourly|Daily))\b", src))
+
+        purge = models_used(inspect.getsource(alert_views._purge_metrics))
+        cleanup = models_used(inspect.getsource(metric_tasks.cleanup_old_metrics))
+        assert cleanup - purge == set(), f"_purge_metrics thiếu: {sorted(cleanup - purge)}"
+
     def test_purge_forbidden_for_readonly(self, readonly_client):
         resp = readonly_client.post(reverse("alerts:storage"),
                                     {"from_date": "2026-01-01", "to_date": "2026-01-31"})

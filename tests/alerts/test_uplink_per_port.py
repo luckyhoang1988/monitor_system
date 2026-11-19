@@ -101,7 +101,7 @@ def history(request, mocker):
             return {"interfaces": interfaces, "ts": time.time()} if interfaces else None
 
         mocker.patch("apps.alerts.engine.metrics_cache.get_if_series", side_effect=get_if_series)
-        mocker.patch("apps.alerts.engine._fresh_latest", side_effect=fresh_latest)
+        mocker.patch("apps.alerts.engine._latest_snapshot", side_effect=fresh_latest)
 
     def put(port, samples):
         for offset_secs, status in samples:
@@ -274,7 +274,8 @@ class TestEachPortHasItsOwnLifecycle:
 # ─────────────────────────────────────────────────────────────────────────────────────────────────────────
 @pytest.mark.django_db
 class TestDurationMinMeansDownForTheWholeWindow:
-    """Cửa sổ 5 phút; chu kỳ poll ≈ 90s (mẫu cách nhau 80–90s)."""
+    """Cửa sổ 5 phút; chu kỳ poll ≈ 90s (mẫu cách nhau 80–90s). Dữ liệu ổn định luôn có MẪU BIÊN (mẫu cuối cùng
+    trước/đúng đầu cửa sổ, ở -380s): mẫu đầu tiên nằm trong cửa sổ không chứng minh cổng đã down từ đầu cửa sổ."""
 
     @pytest.fixture
     def p(self, device, peer):
@@ -284,7 +285,7 @@ class TestDurationMinMeansDownForTheWholeWindow:
 
     def test_down_for_less_than_the_window_does_not_fire(self, history, device, sustained_rule, p):
         # up đầu cửa sổ, down 2 phút gần nhất — bản cũ báo DOWN vì có mẫu không-up trong cửa sổ.
-        history(p, [(-290, "up"), (-200, "up"), (-110, "down"), (-20, "down")])
+        history(p, [(-380, "up"), (-290, "up"), (-200, "up"), (-110, "down"), (-20, "down")])
         evaluate(device)
         assert not Alert.objects.filter(device=device).exists()
 
@@ -297,24 +298,36 @@ class TestDurationMinMeansDownForTheWholeWindow:
         assert not Alert.objects.filter(device=device).exists()
 
     def test_down_for_the_whole_window_fires(self, history, device, sustained_rule, p):
-        history(p, [(-290, "down"), (-200, "down"), (-110, "down"), (-20, "down")])
+        history(p, [(-380, "down"), (-290, "down"), (-200, "down"), (-110, "down"), (-20, "down")])
         evaluate(device)
         alert = Alert.objects.get(device=device, rule=sustained_rule)
         assert alert.interface_id == p.pk and alert.is_active
 
+    def test_a_fresh_down_sample_alone_does_not_fire_a_short_window(self, history, device, sustained_rule, p):
+        """Review ngoài lần 2 (P2-3): chỉ MỘT mẫu down vừa xuất hiện không phải bằng chứng 'down đủ cửa sổ'."""
+        history(p, [(-5, "down")])
+        evaluate(device)
+        assert not Alert.objects.filter(device=device).exists()
+
+    def test_the_first_down_sample_inside_the_window_is_not_a_boundary(self, history, device, sustained_rule, p):
+        """Mẫu đầu tiên nằm TRONG cửa sổ (-290s) chưa chứng minh trạng thái lúc cửa sổ bắt đầu (-300s)."""
+        history(p, [(-290, "down"), (-200, "down"), (-110, "down"), (-20, "down")])
+        evaluate(device)
+        assert not Alert.objects.filter(device=device).exists()
+
     def test_an_up_sample_inside_the_window_breaks_the_streak(self, history, device, sustained_rule, p):
-        history(p, [(-290, "down"), (-200, "up"), (-110, "down"), (-20, "down")])
+        history(p, [(-380, "down"), (-290, "down"), (-200, "up"), (-110, "down"), (-20, "down")])
         evaluate(device)
         assert not Alert.objects.filter(device=device).exists()
 
     def test_back_up_after_a_long_down_does_not_fire(self, history, device, sustained_rule, p):
         # down gần hết cửa sổ nhưng mẫu MỚI NHẤT đã up → không báo DOWN.
-        history(p, [(-290, "down"), (-200, "down"), (-110, "down"), (-20, "up")])
+        history(p, [(-380, "down"), (-290, "down"), (-200, "down"), (-110, "down"), (-20, "up")])
         evaluate(device)
         assert not Alert.objects.filter(device=device).exists()
 
     def test_recovery_uses_the_latest_state_not_the_window(self, history, device, sustained_rule, p):
-        history(p, [(-290, "down"), (-200, "down"), (-110, "down"), (-60, "down")])
+        history(p, [(-380, "down"), (-290, "down"), (-200, "down"), (-110, "down"), (-60, "down")])
         evaluate(device)
         alert = Alert.objects.get(device=device, rule=sustained_rule)
         mark_fire_sent(alert)
@@ -327,7 +340,7 @@ class TestDurationMinMeansDownForTheWholeWindow:
         assert recoveries(alert).count() == 1
 
     def test_flap_down_again_after_up_must_sustain_again(self, history, device, sustained_rule, p):
-        history(p, [(-290, "down"), (-200, "down"), (-110, "down"), (-60, "down")])
+        history(p, [(-380, "down"), (-290, "down"), (-200, "down"), (-110, "down"), (-60, "down")])
         evaluate(device)
         alert = Alert.objects.get(device=device, rule=sustained_rule)
         mark_fire_sent(alert)
@@ -354,10 +367,9 @@ class TestDurationMinMeansDownForTheWholeWindow:
         assert not recoveries(active).exists()
 
     def test_stale_samples_are_not_evidence(self, history, device, sustained_rule, p):
-        # Mẫu mới nhất cũ hơn 135s với chu kỳ quét 60s: poll kẹt → không đủ cơ sở báo DOWN.
-        type(device).objects.filter(pk=device.pk).update(collect_interval=60)
-        device.refresh_from_db()
-        history(p, [(-290, "down"), (-250, "down"), (-200, "down")])
+        # Mẫu mới nhất cũ hơn 2 chu kỳ poll thật (90s → 180s): poll kẹt → không đủ cơ sở báo DOWN. Có mẫu biên
+        # (-330s ≤ đầu cửa sổ -300s) nên test này chết đúng ở kiểm tra độ mới, không phải ở thiếu mẫu biên.
+        history(p, [(-480, "down"), (-420, "down"), (-370, "down"), (-330, "down"), (-200, "down")])
         evaluate(device)
         assert not Alert.objects.filter(device=device).exists()
 
@@ -366,8 +378,8 @@ class TestDurationMinMeansDownForTheWholeWindow:
         short_down = port(device, "Gi0/2", 2)
         link(device, long_down, peer)
         link(device, short_down, CiscoSNMPDeviceFactory())
-        history(long_down, [(-290, "down"), (-200, "down"), (-110, "down"), (-20, "down")])
-        history(short_down, [(-290, "up"), (-200, "up"), (-110, "up"), (-20, "down")])
+        history(long_down, [(-380, "down"), (-290, "down"), (-200, "down"), (-110, "down"), (-20, "down")])
+        history(short_down, [(-380, "up"), (-290, "up"), (-200, "up"), (-110, "up"), (-20, "down")])
         evaluate(device)
         assert list(
             Alert.objects.filter(device=device, rule=sustained_rule).values_list("interface_id", flat=True)

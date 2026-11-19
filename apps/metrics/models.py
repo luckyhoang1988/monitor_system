@@ -20,6 +20,13 @@ class InterfaceStats(models.Model):
         verbose_name = "Interface Stats"
 
 
+# Khoá trong `SystemHealth.extra` đánh dấu dòng BẰNG CHỨNG (ghi lúc alert nổ / đổi trạng thái ở cache-mode): bản sao của
+# 1 mẫu đã/đang nằm trong Redis, KHÔNG phải mẫu poll thường. Engine cảnh báo loại chúng khi đọc DB làm đường lui —
+# nếu không, Redis mất dữ liệu sẽ khiến dòng bằng chứng cũ (vd CPU 99% lúc alert nổ) bị đọc như "CPU hiện tại" và
+# làm alert đã hồi phục nổ lại (review ngoài 2026-11-19 lần 2, P1-1).
+EVIDENCE_KEY = "_evidence"
+
+
 class SystemHealth(models.Model):
     """Time-series: CPU và RAM của thiết bị, ghi mỗi poll cycle."""
     device      = models.ForeignKey(Device, on_delete=models.CASCADE, related_name="health_stats")

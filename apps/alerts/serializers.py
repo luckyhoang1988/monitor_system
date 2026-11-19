@@ -18,3 +18,5 @@ class AlertSerializer(serializers.ModelSerializer):
             "triggered_at", "resolved_at",
             "interface_name", "peer_name", "closed_reason",
         ]
+        # Chỉ để đọc: serializer này không bao giờ được dùng để ghi trạng thái alert (xem AlertViewSet).
+        read_only_fields = fields

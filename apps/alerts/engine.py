@@ -4,6 +4,8 @@ import re
 import time
 import uuid
 from collections.abc import Callable
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import timedelta
 
@@ -107,28 +109,284 @@ def _use_cache() -> bool:
     return metrics_cache.is_cache_mode()
 
 
-def _fresh_latest(device: Device, since) -> dict | None:
-    """Snapshot mới nhất từ cache nếu còn trong cửa sổ `since`, ngược lại None.
+# Sentinel: "đọc DB" — Redis không có snapshot cho thiết bị (mất kết nối, restart/flush, hết TTL) HOẶC DB đã có mẫu poll
+# thường MỚI HƠN snapshot Redis (writer rơi về ghi DB khi Redis ghi lỗi nhưng đọc vẫn được). KHÁC với "Redis có snapshot
+# nhưng cũ hơn cửa sổ và DB cũng không có mẫu mới" (thiết bị ngừng poll → không có dữ liệu mới là sự thật → None).
+# Dòng BẰNG CHỨNG trong DB (ghi lúc alert nổ/đổi trạng thái, xem `EVIDENCE_KEY`) không bao giờ được coi là mẫu mới:
+# chúng là bản sao của mẫu cũ — đọc chúng làm "CPU hiện tại" sẽ làm alert đã hồi phục nổ lại (review ngoài 2026-11-19
+# lần 2, P1-1; lần 1 F01 viết đường lui mà chưa phân biệt).
+_CACHE_MISS = object()
 
-    Giữ đúng ngữ nghĩa DB (`timestamp__gte=since`): snapshot cũ hơn `since` bị bỏ
-    → tránh cảnh báo trên số liệu ôi khi thiết bị ngừng poll.
-    """
-    snap = metrics_cache.get_latest(device.id)
-    if not snap:
+
+def _regular_health(qs: QuerySet) -> QuerySet:
+    """Chỉ giữ mẫu poll thường của `SystemHealth`, bỏ dòng bằng chứng (`EVIDENCE_KEY`)."""
+    from apps.metrics.models import EVIDENCE_KEY
+
+    return qs.exclude(extra__has_key=EVIDENCE_KEY)
+
+
+def _db_sample_newer_than(device: Device, after_ts: float) -> bool:
+    """True khi DB có mẫu poll thường của thiết bị MỚI HƠN `after_ts` (epoch giây, dung sai 1s cho làm tròn)."""
+    from apps.metrics.models import SystemHealth
+
+    after = metrics_cache.epoch_to_dt(after_ts + 1.0)
+    return _regular_health(SystemHealth.objects.filter(device=device, timestamp__gt=after)).exists()
+
+
+# Bằng chứng HỒI PHỤC (review ngoài 2026-11-19 lần 3, P1). Dấu `_evidence` chỉ loại được dòng bằng chứng; còn mẫu poll
+# THƯỜNG mà writer ghi vào DB khi Redis ghi lỗi thì vẫn là mẫu thật. Chuỗi: Redis lỗi → CPU 99% vào DB → ALERT →
+# Redis phục hồi, CPU 10% → hồi phục → Redis mất snapshot lần nữa ⇒ getter rơi về DB và nhặt lại mẫu 99% cũ → ALERT nổ
+# lại dù chẳng có gì xảy ra. Mẫu 10% (nằm ở Redis) đã mất, nhưng ENGINE đã quyết định dựa trên nó và ghi lại durable:
+# `Alert.resolved_at`. Mẫu DB có thời điểm ≤ lúc alert NÀY hồi phục thật là mẫu đã bị vượt qua — không được dùng làm
+# "giá trị hiện tại"/bằng chứng sustained. Chỉ áp ở cache-mode (DB-mode mọi mẫu đều ở DB) và chỉ cho mẫu lấy từ DB
+# (Redis là nguồn chủ). Đóng KHÔNG phải vì hồi phục (`closed_reason`: tắt rule, đổi phạm vi, superseded) không tính.
+_recovery_scope: ContextVar = ContextVar("alert_recovery_scope", default=None)
+
+
+@contextmanager
+def _recovery_evidence_for(device: Device, rule: AlertRule):
+    """Trong khối này, đọc mẫu DB đường lui biết alert nào đang được đánh giá (xem `_recovery_floor`)."""
+    token = _recovery_scope.set((device, rule, {}))
+    try:
+        yield
+    finally:
+        _recovery_scope.reset(token)
+
+
+def _recovery_floor(interface_id=None) -> float | None:
+    """Epoch giây của lần hồi phục THẬT gần nhất của alert đang được đánh giá (rule, thiết bị, [cổng]); None nếu chưa
+    có / không ở cache-mode / không trong `_recovery_evidence_for`. Truy vấn LƯỜI (chỉ khi có mẫu DB cần so) và nhớ
+    kết quả trong phạm vi 1 lần đánh giá — cache-mode bình thường không có mẫu thường trong DB nên không tốn gì."""
+    scope = _recovery_scope.get()
+    if scope is None or not _use_cache():
         return None
-    if since is not None and snap.get("ts", 0) < since.timestamp():
+    device, rule, memo = scope
+    if interface_id not in memo:
+        qs = Alert.objects.filter(device=device, rule=rule, is_active=False, closed_reason="",
+                                  resolved_at__isnull=False)
+        qs = qs.filter(interface_id=interface_id) if interface_id is not None else qs.filter(interface__isnull=True)
+        when = qs.order_by("-resolved_at").values_list("resolved_at", flat=True).first()
+        memo[interface_id] = when.timestamp() if when else None
+    return memo[interface_id]
+
+
+# Dung sai (giây) khi so mốc: mẫu DB và `Device.metrics_seen_at` cùng lấy từ `NormalizedData.timestamp` nên bằng nhau trong
+# trường hợp bình thường; chỉ bù làm tròn Redis (float epoch) ↔ DB (microsecond).
+_SEEN_TOLERANCE_SECS = 1.0
+
+
+def _device_marks() -> tuple[float | None, float | None]:
+    """(`Device.metrics_seen_at`, `Device.metrics_lost_upto`) dạng epoch giây; (None, None) nếu không ở cache-mode / không
+    trong `_recovery_evidence_for`. Cả hai do writer ghi BỀN. Đọc LƯỜI từ DB (không tin đối tượng Device trong bộ nhớ — worker
+    nạp nó trước khi poll xong), 1 truy vấn nhớ trong phạm vi 1 lần đánh giá."""
+    scope = _recovery_scope.get()
+    if scope is None or not _use_cache():
+        return None, None
+    device, _rule, memo = scope
+    if "marks" not in memo:
+        row = Device.objects.filter(pk=device.pk).values_list("metrics_seen_at", "metrics_lost_upto").first()
+        seen, lost = row if row else (None, None)
+        memo["marks"] = (seen.timestamp() if seen else None, lost.timestamp() if lost else None)
+    return memo["marks"]
+
+
+def _metrics_seen_at() -> float | None:
+    """Epoch giây của mẫu MỚI NHẤT writer đã đưa vào Redis (`Device.metrics_seen_at`); None nếu chưa có / không ở cache-mode /
+    không trong `_recovery_evidence_for`.
+
+    Review ngoài 2026-11-19 lần 4, P1: mẫu DB cũ (ghi lúc Redis lỗi) CHƯA từng làm alert nổ nên không có `resolved_at` nào
+    làm mốc; Redis phục hồi, nhận mẫu 10% rồi mất dữ liệu ⇒ mẫu lẫn dấu hiệu của nó cùng mất và engine đọc lại chuỗi 99%
+    cũ. Mốc này do writer ghi BỀN lúc Redis nhận mẫu mới (xem `writer._mark_metrics_seen`)."""
+    return _device_marks()[0]
+
+
+def _metrics_lost_upto() -> float | None:
+    """Epoch giây của mẫu cuối cùng Redis đã nhận rồi MẤT (`Device.metrics_lost_upto`); None nếu chưa từng / không ở cache-mode /
+    không trong `_recovery_evidence_for`. Xem `_after_loss`."""
+    return _device_marks()[1]
+
+
+def _superseded(ts_epoch: float, interface_id=None) -> bool:
+    """Mẫu DB có thời điểm `ts_epoch` không còn là "hiện tại"? — đã bị vượt qua bởi lần hồi phục của alert đang đánh giá
+    (`Alert.resolved_at`), HOẶC cũ hơn mẫu mới nhất đã vào Redis (`Device.metrics_seen_at`)."""
+    floor = _recovery_floor(interface_id)
+    if floor is not None and ts_epoch <= floor:
+        return True
+    seen = _metrics_seen_at()
+    return seen is not None and ts_epoch < seen - _SEEN_TOLERANCE_SECS
+
+
+def _db_tail_is_stale(redis_pairs: list[tuple], db_pairs: list[tuple]) -> bool:
+    """Mẫu MỚI NHẤT của chuỗi ghép là mẫu DB và cũ hơn mẫu mới nhất đã vào Redis ⇒ thông tin mới nhất đã mất cùng Redis,
+    chuỗi này không còn là bằng chứng về hiện tại. Redis giữ mẫu mới nhất (hoặc ngang DB) ⇒ Redis là nguồn chủ, không
+    phải; không có mốc ⇒ không đánh giá (hành vi cũ)."""
+    if not db_pairs:
+        return False
+    seen = _metrics_seen_at()
+    if seen is None:
+        return False
+    db_newest = max(ts for ts, _ in db_pairs)
+    redis_newest = max((ts for ts, _ in redis_pairs), default=None)
+    if redis_newest is not None and redis_newest >= db_newest - _SEEN_TOLERANCE_SECS:
+        return False
+    return db_newest < seen - _SEEN_TOLERANCE_SECS
+
+
+def _after_loss(pairs: list[tuple]) -> list[tuple]:
+    """Bỏ mọi mẫu (Redis lẫn DB) có thời điểm ≤ mốc mất mẫu `Device.metrics_lost_upto` — chuỗi sustained không được nối qua
+    chỗ Redis đã nhận rồi mất mẫu (review ngoài 2026-11-19 lần 5, P1).
+
+    Dấu `metrics_seen_at` chỉ bảo vệ ĐUÔI chuỗi: DB(99,99) → Redis nhận 10% → Redis mất dữ liệu → Redis nhận 99% mới ⇒ dấu
+    nhảy sang mẫu mới, còn mẫu 10% đã mất nằm GIỮA 2 đoạn mẫu còn thấy, trong khoảng trống ≤ dung sai "poll lỡ" (~3 chu kỳ) nên
+    chuỗi trông liền mạch và rule "CPU cao liên tục N phút" nổ giả. Mẫu đã mất luôn có thời điểm ≤ mốc (mốc = mẫu cuối cùng
+    đã nhận trước lần mất) nên mọi cửa sổ có mẫu biên ≤ mốc đều vắt qua ít nhất 1 mẫu đã mất: bỏ phần ≤ mốc ⇒ không còn mẫu
+    biên ⇒ chưa đủ bằng chứng; cửa sổ bắt đầu SAU mốc thì không đổi. Hệ quả: sau 1 lần Redis mất dữ liệu, rule sustained nổ trễ
+    tối đa 1 cửa sổ — cùng tinh thần "Redis flush đặt lại cửa sổ sustain"."""
+    if not pairs:
+        return pairs
+    lost = _metrics_lost_upto()
+    if lost is None:
+        return pairs
+    return [p for p in pairs if p[0] > lost + _SEEN_TOLERANCE_SECS]
+
+
+def _merge_series(redis_pairs: list[tuple], db_pairs: list[tuple]) -> list[tuple]:
+    """Ghép chuỗi Redis + DB (`db_pairs` đã qua `_drop_superseded`) — rỗng khi đuôi DB đã cũ hơn mốc (xem `_db_tail_is_stale`),
+    và luôn cắt bỏ phần ≤ mốc mất mẫu (xem `_after_loss`)."""
+    if _db_tail_is_stale(redis_pairs, db_pairs):
+        return []
+    return _after_loss(_merge_samples(redis_pairs, db_pairs))
+
+
+def _drop_superseded(pairs: list[tuple], interface_id=None) -> list[tuple]:
+    """Bỏ mẫu DB (epoch giây, giá trị) đã bị vượt qua — chỉ gọi cho mẫu lấy từ DB, không cho mẫu Redis."""
+    if not pairs:
+        return pairs
+    floor = _recovery_floor(interface_id)
+    return pairs if floor is None else [p for p in pairs if p[0] > floor]
+
+
+def _latest_snapshot(device: Device, since):
+    """Cache-mode: snapshot Redis mới nhất còn trong cửa sổ `since` (dict); `None` nếu thiết bị không có dữ liệu
+    mới ở BẤT KỲ nguồn nào; `_CACHE_MISS` nếu nên đọc DB (Redis trống, hoặc DB có mẫu poll mới hơn snapshot Redis).
+
+    Giữ đúng ngữ nghĩa DB (`timestamp__gte=since`): snapshot cũ hơn `since` bị bỏ → tránh cảnh báo trên số
+    liệu ôi khi thiết bị ngừng poll."""
+    snap = metrics_cache.get_latest(device.id)
+    if snap is None:
+        return _CACHE_MISS
+    snap_ts = float(snap.get("ts") or 0)
+    since_ts = since.timestamp() if since is not None else 0.0
+    if _db_sample_newer_than(device, max(snap_ts, since_ts)):
+        return _CACHE_MISS
+    if snap_ts < since_ts:
         return None
     return snap
 
 
-def _sustained_verdict(values: list, rule: AlertRule) -> float | None:
+def _expected_poll_secs(device: Device, metric: str | None = None) -> int:
+    """Nhịp poll THẬT (giây) của nguồn dữ liệu CỦA CHÍNH thiết bị — dùng để đo "mẫu có phủ đủ cửa sổ sustain không".
+
+    Không dùng `Device.collect_interval`: mặc định 300 cho mọi thiết bị nhưng KHÔNG điều khiển beat (SNMP poll
+    90s). Nhịp thật nằm ở settings, chọn THEO NGUỒN: iLO (`HardwareHealth`) 300s, HyperV/WinRM 300s, thiết bị
+    ping-only theo `POLL_PING_INTERVAL_SECS`, còn lại (SNMP/SSH) theo `POLL_NETWORK_INTERVAL_SECS`. Bản trước lấy
+    max(network, ping) nên nhịp ping chậm làm lỏng dung sai của rule SNMP (review ngoài 2026-11-19 lần 2, P2-4)."""
+    if metric in _ILO_FIELD_MAP:
+        return int(getattr(settings, "POLL_ILO_INTERVAL_SECS", 300))
+    if device.device_type == "hyperv":
+        return int(getattr(settings, "POLL_HYPERV_INTERVAL_SECS", 300))
+    if getattr(device, "protocol", "") == "ping":
+        return int(getattr(settings, "POLL_PING_INTERVAL_SECS", 90))
+    return int(getattr(settings, "POLL_NETWORK_INTERVAL_SECS", 90))
+
+
+def _fresh_gap_slack_secs(poll_secs: int) -> tuple[int, int]:
+    """(dung sai 'mẫu mới nhất còn mới', dung sai 'khoảng trống giữa 2 mẫu') theo nhịp poll; sàn `ALERT_GRACE_PERIOD_SECS`."""
+    grace = int(getattr(settings, "ALERT_GRACE_PERIOD_SECS", 135))
+    return max(grace, 2 * poll_secs), max(grace, 3 * poll_secs)
+
+
+def _sustain_since(window_since, poll_secs: int):
+    """Đầu khoảng ĐỌC mẫu cho kiểm tra sustained: lùi trước đầu cửa sổ tối đa 1 dung sai khoảng trống để tìm mẫu BIÊN
+    (mẫu cuối cùng trước/đúng đầu cửa sổ — trạng thái đang giữ khi cửa sổ bắt đầu). Nơi gọi truy vấn từ mốc này,
+    `_sustained_verdict` tự cắt về đúng cửa sổ."""
+    return window_since - timedelta(seconds=_fresh_gap_slack_secs(poll_secs)[1])
+
+
+def _window_samples(pairs: list[tuple[float, float]], window_since, poll_secs: int) -> list[tuple[float, float]] | None:
+    """Mẫu (epoch giây, giá trị) đại diện cho cửa sổ [window_since, now], hoặc None khi chưa đủ bằng chứng.
+
+    Bản F02 đầu chỉ cần mẫu cũ nhất "không cách đầu cửa sổ quá 1,5 chu kỳ poll" — dung sai đó có thể LỚN HƠN cả cửa sổ
+    (HyperV poll 300s → 450s > rule 5 phút; rule mạng 2 phút → 135s > 120s) nên 1 mẫu vừa xuất hiện vẫn nổ (review ngoài
+    2026-11-19 lần 2, P2-3). Nay bằng chứng phải bắt đầu từ MẪU BIÊN: mẫu cuối cùng có thời điểm ≤ đầu cửa sổ (trạng
+    thái đang giữ khi cửa sổ bắt đầu; giá trị của nó cũng được xét như mọi mẫu khác). Không có mẫu biên = thiết bị mới
+    được thấy gần đây / Redis vừa bị xoá / vừa hết mất poll → chưa chứng minh được điều kiện đã kéo dài đủ.
+    Cần thêm: mẫu mới nhất không cũ quá ~2 chu kỳ poll, không khoảng trống nào giữa 2 mẫu liền kề (kể cả từ mẫu biên)
+    quá ~3 chu kỳ poll. Chỉ áp cho FIRE: hồi phục dùng giá trị tức thời."""
+    if not pairs:
+        return None
+    ordered = sorted(pairs, key=lambda p: p[0])
+    start = window_since.timestamp()
+    boundary = None
+    for i, (ts, _) in enumerate(ordered):
+        if ts > start:
+            break
+        boundary = i
+    if boundary is None:
+        return None
+    kept = ordered[boundary:]
+    fresh_slack, gap_slack = _fresh_gap_slack_secs(poll_secs)
+    if kept[-1][0] < timezone.now().timestamp() - fresh_slack:
+        return None
+    if any(b[0] - a[0] > gap_slack for a, b in zip(kept, kept[1:])):
+        return None
+    return kept
+
+
+def _merge_samples(*sources: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    """Hợp nhất mẫu (epoch giây, giá trị) từ nhiều nguồn (Redis + DB đường lui), cũ → mới.
+
+    Mẫu cách nhau < 1 giây là CÙNG 1 lần poll (cùng dữ liệu nằm ở cả 2 nơi: dòng bằng chứng, hoặc ghi dở dang) —
+    nguồn đứng TRƯỚC thắng. Cửa sổ vắt qua lúc Redis bắt đầu/ngừng ghi lỗi có nửa ở Redis nửa ở DB: chỉ đọc 1 nguồn
+    sẽ không bao giờ đủ độ phủ (hoặc bỏ sót mẫu tốt phá chuỗi) — phải ghép."""
+    merged: list[tuple[float, float]] = []
+    for source in sources:
+        for ts, value in source:
+            if not any(abs(ts - t) < 1.0 for t, _ in merged):
+                merged.append((ts, value))
+    return sorted(merged, key=lambda p: p[0])
+
+
+def _max_per_poll(points: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    """Điểm (epoch giây, giá trị) của NHIỀU cổng → 1 điểm/lần poll: giá trị lớn nhất của các điểm cách nhau < 1 giây
+    (cùng 1 lần poll, lệch nhau chỉ vì làm tròn giữa Redis và DB). Mốc của điểm = mốc sớm nhất trong nhóm."""
+    out: list[tuple[float, float]] = []
+    for ts, value in sorted(points, key=lambda p: p[0]):
+        if out and ts - out[-1][0] < 1.0:
+            out[-1] = (out[-1][0], max(out[-1][1], value))
+        else:
+            out.append((ts, value))
+    return out
+
+
+def _sustained_verdict(values: list, rule: AlertRule, *, stamps: list[float] | None = None,
+                       window_since=None, poll_secs: int | None = None) -> float | None:
     """Logic sustained dùng chung: điều kiện phải đúng TRÊN TOÀN cửa sổ.
 
     gt/gte → min(values) vượt ngưỡng; lt/lte → max(values) dưới ngưỡng; eq/ne →
     xét giá trị mới nhất. Trả latest (để dựng message) nếu sustained, else None.
+
+    `stamps` (epoch giây, song song `values`) + `window_since` + `poll_secs`: bắt buộc mẫu phải PHỦ cửa sổ (xem
+    `_window_samples`) — thiếu thì trả None như "chưa đủ bằng chứng". Nơi gọi truy vấn từ `_sustain_since(...)` (sớm
+    hơn đầu cửa sổ) để có mẫu biên; hàm này tự cắt về đúng cửa sổ. Mọi nơi gọi trong engine đều truyền.
     """
     if not values:
         return None
+    if stamps is not None:
+        kept = _window_samples(list(zip(stamps, values)), window_since, int(poll_secs or 0))
+        if kept is None:
+            return None
+        values = [v for _, v in kept]
     latest = float(values[-1])
     threshold = float(rule.threshold)
     cond = rule.condition
@@ -148,78 +406,72 @@ def _sustained_cpu_mem(device: Device, rule: AlertRule, window_since) -> float |
     If rule.duration_min > 0, we require the condition to hold for the whole window.
     Returns the latest value (for messaging) if sustained, else None.
     """
+    poll_secs = _expected_poll_secs(device)
+    read_since = _sustain_since(window_since, poll_secs)
+    redis_pairs: list[tuple[float, float]] = []
     if _use_cache():
         field = "cpu" if rule.metric == "cpu_percent" else "mem"
-        series = metrics_cache.get_sys_series(device.id, window_since)
-        values = [s[field] for s in series if s.get(field) is not None]
-        if rule.metric == "mem_percent":
-            values = [v for v in values if v]  # bỏ sentinel mem==0
-        return _sustained_verdict(values, rule)
+        redis_pairs = [(s["ts"], s[field]) for s in metrics_cache.get_sys_series(device.id, read_since)
+                       if s.get(field) is not None and s.get("ts") is not None]
 
     from apps.metrics.models import SystemHealth
 
-    qs = (SystemHealth.objects
-          .filter(device=device, timestamp__gte=window_since)
-          .order_by("timestamp")
-          .values_list(rule.metric, flat=True))
-    values = list(qs)
+    # DB luôn được đọc (chỉ mẫu poll thường): ở cache-mode bình thường không có dòng nào, nhưng khi Redis ghi lỗi
+    # writer rơi về ghi DB nên cửa sổ có thể vắt qua cả 2 nguồn → ghép lại (xem `_merge_samples`).
+    rows = (_regular_health(SystemHealth.objects.filter(device=device, timestamp__gte=read_since))
+            .order_by("timestamp")
+            .values_list(rule.metric, "timestamp"))
+    db_pairs = _drop_superseded([(t.timestamp(), v) for v, t in rows])
+    pairs = _merge_series(redis_pairs, db_pairs)
     if rule.metric == "mem_percent":
         # Loại mẫu mem == 0 (sentinel "không đo được") trước khi đánh giá sustained —
         # tránh rule lt/lte fire giả trên thiết bị không expose mem qua SNMP.
-        values = [v for v in values if v]
-    if not values:
-        return None
-
-    latest = float(values[-1])
-    threshold = float(rule.threshold)
-    cond = rule.condition
-
-    if cond in ("gt", "gte"):
-        ok = (min(values) > threshold) if cond == "gt" else (min(values) >= threshold)
-        return latest if ok else None
-    if cond in ("lt", "lte"):
-        ok = (max(values) < threshold) if cond == "lt" else (max(values) <= threshold)
-        return latest if ok else None
-
-    # For eq/ne, fall back to latest-only.
-    cond_fn = CONDITION_FN.get(cond)
-    return latest if (cond_fn and cond_fn(latest, threshold)) else None
+        pairs = [(t, v) for t, v in pairs if v]
+    return _sustained_verdict([v for _, v in pairs], rule, stamps=[t for t, _ in pairs],
+                              window_since=window_since, poll_secs=poll_secs)
 
 
 def _latest_host_perf(device: Device, since, metric: str) -> float | None:
     """Latest value cho 1 trong 7 HyperV host performance counter (Phase 1 MVP)."""
     short_key, field_name = _HOST_PERF_FIELD_MAP[metric]
     if _use_cache():
-        snap = _fresh_latest(device, since)
-        if not snap:
-            return None
-        val = snap.get(field_name)
-        return float(val) if val is not None else None
+        snap = _latest_snapshot(device, since)
+        if snap is not _CACHE_MISS:
+            if not snap:
+                return None
+            val = snap.get(field_name)
+            return float(val) if val is not None else None
 
     from apps.metrics.models import SystemHealth
-    rec = (SystemHealth.objects
-           .filter(device=device, timestamp__gte=since, **{f"{field_name}__isnull": False})
+    rec = (_regular_health(SystemHealth.objects
+                           .filter(device=device, timestamp__gte=since, **{f"{field_name}__isnull": False}))
            .order_by("-timestamp")
-           .values_list(field_name, flat=True)
+           .values_list(field_name, "timestamp")
            .first())
-    return float(rec) if rec is not None else None
+    if rec is None or _superseded(rec[1].timestamp()):
+        return None
+    return float(rec[0])
 
 
 def _sustained_host_perf(device: Device, rule: AlertRule, window_since) -> float | None:
     """Sustained version cho 7 HyperV host performance counter — tái dùng _sustained_verdict."""
     short_key, field_name = _HOST_PERF_FIELD_MAP[rule.metric]
+    poll_secs = _expected_poll_secs(device)
+    read_since = _sustain_since(window_since, poll_secs)
+    redis_pairs: list[tuple[float, float]] = []
     if _use_cache():
-        series = metrics_cache.get_sys_series(device.id, window_since)
-        values = [float(s[short_key]) for s in series if s.get(short_key) is not None]
-        return _sustained_verdict(values, rule)
+        redis_pairs = [(s["ts"], float(s[short_key])) for s in metrics_cache.get_sys_series(device.id, read_since)
+                       if s.get(short_key) is not None and s.get("ts") is not None]
 
     from apps.metrics.models import SystemHealth
-    qs = (SystemHealth.objects
-          .filter(device=device, timestamp__gte=window_since, **{f"{field_name}__isnull": False})
-          .order_by("timestamp")
-          .values_list(field_name, flat=True))
-    values = [float(v) for v in qs]
-    return _sustained_verdict(values, rule)
+    rows = (_regular_health(SystemHealth.objects
+                            .filter(device=device, timestamp__gte=read_since, **{f"{field_name}__isnull": False}))
+            .order_by("timestamp")
+            .values_list(field_name, "timestamp"))
+    db_pairs = _drop_superseded([(t.timestamp(), float(v)) for v, t in rows])
+    pairs = _merge_series(redis_pairs, db_pairs)
+    return _sustained_verdict([v for _, v in pairs], rule, stamps=[t for t, _ in pairs],
+                              window_since=window_since, poll_secs=poll_secs)
 
 
 def _latest_ilo(device: Device, since, metric: str) -> float | None:
@@ -240,32 +492,40 @@ def _sustained_ilo(device: Device, rule: AlertRule, window_since) -> float | Non
     cứng rời rạc (không noisy) nên seed rule dùng duration_min=0 (xem seed_alert_rules.py),
     hàm này chỉ giữ nhất quán API nếu ai đổi duration_min>0 qua UI."""
     field_name = _ILO_FIELD_MAP[rule.metric]
+    poll_secs = _expected_poll_secs(device, rule.metric)
     from apps.metrics.models import HardwareHealth
-    qs = (HardwareHealth.objects
-          .filter(device=device, timestamp__gte=window_since, **{f"{field_name}__isnull": False})
-          .order_by("timestamp")
-          .values_list(field_name, flat=True))
-    values = [float(v) for v in qs]
-    return _sustained_verdict(values, rule)
+    rows = list(HardwareHealth.objects
+                .filter(device=device, timestamp__gte=_sustain_since(window_since, poll_secs),
+                        **{f"{field_name}__isnull": False})
+                .order_by("timestamp")
+                .values_list(field_name, "timestamp"))
+    return _sustained_verdict([float(v) for v, _ in rows], rule, stamps=[t.timestamp() for _, t in rows],
+                              window_since=window_since, poll_secs=poll_secs)
 
 
 def _latest_cpu(device: Device, since) -> float | None:
     if _use_cache():
-        snap = _fresh_latest(device, since)
-        return snap.get("cpu") if snap else None
+        snap = _latest_snapshot(device, since)
+        if snap is not _CACHE_MISS:
+            return snap.get("cpu") if snap else None
     from apps.metrics.models import SystemHealth
-    rec = SystemHealth.objects.filter(device=device, timestamp__gte=since).order_by("-timestamp").first()
-    return rec.cpu_percent if rec else None
+    rec = (_regular_health(SystemHealth.objects.filter(device=device, timestamp__gte=since))
+           .order_by("-timestamp").first())
+    if rec is None or _superseded(rec.timestamp.timestamp()):
+        return None
+    return rec.cpu_percent
 
 
 def _latest_mem(device: Device, since) -> float | None:
     if _use_cache():
-        snap = _fresh_latest(device, since)
-        # mem == 0 là sentinel "không đo được" → bỏ qua (xem chú thích DB path bên dưới).
-        return (snap.get("mem") or None) if snap else None
+        snap = _latest_snapshot(device, since)
+        if snap is not _CACHE_MISS:
+            # mem == 0 là sentinel "không đo được" → bỏ qua (xem chú thích DB path bên dưới).
+            return (snap.get("mem") or None) if snap else None
     from apps.metrics.models import SystemHealth
-    rec = SystemHealth.objects.filter(device=device, timestamp__gte=since).order_by("-timestamp").first()
-    if rec is None:
+    rec = (_regular_health(SystemHealth.objects.filter(device=device, timestamp__gte=since))
+           .order_by("-timestamp").first())
+    if rec is None or _superseded(rec.timestamp.timestamp()):
         return None
     # mem_percent == 0 là sentinel "không đo được" (Cisco Business/SMB không expose mem
     # qua SNMP, hoặc walk rỗng) — KHÔNG phải mem thật 0% → bỏ qua, tránh rule lt fire giả.
@@ -408,22 +668,27 @@ def _uplink_statuses(device: Device, interface_ids, since) -> dict[int, str | No
     """Trạng thái MỚI NHẤT (trong cửa sổ `since`) của từng cổng; `None` = không có dữ liệu."""
     ids = list(interface_ids)
     if _use_cache():
-        snap = _fresh_latest(device, since)
-        ifs = (snap or {}).get("interfaces") or {}
-        return {pk: (ifs.get(str(pk)) or {}).get("status") for pk in ids}
+        snap = _latest_snapshot(device, since)
+        if snap is not _CACHE_MISS:
+            ifs = (snap or {}).get("interfaces") or {}
+            return {pk: (ifs.get(str(pk)) or {}).get("status") for pk in ids}
 
     from apps.devices.models import Interface
     from apps.metrics.models import InterfaceStats
     from django.db.models import OuterRef, Subquery
 
     # 1 truy vấn: trạng thái mới nhất của mọi cổng (thay vì N truy vấn).
-    latest_sq = (InterfaceStats.objects
-                 .filter(interface=OuterRef("pk"), timestamp__gte=since)
-                 .order_by("-timestamp")
-                 .values("status")[:1])
-    got = {i.pk: i.latest_status
-           for i in Interface.objects.filter(pk__in=ids).annotate(latest_status=Subquery(latest_sq))}
-    return {pk: got.get(pk) for pk in ids}
+    latest = (InterfaceStats.objects
+              .filter(interface=OuterRef("pk"), timestamp__gte=since)
+              .order_by("-timestamp"))
+    got = {i.pk: (i.latest_status, i.latest_ts)
+           for i in Interface.objects.filter(pk__in=ids).annotate(
+               latest_status=Subquery(latest.values("status")[:1]),
+               latest_ts=Subquery(latest.values("timestamp")[:1]))}
+    # Trạng thái DB đã bị vượt qua bởi lần hồi phục của CHÍNH cổng đó thì không phải "trạng thái hiện tại".
+    return {pk: (None if got.get(pk, (None, None))[1] is not None and _superseded(got[pk][1].timestamp(), pk)
+                 else got.get(pk, (None, None))[0])
+            for pk in ids}
 
 
 def _reduce_if_status(statuses: dict[int, str | None]) -> float | None:
@@ -447,21 +712,24 @@ def _check_if_status(device: Device, since, interface_ids=None) -> float | None:
 
 
 def _port_samples(interface_id: int, window_since) -> list[tuple]:
-    """Mẫu trạng thái (thời điểm, status) của 1 cổng trong cửa sổ, cũ → mới.
+    """Mẫu trạng thái (thời điểm, status) của 1 cổng từ `window_since` trở đi, cũ → mới.
 
-    Cùng nguồn dữ liệu với `_uplink_statuses`: cache-mode đọc if-series Redis, DB-mode đọc `InterfaceStats`."""
+    Cùng nguồn dữ liệu với `_uplink_statuses`: cache-mode đọc if-series Redis, DB-mode đọc `InterfaceStats`. Cache-mode
+    đọc CẢ 2 rồi ghép (xem `_merge_samples`): khi Redis ghi lỗi writer rơi về ghi DB nên chuỗi mẫu có thể vắt qua cả
+    2 nguồn; dòng bằng chứng (đổi trạng thái) trùng thời điểm với mẫu Redis nên được gộp, không đếm đôi."""
+    redis_pairs: list[tuple[float, str | None]] = []
     if _use_cache():
-        return [
-            (metrics_cache.epoch_to_dt(s.get("ts", 0)), s.get("status"))
-            for s in metrics_cache.get_if_series(interface_id, window_since)
-        ]
+        redis_pairs = [(float(s.get("ts", 0)), s.get("status"))
+                       for s in metrics_cache.get_if_series(interface_id, window_since)]
     from apps.metrics.models import InterfaceStats
 
-    return list(
-        InterfaceStats.objects.filter(interface_id=interface_id, timestamp__gte=window_since)
-        .order_by("timestamp")
-        .values_list("timestamp", "status")
-    )
+    db_pairs = _drop_superseded([
+        (ts.timestamp(), status)
+        for ts, status in (InterfaceStats.objects.filter(interface_id=interface_id, timestamp__gte=window_since)
+                           .order_by("timestamp")
+                           .values_list("timestamp", "status"))
+    ], interface_id)
+    return [(metrics_cache.epoch_to_dt(ts), status) for ts, status in _merge_series(redis_pairs, db_pairs)]
 
 
 def _port_down_throughout(device: Device, interface_id: int, window_since) -> bool:
@@ -469,22 +737,20 @@ def _port_down_throughout(device: Device, interface_id: int, window_since) -> bo
 
     Điều kiện FIRE của rule `if_status` có `duration_min>0` (thiết kế B). Bản trước (`_sustained_if_status`)
     trả DOWN ngay khi có BẤT KỲ mẫu không-up nào trong cửa sổ, nên cổng vừa rớt 1 phút — hoặc đã up lại —
-    vẫn nổ. Nay:
-      * mọi mẫu trong cửa sổ phải khác "up" (mẫu thiếu status không phải bằng chứng "down");
-      * mẫu CŨ NHẤT không được cách đầu cửa sổ quá một chu kỳ poll (`ALERT_GRACE_PERIOD_SECS`): cổng mới
-        được thấy down gần đây, hoặc Redis vừa bị xoá, thì chưa có bằng chứng nó đã down đủ `duration_min`;
-      * mẫu MỚI NHẤT phải còn mới (poll không kẹt).
+    vẫn nổ. Nay (cùng hợp đồng độ phủ với mọi nhóm sustained khác, xem `_window_samples`):
+      * mọi mẫu từ mẫu BIÊN (trạng thái đang giữ lúc cửa sổ bắt đầu) đến nay phải khác "up" (mẫu thiếu status
+        không phải bằng chứng "down");
+      * không có mẫu biên = cổng mới được thấy down gần đây, hoặc Redis vừa bị xoá → chưa có bằng chứng nó đã down
+        đủ `duration_min`;
+      * mẫu MỚI NHẤT phải còn mới, không khoảng trống quá ~3 chu kỳ poll — chu kỳ theo nguồn poll THẬT của thiết bị
+        (`_expected_poll_secs`), KHÔNG theo `Device.collect_interval` (không điều khiển beat).
     Hồi phục KHÔNG dùng hàm này: chỉ cần trạng thái mới nhất là "up" (xem `_evaluate_uplink_port`)."""
-    samples = _port_samples(interface_id, window_since)
-    if not samples:
+    poll_secs = _expected_poll_secs(device)
+    samples = _port_samples(interface_id, _sustain_since(window_since, poll_secs))
+    kept = _window_samples([(ts.timestamp(), status) for ts, status in samples], window_since, poll_secs)
+    if kept is None:
         return False
-    if any(status is None or status == "up" for _, status in samples):
-        return False
-    grace_secs = int(getattr(settings, "ALERT_GRACE_PERIOD_SECS", 135))
-    if samples[0][0] > window_since + timedelta(seconds=grace_secs):
-        return False
-    fresh_secs = max(grace_secs, int(getattr(device, "collect_interval", 300) or 300) * 2)
-    return samples[-1][0] >= timezone.now() - timedelta(seconds=fresh_secs)
+    return all(status is not None and status != "up" for _, status in kept)
 
 
 def _peer_name_for_port(device: Device, interface) -> str:
@@ -690,22 +956,28 @@ def _uplink_traffic_max(device: Device, since, direction: str) -> float | None:
 
     field = "in_mbps" if direction == "in" else "out_mbps"
 
+    peak = None
     if _use_cache():
-        peak = None
         for uid in uplink_ids:
             for s in metrics_cache.get_if_series(uid, since):
                 v = s.get(field)
                 if v is not None:
                     peak = float(v) if peak is None else max(peak, float(v))
-        return peak
 
+    # DB luôn được đọc: cache-mode bình thường chỉ có dòng bằng chứng (trùng thời điểm với mẫu Redis nên không đổi
+    # kết quả), còn khi Redis ghi lỗi/mất dữ liệu thì đây là nguồn duy nhất cho mẫu mới.
     from apps.metrics.models import InterfaceStats
-    qs = (InterfaceStats.objects
-          .filter(interface_id__in=uplink_ids, timestamp__gte=since)
-          .order_by(f"-{field}")
-          .values_list(field, flat=True))
-    val = qs.first()
-    return float(val) if val is not None else None
+    qs = InterfaceStats.objects.filter(interface_id__in=uplink_ids, timestamp__gte=since)
+    if _use_cache():
+        # Cache-mode: bỏ mẫu DB đã bị vượt qua bởi lần hồi phục (xem `_recovery_floor`); số dòng nhỏ (chỉ dòng bằng
+        # chứng + mẫu đường lui trong 1 cửa sổ).
+        rows = _drop_superseded([(t.timestamp(), v) for t, v in qs.values_list("timestamp", field) if v is not None])
+        val = max((v for _, v in rows), default=None)
+    else:
+        val = qs.order_by(f"-{field}").values_list(field, flat=True).first()
+    if val is not None:
+        peak = float(val) if peak is None else max(peak, float(val))
+    return peak
 
 
 def _sustained_uplink_traffic_max(device: Device, rule: AlertRule, window_since) -> float | None:
@@ -722,40 +994,35 @@ def _sustained_uplink_traffic_max(device: Device, rule: AlertRule, window_since)
 
     field = "in_mbps" if rule.metric == "uplink_in_mbps_max" else "out_mbps"
 
+    poll_secs = _expected_poll_secs(device)
+    read_since = _sustain_since(window_since, poll_secs)
+    # Ghép THEO TỪNG CỔNG rồi mới lấy max theo lần poll (review ngoài 2026-11-19 lần 3, P2). If-series Redis đẩy riêng
+    # từng cổng nên 1 lần poll có thể có cổng A ở Redis, cổng B chỉ ở DB; tính max riêng từng nguồn rồi ghép "nguồn
+    # trước thắng" làm 50 Mbps của DB bị bỏ khi Redis chỉ có cổng A=5.
+    redis_by_port: dict[int, list[tuple[float, float]]] = {}
     if _use_cache():
-        per_ts: dict = {}
         for uid in uplink_ids:
-            for s in metrics_cache.get_if_series(uid, window_since):
-                ts = s.get("ts")
-                per_ts[ts] = max(per_ts.get(ts, 0.0), float(s.get(field) or 0.0))
-        values = [per_ts[ts] for ts in sorted(per_ts)]
-        return _sustained_verdict(values, rule)
+            redis_by_port[uid] = [(float(s["ts"]), float(s.get(field) or 0.0))
+                                  for s in metrics_cache.get_if_series(uid, read_since) if s.get("ts") is not None]
 
-    from django.db.models import Max
     from apps.metrics.models import InterfaceStats
-    # 1 query: gom max(field) theo từng snapshot timestamp (thay vòng lặp N query).
-    rows = (InterfaceStats.objects
-            .filter(interface_id__in=uplink_ids, timestamp__gte=window_since)
-            .values("timestamp")
-            .annotate(m=Max(field))
-            .order_by("timestamp"))
-    values: list[float] = [float(r["m"] or 0.0) for r in rows]
-    if not values:
+    db_by_port: dict[int, list[tuple[float, float]]] = {}
+    for iid, ts, v in (InterfaceStats.objects
+                       .filter(interface_id__in=uplink_ids, timestamp__gte=read_since)
+                       .order_by("timestamp")
+                       .values_list("interface_id", "timestamp", field)):
+        db_by_port.setdefault(iid, []).append((ts.timestamp(), float(v or 0.0)))
+    db_kept = {uid: _drop_superseded(db_by_port.get(uid, [])) for uid in uplink_ids}
+    # Đuôi DB đã cũ hơn mốc: xét trên TOÀN thiết bị (không từng cổng) — 1 cổng không có mẫu ở lần poll mới nhất không phải
+    # bằng chứng mẫu mới đã mất.
+    if _db_tail_is_stale([p for v in redis_by_port.values() for p in v], [p for v in db_kept.values() for p in v]):
         return None
-
-    latest = float(values[-1])
-    threshold = float(rule.threshold)
-    cond = rule.condition
-
-    if cond in ("gt", "gte"):
-        ok = (min(values) > threshold) if cond == "gt" else (min(values) >= threshold)
-        return latest if ok else None
-    if cond in ("lt", "lte"):
-        ok = (max(values) < threshold) if cond == "lt" else (max(values) <= threshold)
-        return latest if ok else None
-
-    cond_fn = CONDITION_FN.get(cond)
-    return latest if (cond_fn and cond_fn(latest, threshold)) else None
+    points: list[tuple[float, float]] = []
+    for uid in uplink_ids:
+        points.extend(_merge_samples(redis_by_port.get(uid, []), db_kept[uid]))
+    pairs = _after_loss(_max_per_poll(points))
+    return _sustained_verdict([v for _, v in pairs], rule, stamps=[t for t, _ in pairs],
+                              window_since=window_since, poll_secs=poll_secs)
 
 
 def _sustained_vm_metric(device: Device, rule: AlertRule, window_since) -> float | None:
@@ -765,72 +1032,61 @@ def _sustained_vm_metric(device: Device, rule: AlertRule, window_since) -> float
     then require the condition to hold for ALL snapshots in the window.
     Returns latest snapshot value (for messaging) if sustained, else None.
     """
+    poll_secs = _expected_poll_secs(device)
+    read_since = _sustain_since(window_since, poll_secs)
+    redis_pairs: list[tuple[float, float]] = []
     if _use_cache():
         field = "vmr" if rule.metric == "vm_count_running" else "vmu"
-        series = metrics_cache.get_sys_series(device.id, window_since)
-        values = [float(s[field]) for s in series if field in s]
-        return _sustained_verdict(values, rule)
+        redis_pairs = [(s["ts"], float(s[field])) for s in metrics_cache.get_sys_series(device.id, read_since)
+                       if field in s and s.get("ts") is not None]
 
     from django.db.models import Count
     from apps.metrics.models import VMStats
 
     # timestamps present in window (snapshots)
     timestamps = list(
-        VMStats.objects.filter(device=device, timestamp__gte=window_since)
+        VMStats.objects.filter(device=device, timestamp__gte=read_since)
         .order_by("timestamp")
         .values_list("timestamp", flat=True)
         .distinct()
     )
-    if not timestamps:
-        return None
+    db_pairs: list[tuple[float, float]] = []
+    if timestamps:
+        # 1 query gom nhóm theo timestamp; snapshot không khớp điều kiện → count = 0.
+        if rule.metric == "vm_count_running":
+            rows = (VMStats.objects
+                    .filter(device=device, timestamp__gte=read_since, state="Running")
+                    .values("timestamp").annotate(c=Count("id")))
+        elif rule.metric == "vm_repl_unhealthy":
+            _HEALTHY = {"Normal", "NotConfigured"}
+            rows = (VMStats.objects
+                    .filter(device=device, timestamp__gte=read_since)
+                    .exclude(repl_health__in=_HEALTHY)
+                    .values("timestamp").annotate(c=Count("id")))
+        else:
+            return None
+        counts = {r["timestamp"]: r["c"] for r in rows}
+        db_pairs = _drop_superseded([(ts.timestamp(), float(counts.get(ts, 0))) for ts in timestamps])
 
-    # 1 query gom nhóm theo timestamp; snapshot không khớp điều kiện → count = 0.
-    if rule.metric == "vm_count_running":
-        rows = (VMStats.objects
-                .filter(device=device, timestamp__gte=window_since, state="Running")
-                .values("timestamp").annotate(c=Count("id")))
-    elif rule.metric == "vm_repl_unhealthy":
-        _HEALTHY = {"Normal", "NotConfigured"}
-        rows = (VMStats.objects
-                .filter(device=device, timestamp__gte=window_since)
-                .exclude(repl_health__in=_HEALTHY)
-                .values("timestamp").annotate(c=Count("id")))
-    else:
-        return None
-
-    counts = {r["timestamp"]: r["c"] for r in rows}
-    values: list[float] = [float(counts.get(ts, 0)) for ts in timestamps]
-    if not values:
-        return None
-
-    latest = float(values[-1])
-    threshold = float(rule.threshold)
-    cond = rule.condition
-
-    if cond in ("gt", "gte"):
-        ok = (min(values) > threshold) if cond == "gt" else (min(values) >= threshold)
-        return latest if ok else None
-    if cond in ("lt", "lte"):
-        ok = (max(values) < threshold) if cond == "lt" else (max(values) <= threshold)
-        return latest if ok else None
-
-    cond_fn = CONDITION_FN.get(cond)
-    return latest if (cond_fn and cond_fn(latest, threshold)) else None
+    pairs = _merge_series(redis_pairs, db_pairs)
+    return _sustained_verdict([v for _, v in pairs], rule, stamps=[t for t, _ in pairs],
+                              window_since=window_since, poll_secs=poll_secs)
 
 
 def _count_vms_running(device: Device, since) -> float | None:
     if _use_cache():
-        snap = _fresh_latest(device, since)
-        if not snap:
-            return None
-        vms = snap.get("vms") or []
-        if not vms:  # không có VM ghi nhận → None (đồng nhất DB path)
-            return None
-        return float(sum(1 for v in vms if v.get("state") == "Running"))
+        snap = _latest_snapshot(device, since)
+        if snap is not _CACHE_MISS:
+            if not snap:
+                return None
+            vms = snap.get("vms") or []
+            if not vms:  # không có VM ghi nhận → None (đồng nhất DB path)
+                return None
+            return float(sum(1 for v in vms if v.get("state") == "Running"))
     from apps.metrics.models import VMStats
     latest = (VMStats.objects.filter(device=device, timestamp__gte=since)
               .order_by("-timestamp").values("timestamp").first())
-    if not latest:
+    if not latest or _superseded(latest["timestamp"].timestamp()):
         return None
     return float(VMStats.objects.filter(
         device=device, timestamp=latest["timestamp"], state="Running"
@@ -840,17 +1096,18 @@ def _count_vms_running(device: Device, since) -> float | None:
 def _count_vms_repl_unhealthy(device: Device, since) -> float | None:
     _HEALTHY = {"Normal", "NotConfigured"}
     if _use_cache():
-        snap = _fresh_latest(device, since)
-        if not snap:
-            return None
-        vms = snap.get("vms") or []
-        if not vms:
-            return None
-        return float(sum(1 for v in vms if (v.get("repl_health") or "") not in _HEALTHY))
+        snap = _latest_snapshot(device, since)
+        if snap is not _CACHE_MISS:
+            if not snap:
+                return None
+            vms = snap.get("vms") or []
+            if not vms:
+                return None
+            return float(sum(1 for v in vms if (v.get("repl_health") or "") not in _HEALTHY))
     from apps.metrics.models import VMStats
     latest = (VMStats.objects.filter(device=device, timestamp__gte=since)
               .order_by("-timestamp").values("timestamp").first())
-    if not latest:
+    if not latest or _superseded(latest["timestamp"].timestamp()):
         return None
     return float(VMStats.objects.filter(
         device=device, timestamp=latest["timestamp"]
@@ -901,16 +1158,17 @@ def _wifi_client_count_at_ts(device: Device, ts) -> float:
 def _wifi_client_count(device: Device, since) -> float | None:
     """Tổng số client WiFi ở snapshot mới nhất của WLAN controller."""
     if _use_cache():
-        snap = _fresh_latest(device, since)
-        if not snap:
-            return None
-        clients = snap.get("wifi_clients")
-        aps = snap.get("wifi_aps")
-        if not clients and not aps:
-            return None
-        if clients:
-            return float(len(clients))
-        return float(sum(int(a.get("client_count") or 0) for a in (aps or [])))
+        snap = _latest_snapshot(device, since)
+        if snap is not _CACHE_MISS:
+            if not snap:
+                return None
+            clients = snap.get("wifi_clients")
+            aps = snap.get("wifi_aps")
+            if not clients and not aps:
+                return None
+            if clients:
+                return float(len(clients))
+            return float(sum(int(a.get("client_count") or 0) for a in (aps or [])))
 
     from apps.metrics.models import WifiClientStats, WifiApStats
 
@@ -925,42 +1183,31 @@ def _wifi_client_count(device: Device, since) -> float | None:
                      .order_by("-timestamp")
                      .values_list("timestamp", flat=True)
                      .first())
-    if latest_ts is None:
+    if latest_ts is None or _superseded(latest_ts.timestamp()):
         return None
     return _wifi_client_count_at_ts(device, latest_ts)
 
 
 def _sustained_wifi_client_count(device: Device, rule: AlertRule, window_since) -> float | None:
+    poll_secs = _expected_poll_secs(device)
+    read_since = _sustain_since(window_since, poll_secs)
+    redis_pairs: list[tuple[float, float]] = []
     if _use_cache():
-        series = metrics_cache.get_sys_series(device.id, window_since)
-        values = [float(s["wc"]) for s in series if "wc" in s]
-        return _sustained_verdict(values, rule)
+        redis_pairs = [(s["ts"], float(s["wc"])) for s in metrics_cache.get_sys_series(device.id, read_since)
+                       if "wc" in s and s.get("ts") is not None]
 
     from apps.metrics.models import WifiApStats
 
     timestamps = list(
-        WifiApStats.objects.filter(device=device, timestamp__gte=window_since)
+        WifiApStats.objects.filter(device=device, timestamp__gte=read_since)
         .order_by("timestamp")
         .values_list("timestamp", flat=True)
         .distinct()
     )
-    if not timestamps:
-        return None
-
-    values = [_wifi_client_count_at_ts(device, ts) for ts in timestamps]
-    latest = float(values[-1])
-    threshold = float(rule.threshold)
-    cond = rule.condition
-
-    if cond in ("gt", "gte"):
-        ok = (min(values) > threshold) if cond == "gt" else (min(values) >= threshold)
-        return latest if ok else None
-    if cond in ("lt", "lte"):
-        ok = (max(values) < threshold) if cond == "lt" else (max(values) <= threshold)
-        return latest if ok else None
-
-    cond_fn = CONDITION_FN.get(cond)
-    return latest if (cond_fn and cond_fn(latest, threshold)) else None
+    db_pairs = _drop_superseded([(ts.timestamp(), _wifi_client_count_at_ts(device, ts)) for ts in timestamps])
+    pairs = _merge_series(redis_pairs, db_pairs)
+    return _sustained_verdict([v for _, v in pairs], rule, stamps=[t for t, _ in pairs],
+                              window_since=window_since, poll_secs=poll_secs)
 
 
 def _wifi_ap_offline_at_ts(device: Device, ts) -> float:
@@ -971,36 +1218,25 @@ def _wifi_ap_offline_at_ts(device: Device, ts) -> float:
 
 
 def _sustained_wifi_ap_offline_count(device: Device, rule: AlertRule, window_since) -> float | None:
+    poll_secs = _expected_poll_secs(device)
+    read_since = _sustain_since(window_since, poll_secs)
+    redis_pairs: list[tuple[float, float]] = []
     if _use_cache():
-        series = metrics_cache.get_sys_series(device.id, window_since)
-        values = [float(s["wao"]) for s in series if "wao" in s]
-        return _sustained_verdict(values, rule)
+        redis_pairs = [(s["ts"], float(s["wao"])) for s in metrics_cache.get_sys_series(device.id, read_since)
+                       if "wao" in s and s.get("ts") is not None]
 
     from apps.metrics.models import WifiApStats
 
     timestamps = list(
-        WifiApStats.objects.filter(device=device, timestamp__gte=window_since)
+        WifiApStats.objects.filter(device=device, timestamp__gte=read_since)
         .order_by("timestamp")
         .values_list("timestamp", flat=True)
         .distinct()
     )
-    if not timestamps:
-        return None
-
-    values = [_wifi_ap_offline_at_ts(device, ts) for ts in timestamps]
-    latest = float(values[-1])
-    threshold = float(rule.threshold)
-    cond = rule.condition
-
-    if cond in ("gt", "gte"):
-        ok = (min(values) > threshold) if cond == "gt" else (min(values) >= threshold)
-        return latest if ok else None
-    if cond in ("lt", "lte"):
-        ok = (max(values) < threshold) if cond == "lt" else (max(values) <= threshold)
-        return latest if ok else None
-
-    cond_fn = CONDITION_FN.get(cond)
-    return latest if (cond_fn and cond_fn(latest, threshold)) else None
+    db_pairs = _drop_superseded([(ts.timestamp(), _wifi_ap_offline_at_ts(device, ts)) for ts in timestamps])
+    pairs = _merge_series(redis_pairs, db_pairs)
+    return _sustained_verdict([v for _, v in pairs], rule, stamps=[t for t, _ in pairs],
+                              window_since=window_since, poll_secs=poll_secs)
 
 
 def _wifi_ap_offline_count(device: Device, since) -> float | None:
@@ -1011,20 +1247,21 @@ def _wifi_ap_offline_count(device: Device, since) -> float | None:
     rule device_online riêng).
     """
     if _use_cache():
-        snap = _fresh_latest(device, since)
-        if not snap:
-            return None
-        aps = snap.get("wifi_aps")
-        if not aps:  # AC không có AP ghi nhận → None (đồng nhất DB path)
-            return None
-        return float(sum(1 for a in aps if not a.get("is_online")))
+        snap = _latest_snapshot(device, since)
+        if snap is not _CACHE_MISS:
+            if not snap:
+                return None
+            aps = snap.get("wifi_aps")
+            if not aps:  # AC không có AP ghi nhận → None (đồng nhất DB path)
+                return None
+            return float(sum(1 for a in aps if not a.get("is_online")))
 
     from apps.metrics.models import WifiApStats
     latest_ts = (WifiApStats.objects
                  .filter(device=device, timestamp__gte=since)
                  .order_by("-timestamp")
                  .values_list("timestamp", flat=True).first())
-    if latest_ts is None:
+    if latest_ts is None or _superseded(latest_ts.timestamp()):
         return None
     return float(WifiApStats.objects.filter(
         device=device, timestamp=latest_ts, is_online=False).count())
@@ -1176,7 +1413,15 @@ def check_device_alerts(device: Device, since) -> None:
 
 
 def _evaluate_rule(device: Device, rule: AlertRule, since) -> None:
-    """Đánh giá 1 rule cho 1 thiết bị: đọc giá trị rồi quyết định fire / resolve / giữ nguyên."""
+    """Đánh giá 1 rule cho 1 thiết bị: đọc giá trị rồi quyết định fire / resolve / giữ nguyên.
+
+    Chạy trong `_recovery_evidence_for`: mọi lần đọc mẫu DB đường lui biết alert nào đang được đánh giá để bỏ mẫu đã bị
+    vượt qua bởi lần hồi phục của chính alert đó (review ngoài 2026-11-19 lần 3, P1)."""
+    with _recovery_evidence_for(device, rule):
+        _evaluate_rule_body(device, rule, since)
+
+
+def _evaluate_rule_body(device: Device, rule: AlertRule, since) -> None:
     getter = METRIC_GETTERS.get(rule.metric)
     if not getter:
         return
@@ -1254,7 +1499,7 @@ def _persist_incident_snapshot(device: Device) -> None:
     snap = metrics_cache.get_latest(device.id)
     if not snap or snap.get("ts") is None:
         return
-    from apps.metrics.models import SystemHealth, VolumeStats
+    from apps.metrics.models import EVIDENCE_KEY, SystemHealth, VolumeStats
     try:
         ts = metrics_cache.epoch_to_dt(snap["ts"])
         if not SystemHealth.objects.filter(device=device, timestamp=ts).exists():
@@ -1264,7 +1509,9 @@ def _persist_incident_snapshot(device: Device) -> None:
                 cpu_percent=snap.get("cpu") or 0,
                 mem_percent=snap.get("mem") or 0,
                 uptime_secs=snap.get("uptime"),
-                extra=snap.get("extra") or {},
+                # Dấu bằng chứng: bản sao mẫu poll cũ, KHÔNG phải mẫu mới — getter alert phải bỏ qua khi đọc DB
+                # làm đường lui (xem `EVIDENCE_KEY`).
+                extra={**(snap.get("extra") or {}), EVIDENCE_KEY: True},
                 cpu_hv_percent=snap.get("cpu_hv_percent"),
                 mem_available_mb=snap.get("mem_available_mb"),
                 disk_read_iops=snap.get("disk_read_iops"),

@@ -76,6 +76,52 @@ def _resolve_window(request) -> tuple[datetime, datetime, str]:
     return now - delta, now, source
 
 
+def _merge_by_ts(*sources: list[dict]) -> list[dict]:
+    """Ghép các chuỗi mẫu `{"ts": epoch giây, ...}` (Redis + DB) theo thời điểm, cũ → mới.
+
+    Cache-mode có 2 nguồn cho cùng 1 chuỗi: Redis (nguồn chủ) và DB (writer rơi về ghi DB khi Redis ghi lỗi; dòng bằng
+    chứng là bản sao của mẫu Redis). Chỉ đọc 1 nguồn — hoặc chọn nguồn theo "Redis có dữ liệu không" — làm mẫu mới nhất ở
+    DB bị che bởi mẫu Redis cũ (review ngoài 2026-11-19 lần 4, P2). Mẫu cách nhau <1s là cùng 1 lần poll (làm tròn Redis ↔
+    DB khác nhau) nên chỉ vẽ 1 lần."""
+    items = sorted((s for src in sources for s in src if s.get("ts") is not None), key=lambda s: s["ts"])
+    merged: list[dict] = []
+    for s in items:
+        if merged and s["ts"] - merged[-1]["ts"] < 1.0:
+            continue
+        merged.append(s)
+    return merged
+
+
+def _db_sys_samples(device: Device, since, until=None) -> list[dict]:
+    """`SystemHealth` → cùng dạng mẫu với ring-buffer Redis (`ts`, `cpu`, `mem` + host-perf theo short-key)."""
+    qs = SystemHealth.objects.filter(device=device, timestamp__gte=since)
+    if until is not None:
+        qs = qs.filter(timestamp__lte=until)
+    out: list[dict] = []
+    for r in qs.order_by("timestamp").values("timestamp", "cpu_percent", "mem_percent", *_HOST_PERF_DB_FIELDS):
+        sample = {"ts": r["timestamp"].timestamp(), "cpu": r["cpu_percent"], "mem": r["mem_percent"]}
+        for field, short_key in _HOST_PERF_CACHE_KEYS.items():
+            if r[field] is not None:
+                sample[short_key] = r[field]
+        out.append(sample)
+    return out
+
+
+def _db_if_samples(iface_ids, since, until=None) -> dict[int, list[dict]]:
+    """`InterfaceStats` theo từng cổng, cùng dạng mẫu với if-series Redis."""
+    qs = InterfaceStats.objects.filter(interface_id__in=list(iface_ids), timestamp__gte=since)
+    if until is not None:
+        qs = qs.filter(timestamp__lte=until)
+    by_iface: dict[int, list[dict]] = defaultdict(list)
+    for r in qs.order_by("interface_id", "timestamp").values(
+            "interface_id", "timestamp", "status", "in_mbps", "out_mbps", "in_errors", "out_errors"):
+        by_iface[r["interface_id"]].append({
+            "ts": r["timestamp"].timestamp(), "status": r["status"], "in_mbps": r["in_mbps"],
+            "out_mbps": r["out_mbps"], "in_errors": r["in_errors"], "out_errors": r["out_errors"],
+        })
+    return by_iface
+
+
 def _downsample(rows: list, max_points: int | None = None) -> list:
     """Lấy mẫu thưa list (đã sort theo thời gian) xuống ≤ max_points, giữ điểm cuối.
 
@@ -206,6 +252,12 @@ def _timeline_samples_cache(device, since, until, grace_secs, source):
     samples = [metrics_cache.epoch_to_dt(s["ts"])
                for s in metrics_cache.get_sys_series(device.id, start)
                if s.get("ts") is not None and start_ts <= s["ts"] <= until_ts]
+    # Redis ghi lỗi nhưng đọc được → mẫu mới nằm ở DB (writer rơi về ghi DB); Redis trống → DB là nguồn duy nhất. Luôn
+    # gộp cả hai (review 2026-11-19 lần 4, P2). Trùng thời điểm vô hại: vòng duyệt bên dưới chỉ cần "có mẫu ≤ mốc".
+    samples.extend(SystemHealth.objects
+                   .filter(device=device, timestamp__lte=until, timestamp__gte=start)
+                   .values_list("timestamp", flat=True))
+    samples.sort()
     return samples, grace_secs
 
 
@@ -213,18 +265,22 @@ def _device_metrics_raw(device: Device, since, until) -> JsonResponse:
     """Query raw SystemHealth data (cache-mode: từ ring-buffer sys trong Redis)."""
     if metrics_cache.is_cache_mode():
         until_ts = until.timestamp()
-        series = [s for s in metrics_cache.get_sys_series(device.id, since)
-                  if s.get("ts") is not None and s["ts"] <= until_ts]
-        rows = _downsample(series)
-        span = until - since
-        data = {
-            "labels":      [_format_timestamp(metrics_cache.epoch_to_dt(r["ts"]), "raw", span) for r in rows],
-            "cpu_percent": [r.get("cpu") for r in rows],
-            "mem_percent": [r.get("mem") for r in rows],
-            "source":      "raw",
-        }
-        _attach_host_perf_cache(data, rows)
-        return JsonResponse(data)
+        redis_series = [s for s in metrics_cache.get_sys_series(device.id, since)
+                        if s.get("ts") is not None and s["ts"] <= until_ts]
+        # Ghép Redis + DB theo thời điểm (không chọn 1 nguồn): Redis ghi lỗi mà đọc được thì mẫu mới ở DB, Redis trống
+        # thì DB là nguồn duy nhất (review 2026-11-19 lần 4, P2; F01 lần 1 chỉ xử lý ca Redis TRỐNG).
+        series = _merge_by_ts(redis_series, _db_sys_samples(device, since, until))
+        if series:
+            rows = _downsample(series)
+            span = until - since
+            data = {
+                "labels":      [_format_timestamp(metrics_cache.epoch_to_dt(r["ts"]), "raw", span) for r in rows],
+                "cpu_percent": [r.get("cpu") for r in rows],
+                "mem_percent": [r.get("mem") for r in rows],
+                "source":      "raw",
+            }
+            _attach_host_perf_cache(data, rows)
+            return JsonResponse(data)
 
     qs = (SystemHealth.objects
           .filter(device=device, timestamp__gte=since, timestamp__lte=until)
@@ -394,9 +450,14 @@ def _interface_metrics_raw(iface_qs, since, until) -> JsonResponse:
         span = until - since
         until_ts = until.timestamp()
         results = []
-        for iface in iface_qs:
-            series = [s for s in metrics_cache.get_if_series(iface.id, since)
-                      if s.get("ts") is not None and s["ts"] <= until_ts]
+        ifaces = list(iface_qs)
+        # Ghép THEO TỪNG CỔNG: 1 cổng có cache không được làm cổng khác chỉ có dữ liệu DB bị bỏ qua (cờ "Redis có dữ liệu"
+        # tính chung cho mọi cổng ở bản trước) — review 2026-11-19 lần 4, P2.
+        db_by_iface = _db_if_samples([i.id for i in ifaces], since, until)
+        for iface in ifaces:
+            redis_series = [s for s in metrics_cache.get_if_series(iface.id, since)
+                            if s.get("ts") is not None and s["ts"] <= until_ts]
+            series = _merge_by_ts(redis_series, db_by_iface.get(iface.id, []))
             stats = _downsample(series)
             results.append({
                 "port":           iface.name,

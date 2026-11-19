@@ -456,7 +456,7 @@ class TestCacheMode:
 
     def _snapshot(self, mocker, statuses):
         mocker.patch(
-            "apps.alerts.engine._fresh_latest",
+            "apps.alerts.engine._latest_snapshot",
             return_value={"interfaces": {str(pk): {"status": s} for pk, s in statuses.items()}},
         )
 
